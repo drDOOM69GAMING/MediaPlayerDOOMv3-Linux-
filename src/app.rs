@@ -87,6 +87,7 @@ pub(crate) struct PlayerApp {
     pub(crate) history_path: PathBuf,
     pub(crate) lib_tx: Sender<LibCmd>,
     pub(crate) net_tx: Sender<NetCmd>,
+    pub(crate) web_tx: Sender<NetCmd>,
     pub(crate) yt_tx: Sender<YtCmd>,
     pub(crate) msg_rx: Receiver<Msg>,
     pub(crate) status: String,
@@ -108,6 +109,8 @@ pub(crate) struct PlayerApp {
     pub(crate) art_all_pending: HashSet<String>,
     pub(crate) web_all_pending: HashSet<String>,
     pub(crate) meta_all_active: bool,
+    pub(crate) no_art: HashSet<String>,
+    pub(crate) no_art_dirty: bool,
     pub(crate) pl_view_h: f32,
     pub(crate) playing_pl_idx: Option<usize>,
     pub(crate) pl_last_cur: Option<usize>,
@@ -259,6 +262,13 @@ impl PlayerApp {
             .unwrap_or_default()
     }
 
+    fn load_no_art() -> HashSet<String> {
+        std::fs::read(missing_art_path())
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default()
+    }
+
     pub(crate) fn new(cc: &eframe::CreationContext<'_>) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         #[cfg(target_os = "windows")]
         apply_taskbar_icon(cc);
@@ -320,6 +330,7 @@ impl PlayerApp {
         let video_clock = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
         let (lib_tx, lib_rx) = channel::<LibCmd>();
         let (net_tx, net_rx) = channel::<NetCmd>();
+        let (web_tx, web_rx) = channel::<NetCmd>();
         let (yt_tx, yt_rx) = channel::<YtCmd>();
         let (msg_tx, msg_rx) = channel::<Msg>();
         {
@@ -330,6 +341,12 @@ impl PlayerApp {
         {
             let tx = msg_tx.clone();
             thread::spawn(move || net_loop(net_rx, tx));
+        }
+        let web_rx = std::sync::Arc::new(std::sync::Mutex::new(web_rx));
+        for _ in 0..6 {
+            let rx = std::sync::Arc::clone(&web_rx);
+            let tx = msg_tx.clone();
+            thread::spawn(move || web_art_loop(rx, tx));
         }
         {
             let tx = msg_tx.clone();
@@ -364,6 +381,7 @@ impl PlayerApp {
             history_path,
             lib_tx,
             net_tx,
+            web_tx,
             yt_tx,
             msg_rx,
             status: format!("{} v{} - ready", APP_NAME, APP_VERSION),
@@ -385,6 +403,8 @@ impl PlayerApp {
             art_all_pending: HashSet::new(),
             web_all_pending: HashSet::new(),
             meta_all_active: false,
+            no_art: Self::load_no_art(),
+            no_art_dirty: false,
             pl_view_h: 300.0,
             playing_pl_idx: None,
             pl_last_cur: None,
@@ -655,6 +675,17 @@ video_ended: false,
         }
     }
 
+    pub(crate) fn save_no_art(&mut self) {
+        if !self.no_art_dirty {
+            return;
+        }
+        if let Ok(json) = serde_json::to_string(&self.no_art) {
+            if std::fs::write(missing_art_path(), json).is_ok() {
+                self.no_art_dirty = false;
+            }
+        }
+    }
+
     /// "Meta All": batch-fetch tags + cover art for every track in the current
     /// playlist into the local %APPDATA% cache. Tags stream back via the tag
     /// worker, covers are scanned locally by the art worker and any track still
@@ -678,12 +709,15 @@ video_ended: false,
         let have_meta = pl.len() - need_meta.len();
         let need_art: Vec<String> = pl
             .iter()
-            .filter(|p| !art_cache_path(p).is_file() && !self.art_all_pending.contains(*p))
+            .filter(|p| !art_cache_path(p).is_file() && !self.no_art.contains(*p) && !self.art_all_pending.contains(*p))
             .cloned()
             .collect();
         let have_art = pl.len() - need_art.len();
         if need_meta.is_empty() && need_art.is_empty() {
-            self.set_status(format!("Meta All: every playlist track is already cached locally ({} tracks)", pl.len()));
+            self.set_status(format!(
+                "All done here! Everything is already cached locally ({} tracks) - add more music and hit Meta All again to download more.",
+                pl.len()
+            ));
             return;
         }
         self.meta_all_active = true;
@@ -710,8 +744,21 @@ video_ended: false,
         if self.meta_all_pending.is_empty() && self.art_all_pending.is_empty() && self.web_all_pending.is_empty() {
             self.meta_all_active = false;
             let total = self.state.playlist.len();
-            self.set_status(format!("Meta All done: tags + covers cached locally for {} tracks", total));
+            let no_art_cnt = self.state.playlist
+                .iter()
+                .filter(|p| self.no_art.contains(*p) && !art_cache_path(p).is_file())
+                .count();
+            let tail = if no_art_cnt > 0 {
+                format!(" ({} found no art - remembered so they're skipped next time)", no_art_cnt)
+            } else {
+                String::new()
+            };
+            self.set_status(format!(
+                "All done here! Tags + covers cached for {} tracks{} - add more music and hit Meta All again to download more meta.",
+                total, tail
+            ));
             self.save_meta_cache();
+            self.save_no_art();
         }
     }
 
@@ -931,11 +978,18 @@ video_ended: false,
                             if artist != "Unknown" && album != "Unknown" && !self.web_all_pending.contains(&p) {
                                 self.web_all_pending.insert(p.clone());
                                 web.push((p, artist, album));
+                            } else if artist == "Unknown" || album == "Unknown" {
+                                // Tags are known but there's nothing to web-search
+                                // with - and no local art was found. Remember this
+                                // track as art-less so Meta All skips it next run.
+                                if self.no_art.insert(p.clone()) {
+                                    self.no_art_dirty = true;
+                                }
                             }
                         }
                     }
                     for (p, a, al) in web {
-                        let _ = self.net_tx.send(NetCmd::WebArtFor { path: p, artist: a, album: al });
+                        let _ = self.web_tx.send(NetCmd::WebArtFor { path: p, artist: a, album: al });
                     }
                     self.meta_all_tick(format!("Meta All: {} covers, {} web left", self.art_all_pending.len(), self.web_all_pending.len()));
                 }
@@ -943,8 +997,18 @@ video_ended: false,
                     self.web_all_pending.remove(&path);
                     if let Some(b) = bytes {
                         if let Some(nb) = normalize_art(&b) {
-                            let _ = write_art_cache(&path, &nb);
+                            if write_art_cache(&path, &nb) {
+                                if self.no_art.remove(&path) {
+                                    self.no_art_dirty = true;
+                                }
+                            } else if self.no_art.insert(path.clone()) {
+                                self.no_art_dirty = true;
+                            }
+                        } else if self.no_art.insert(path.clone()) {
+                            self.no_art_dirty = true;
                         }
+                    } else if self.no_art.insert(path.clone()) {
+                        self.no_art_dirty = true;
                     }
                     self.meta_all_tick(format!("Meta All: {} web art left", self.web_all_pending.len()));
                 }
@@ -1178,6 +1242,9 @@ video_ended: false,
         if self.meta_cache_dirty && self.meta_cache_last_save.elapsed() > Duration::from_secs(3) {
             self.save_meta_cache();
         }
+        if self.no_art_dirty && self.meta_cache_last_save.elapsed() > Duration::from_secs(3) {
+            self.save_no_art();
+        }
     }
 
     pub(crate) fn load_art_texture(&mut self, bytes: Vec<u8>) {
@@ -1200,6 +1267,7 @@ impl std::ops::Drop for PlayerApp {
         self.close_video();
         self.stop_radio();
         self.save_meta_cache();
+        self.save_no_art();
         self.save_settings();
         self.save_history();
         self.sink.stop();

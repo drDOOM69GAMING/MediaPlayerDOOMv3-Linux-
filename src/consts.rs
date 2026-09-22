@@ -2,7 +2,7 @@
 #![allow(dead_code)]
 // App-wide constants.
 pub const APP_NAME: &str = "Random Shuffle Player";
-pub const APP_VERSION: &str = "3.0.0";
+pub const APP_VERSION: &str = "3.0.1";
 
 pub const AUDIO_FORMATS: [&str; 16] = [
     "mp3", "wav", "flac", "m4a", "m4b", "m4p", "ogg", "oga", "aac", "aiff", "aif", "wma", "wv", "mpc", "opus", "webm",

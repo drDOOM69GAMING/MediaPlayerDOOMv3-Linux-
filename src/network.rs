@@ -16,14 +16,34 @@ pub fn net_loop(rx: Receiver<NetCmd>, tx: Sender<Msg>) {
                     let bytes = fetch_web_art(&artist, &album);
                     let _ = tx.send(Msg::ArtWeb { bytes });
                 }
-                NetCmd::WebArtFor { path, artist, album } => {
-                    let bytes = fetch_web_art(&artist, &album);
-                    let _ = tx.send(Msg::ArtWebFor { path, bytes });
+                NetCmd::WebArtFor { .. } => {
+                    // "Meta All" web lookups are handled by the parallel
+                    // web_art_loop pool, not the single net thread.
                 }
                 NetCmd::Lyrics(artist, title) => {
                     let text = fetch_lyrics(&artist, &title);
                     let _ = tx.send(Msg::Lyrics { artist, title, text });
                 }
+            }
+        }));
+    }
+}
+
+/// Dedicated worker pool for "Meta All" web art. Runs on its own channel so
+/// several iTunes/artwork lookups happen in parallel instead of one slow
+/// sequential stream on the single net thread - a big library would otherwise
+/// sit at "N web art left" for hours and never finish.
+pub fn web_art_loop(rx: std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Receiver<NetCmd>>>, tx: Sender<Msg>) {
+    loop {
+        let cmd = {
+            let guard = rx.lock().unwrap();
+            guard.recv()
+        };
+        let Ok(cmd) = cmd else { break };
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if let NetCmd::WebArtFor { path, artist, album } = cmd {
+                let bytes = fetch_web_art(&artist, &album);
+                let _ = tx.send(Msg::ArtWebFor { path, bytes });
             }
         }));
     }

@@ -85,6 +85,13 @@ pub fn meta_cache_path() -> PathBuf {
     data_dir().join("metacache.json")
 }
 
+/// Persistent list of paths confirmed to have no cover art (no folder/image
+/// file, no embedded picture, and no web match). Lets "Meta All" skip tracks
+/// that already came up empty instead of re-scanning them every run.
+pub fn missing_art_path() -> PathBuf {
+    data_dir().join("missing_art.json")
+}
+
 /// On-disk cover art cache keyed by song path hash, normalized to small JPEGs.
 pub fn artcache_dir() -> PathBuf {
     let d = data_dir().join("artcache");

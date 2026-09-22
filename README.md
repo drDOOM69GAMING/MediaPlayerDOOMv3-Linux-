@@ -75,6 +75,12 @@ This app is built on the work of some incredible open-source projects, and it wo
 
 Full details, license texts, and donation links are in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). If you can, consider donating to FFmpeg, yt-dlp, and MKVToolNix - they give this all away for free.
 
+## v3.0.1 changelog
+
+- **Meta All is now truly idempotent and honest**: tracks confirmed to have no cover art anywhere (no local picture, no iTunes match) are remembered in `%APPDATA%\MediaPlayerOFDOOM\missing_art.json` and skipped on every future run, so re-clicking Meta All does zero re-scanning and reports the real state - "All done here! Everything is already cached locally (N tracks) - add more music and hit Meta All again to download more meta."
+- **Parallel web art**: cover lookups for a big missing-art batch now run through a dedicated **6-worker pool** instead of one slow sequential stream on the net thread - a library with thousands of missing covers drains in minutes and each result is persisted the moment it lands, so interrupted runs resume instead of repeating.
+- Version bump to **v3.0.1**
+
 ## v3.0.0 changelog
 
 - **Local metadata cache** - the new **Meta All** button on the playlist toolbar downloads tags (title/artist/album/duration) and cover art for every track in the current playlist into `%APPDATA%\MediaPlayerOFDOOM\metacache.json` + `artcache\`, so:
