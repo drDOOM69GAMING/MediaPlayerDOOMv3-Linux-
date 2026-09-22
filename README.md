@@ -49,7 +49,7 @@ The binary lands at `target/release/mediaplayerofdoom.exe`. It finds your music 
 `P` play/pause · `S`/`N` skip · `Left` previous · `R` record · `+`/`-` volume · `F` fullscreen · `M` mute · `D` mode · `V` video · `L` lyrics
 
 ## App Images
-
+<img width="3840" height="2160" alt="stars for the star" src="https://github.com/user-attachments/assets/c68a0bfc-d7ab-4d31-a8fd-d9bdf186a1ca" />
 <img width="3834" height="2155" alt="Screenshot 2026-09-10 133844" src="https://github.com/user-attachments/assets/49e8a167-8b41-4166-9239-08067e05e3c4" />
 <img width="3824" height="2155" alt="Screenshot 2026-09-10 133812" src="https://github.com/user-attachments/assets/6a162706-f897-40e7-b048-7eb8326796f1" />
 <img width="3834" height="2155" alt="Screenshot 2026-09-10 133734" src="https://github.com/user-attachments/assets/052d9c5d-37c1-475f-bdf8-a1cabd113df7" />
