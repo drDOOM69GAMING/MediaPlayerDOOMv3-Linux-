@@ -1,8 +1,10 @@
-# MediaPlayerDOOM v2
+# MediaPlayerDOOM v3
 
 A retro DOOM-styled media player for Windows, rendered in egui. Tape, CD, and Radio faces on the deck, plus a band/artist catalog, background pulsing speakers, recording, YouTube downloads, and a fullscreen in-app video player with a queue. ffmpeg, ffprobe, and yt-dlp are embedded in the exe, so it runs fully standalone.
 
 ## Features
+
+- **Local metadata cache (`Meta All`)**: one click downloads every playlist track's tags + cover art into your `%APPDATA%\MediaPlayerOFDOOM` folder (metacache.json + artcache). Playlists then load with zero re-scanning, and the NOW panel shows tags and art instantly - even offline. Runs on 8 parallel workers and resumes from whatever is already cached.
 
 - **Deck modes**: switch the central deck between TAPE / CD / RADIO faces
   - **TAPE**: auto-reverse cassette with counters, winding, and tune slider
@@ -47,7 +49,7 @@ The binary lands at `target/release/mediaplayerofdoom.exe`. It finds your music 
 `P` play/pause · `S`/`N` skip · `Left` previous · `R` record · `+`/`-` volume · `F` fullscreen · `M` mute · `D` mode · `V` video · `L` lyrics
 
 ## App Images
-<img width="3840" height="2160" alt="2026-09-17 08_15_24-♪ Godsmack - I Don&#39;t Belong" src="https://github.com/user-attachments/assets/30144952-a83e-4c00-8519-93f738a61e90" />
+
 <img width="3834" height="2155" alt="Screenshot 2026-09-10 133844" src="https://github.com/user-attachments/assets/49e8a167-8b41-4166-9239-08067e05e3c4" />
 <img width="3824" height="2155" alt="Screenshot 2026-09-10 133812" src="https://github.com/user-attachments/assets/6a162706-f897-40e7-b048-7eb8326796f1" />
 <img width="3834" height="2155" alt="Screenshot 2026-09-10 133734" src="https://github.com/user-attachments/assets/052d9c5d-37c1-475f-bdf8-a1cabd113df7" />
@@ -72,6 +74,19 @@ This app is built on the work of some incredible open-source projects, and it wo
 - The **Rust** language and its crate ecosystem.
 
 Full details, license texts, and donation links are in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). If you can, consider donating to FFmpeg, yt-dlp, and MKVToolNix - they give this all away for free.
+
+## v3.0.0 changelog
+
+- **Local metadata cache** - the new **Meta All** button on the playlist toolbar downloads tags (title/artist/album/duration) and cover art for every track in the current playlist into `%APPDATA%\MediaPlayerOFDOOM\metacache.json` + `artcache\`, so:
+  - Playlists load and render track names instantly - no lofty re-scan of thousands of files every session
+  - The NOW panel shows tags and cover art immediately when a song changes, straight from local disk (no blank "Unknown" flash, no network wait)
+  - Everything is persisted under your appdata folder, survives restarts, and loads once at startup
+- **Parallel downloads** - both the tag reader and the cover-art scanner run on **8-worker thread pools**, so a full library downloads several times faster than a single sequential pass
+- **Resume support** - pressing Meta All never re-downloads what's already cached; it skips completed tracks and only fetches the gaps (visible in the status bar: "resuming - X tags + Y covers already cached; fetching Z tags and W covers...")
+- **Cover art pipeline** - local `folder/cover` art or embedded pictures are found first and normalized to small ~220px JPEGs; tracks with artist+album but no art and no local picture get a web cover lookup (iTunes) as a last resort
+- **M4A/M4B/M4P crash fix** - opening MPEG-4 audio through the built-in decoder no longer panic-blocks the app; those files route straight to the ffmpeg transcode path (cached WAV in the work folder), and any file the built-in decoder can't open is skipped with a clean log entry in `crash.log` instead of killing playback
+- **Visualizer per-band auto-gain** - each of the 12 spectrum bars is normalized against its own typical level, so the treble bars follow real treble content instead of being pinned to zero by bass/mid dominance; the mapping is centered so bars sit mid-range and only real hits reach the top, with a snappier envelope (0.22 s release) that tracks the beat
+- Version bump to **v3.0.0**
 
 ## v2.8.0 changelog
 
