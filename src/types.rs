@@ -62,7 +62,16 @@ pub enum Msg {
     Lyrics { artist: String, title: String, text: Option<String> },
     YtStatus(String),
     YtLog(String),
+    /// Progress of the whole job: which stage is running, and a label for it.
+    /// The stage index selects a slice of one continuous bar - see
+    /// `ytdlp::pipeline_frac`. The download stage fills from yt-dlp's own
+    /// percentage; the stages either side have no percentage, so they are paced
+    /// by the clock.
+    YtStage { stage: u8, label: String },
     YtDone { path: PathBuf, auto_play: bool },
+    /// A queue download opened a new destination folder. Carries the album
+    /// identity and the folder name so the rest of the queue can share it.
+    YtGroupEstablished { key: String, folder: String },
     YtFail { err: String, auto_play: bool },
     YtResolved { idx: usize, query: String, display: String },
     Transcoded { display: String, wav: PathBuf },
@@ -71,6 +80,8 @@ pub enum Msg {
     RecordFail { display: String, err: String },
     VideoFrame { w: u32, h: u32, rgba: Vec<u8>, gen: u64 },
     VideoClosed { gen: u64 },
+    /// ffmpeg's stderr for the current open, so a failed decode can report why.
+    VideoDecodeErr { gen: u64, err: String },
     VideoPos { gen: u64, secs: f32 },
     VideoMeta { gen: u64, dur: f32 },
     VideoBounds { gen: u64, path: String, intro_end: f32, credits_start: f32 },
@@ -105,7 +116,10 @@ pub enum NetCmd {
 }
 
 pub enum YtCmd {
-    Download { query: String, auto_play: bool, chunks: u32 },
+    /// `group` carries `(album identity, folder name)` established by an earlier
+    /// item in the same download queue, so a run of tracks from one album all
+    /// land in one folder. `None` for a single download.
+    Download { query: String, auto_play: bool, chunks: u32, group: Option<(String, String)> },
     Resolve { idx: usize, query: String },
 }
 

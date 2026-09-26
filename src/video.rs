@@ -128,7 +128,13 @@ impl PlayerApp {
         self.video_paused = false;
         self.video_ended = false;
         self.video_cur_secs = tsecs;
-        self.video_tex = None;
+        // Deliberately keep the current texture: a seek re-opens ffmpeg, and
+        // blanking here meant every seek flashed a full black "LOADING..."
+        // screen for as long as the seek took. The stale frame stays up until
+        // the first frame of the new position replaces it.
+        self.video_loading_since = Some(Instant::now());
+        self.video_load_timed_out = false;
+        self.video_decode_error.clear();
         self.attach_video_audio(&path, tsecs);
         // Keep the paused state across a seek: seek while paused should
         // show the frame at the new position and stay paused, not resume.
@@ -176,6 +182,9 @@ impl PlayerApp {
         self.video_cur_secs = 0.0;
         self.video_seek_t = None;
         self.video_current = Some(path.clone());
+        self.video_loading_since = Some(Instant::now());
+        self.video_load_timed_out = false;
+        self.video_decode_error.clear();
         if !path.ends_with("_cut.mkv") {
             let cut_dir = work_dir().join("cuts");
             if let Ok(rd) = std::fs::read_dir(&cut_dir) {
@@ -216,12 +225,14 @@ impl PlayerApp {
         }
     }
 
-    pub(crate) fn queue_next(&mut self) {
-        if self.video_queue.is_empty() {
-            return;
-        }
-        let ni = (self.video_queue_idx + 1) % self.video_queue.len();
+    /// Advance to the next queued video. A single-item queue has no "next", so
+    /// this is a no-op there; see `next_queue_idx`.
+    pub(crate) fn queue_next(&mut self) -> bool {
+        let Some(ni) = next_queue_idx(self.video_queue_idx, self.video_queue.len()) else {
+            return false;
+        };
         self.play_queue_idx(ni);
+        true
     }
 
     pub(crate) fn queue_prev(&mut self) {
@@ -247,55 +258,49 @@ impl PlayerApp {
         }
     }
 
+    /// Returns the (intro_end, credits_start) markers for the current video.
+    ///
+    /// Manual markers only - see `resolve_bounds`.
     pub(crate) fn video_bound_secs(&self) -> (f32, f32) {
-        let mut intro = if self.intro_skip_secs > 2.0 { self.intro_skip_secs } else { 90.0 };
-        let mut credits = if self.video_dur_secs > 0.0 {
-            (self.video_dur_secs - self.credits_skip_secs).max(0.0)
-        } else {
-            0.0
-        };
-        if let Some(p) = self.video_current.clone() {
-            if let Some(&(ie, cs)) = self.video_bounds.get(&p) {
-                if ie > 2.0 {
-                    intro = ie;
-                }
-                if cs > 2.0 {
-                    credits = cs;
-                }
-            } else if let Some(dir) = Path::new(&p).parent().map(|x| x.to_string_lossy().to_string()) {
-                if let Some(&(ie, cs)) = self.show_bounds.get(&dir) {
-                    if ie > 2.0 {
-                        intro = ie;
-                    }
-                    if cs > 2.0 {
-                        credits = cs;
-                    }
-                }
-            }
-        }
-        if credits < 10.0 && self.video_dur_secs > 0.0 {
-            credits = (self.video_dur_secs - self.credits_skip_secs).max(0.0);
-        }
-        (intro, credits)
+        resolve_bounds(&self.video_bounds, &self.show_bounds, self.video_current.as_deref())
     }
 
-        pub(crate) fn maybe_analyze_video(&mut self, path: &str) {
-        if !self.intro_skip_enabled {
-            return;
+    /// Shift-clicking INTRO / CREDS clears that marker, for this file and for
+    /// the show preset. Without this a single mis-click could only be undone
+    /// by overwriting it, and because a marker is also stored per folder it
+    /// would keep applying to every other episode.
+    pub(crate) fn clear_video_markers(&mut self, intro: bool, credits: bool) {
+        let Some(p) = self.video_current.clone() else { return };
+        let dir = Path::new(&p).parent().map(|x| x.to_string_lossy().to_string());
+        let zero = |b: (f32, f32)| (if intro { 0.0 } else { b.0 }, if credits { 0.0 } else { b.1 });
+        if let Some(b) = self.video_bounds.get(&p).copied() {
+            self.video_bounds.insert(p.clone(), zero(b));
         }
-        let known = self
-            .video_bounds
-            .get(path)
-            .map(|b| b.0 > 2.0 || b.1 > 2.0)
-            .unwrap_or(false);
-        if known || self.analyzing_video.contains(path) {
-            return;
+        if let Some(d) = &dir {
+            if let Some(b) = self.show_bounds.get(d).copied() {
+                self.show_bounds.insert(d.clone(), zero(b));
+            }
         }
-        self.analyzing_video.insert(path.to_string());
-        let gen = self.video_gen;
-        av_log(&format!("analyze START {}", path));
-        let _ = self.lib_tx.send(LibCmd::VideoAnalyze { path: path.to_string(), gen });
-        self.set_status(format!("ANALYZE intro/credits: {}", stem(path)));
+        // A cut file was built from the old markers; drop it so a stale cut is
+        // not replayed against the markers that are now gone.
+        let stale: Vec<String> = self
+            .video_cut_cache
+            .iter()
+            .filter(|(k, _)| k.as_str() == p.as_str())
+            .map(|(_, v)| v.clone())
+            .collect();
+        for c in stale {
+            self.video_cut_cache.remove(&p);
+            let _ = std::fs::remove_file(&c);
+        }
+        self.video_positions.remove(&p);
+        self.save_settings();
+        let what = match (intro, credits) {
+            (true, true) => "INTRO+CREDS",
+            (true, false) => "INTRO",
+            _ => "CREDS",
+        };
+        self.set_status(format!("Cleared {} markers for this file and folder", what));
     }
 
     pub(crate) fn try_cut_current_video(&mut self, path: String) {
@@ -344,6 +349,9 @@ impl PlayerApp {
         self.video_on = false;
         self.video_ended = false;
         self.video_tex = None;
+        self.video_loading_since = None;
+        self.video_load_timed_out = false;
+        self.video_decode_error.clear();
         self.set_video_fs(false);
         if let Some(mut c) = self.video_audio_proc.take() {
             let _ = c.kill();
@@ -369,6 +377,21 @@ impl PlayerApp {
             if self.video_paused { s.pause(); } else { s.play(); }
         }
         self.set_status(if self.video_paused { "MOVIE: paused" } else { "MOVIE: playing" });
+    }
+
+    /// Text shown while no frame is available yet. Showing how long it has
+    /// been waiting turns an unexplained black screen into something the user
+    /// can judge (and PlayerApp gives up with a real error after 20s).
+    pub(crate) fn video_loading_text(&self) -> String {
+        let name = self
+            .video_current
+            .as_deref()
+            .map(stem)
+            .unwrap_or_else(|| "video".into());
+        match self.video_loading_since {
+            Some(s) => format!("LOADING {}  {:.0}s", name, s.elapsed().as_secs_f32()),
+            None => format!("LOADING {}", name),
+        }
     }
 
     pub(crate) fn video_window(&mut self, ctx: &egui::Context) {
@@ -413,6 +436,9 @@ impl PlayerApp {
             let mut play_idx: Option<usize> = None;
             let mut del_idx: Option<usize> = None;
             let mut clearq = false;
+            // Shift-clicking INTRO / CREDS clears that marker instead of
+            // setting it (egui 0.36 has no secondary-click sense).
+            let shift = ctx.input(|i| i.modifiers.shift);
             egui::Area::new(egui::Id::new("movie_win"))
                 .fixed_pos(scr.min)
                 .constrain(false)
@@ -424,7 +450,7 @@ impl PlayerApp {
                     if let Some(tex) = &self.video_tex {
                         ui.painter().image(tex.id(), img, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
                     } else {
-                        ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, "LOADING...", egui::FontId::monospace(14.0), Color32::from_gray(140));
+                        ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, self.video_loading_text(), egui::FontId::monospace(14.0), Color32::from_gray(140));
                     }
                     if self.video_paused {
                         ui.painter().rect_stroke(img, 0.0, egui::Stroke::new(3.0, Color32::from_rgb(255, 220, 80)), egui::StrokeKind::Inside);
@@ -455,21 +481,27 @@ impl PlayerApp {
                         if ui.put(egui::Rect::from_min_size(scr.min + egui::vec2(546.0, 4.0), egui::vec2(88.0, 22.0)), egui::Button::new(egui::RichText::new(skip_lbl).color(skip_color))).clicked() {
                             self.intro_skip_enabled = !self.intro_skip_enabled;
                             self.save_settings();
-                            if self.intro_skip_enabled {
-                                if let Some(p) = self.video_current.clone() {
-                                    self.analyzing_video.remove(&p);
-                                    self.maybe_analyze_video(&p);
-                                }
-                            }
+                            self.set_status(if self.intro_skip_enabled {
+                                "SKIP: on - markers you set will be used"
+                            } else {
+                                "SKIP: off - no intro/credits skipping"
+                            });
                         }
                         let (bie, bcs) = self.video_bound_secs();
-                        let bnd_lbl = if bie > 0.0 || bcs > 0.0 {
+                        let bnd_lbl = if bie > 0.0 {
                             format!("INTRO {}", fmt_time(bie))
                         } else {
                             "INTRO --".to_string()
                         };
-                        if ui.put(egui::Rect::from_min_size(scr.min + egui::vec2(640.0, 4.0), egui::vec2(88.0, 22.0)), egui::Button::new(bnd_lbl)).clicked() {
-                            if let Some(p) = self.video_current.clone() {
+                        let intro_btn = ui.put(
+                            egui::Rect::from_min_size(scr.min + egui::vec2(640.0, 4.0), egui::vec2(88.0, 22.0)),
+                            egui::Button::new(bnd_lbl),
+                        );
+                        let mut clear_intro = false;
+                        if intro_btn.clicked() {
+                            if shift {
+                                clear_intro = true;
+                            } else if let Some(p) = self.video_current.clone() {
                                 let (_, ccs) = self.video_bounds.get(&p).copied().unwrap_or((0.0, bcs));
                                 self.video_bounds.insert(p.clone(), (self.video_cur_secs, ccs));
                                 if let Some(dir) = Path::new(&p).parent().map(|x| x.to_string_lossy().to_string()) {
@@ -486,8 +518,15 @@ impl PlayerApp {
                         } else {
                             "CREDS --".to_string()
                         };
-                        if ui.put(egui::Rect::from_min_size(scr.min + egui::vec2(734.0, 4.0), egui::vec2(86.0, 22.0)), egui::Button::new(crd_lbl)).clicked() {
-                            if let Some(p) = self.video_current.clone() {
+                        let creds_btn = ui.put(
+                            egui::Rect::from_min_size(scr.min + egui::vec2(734.0, 4.0), egui::vec2(86.0, 22.0)),
+                            egui::Button::new(crd_lbl),
+                        );
+                        let mut clear_creds = false;
+                        if creds_btn.clicked() {
+                            if shift {
+                                clear_creds = true;
+                            } else if let Some(p) = self.video_current.clone() {
                                 let (iie, _) = self.video_bounds.get(&p).copied().unwrap_or((0.0, 0.0));
                                 self.video_bounds.insert(p.clone(), (iie, self.video_cur_secs));
                                 if let Some(dir) = Path::new(&p).parent().map(|x| x.to_string_lossy().to_string()) {
@@ -496,7 +535,11 @@ impl PlayerApp {
                                 }
                                 self.save_settings();
                                 self.set_status(format!("Credits START set at {} (preset)", fmt_time(self.video_cur_secs)));
+                                self.try_cut_current_video(p);
                             }
+                        }
+                        if clear_intro || clear_creds {
+                            self.clear_video_markers(clear_intro, clear_creds);
                         }
                         let mut vv = self.video_volume;
                         let vsl = ui.put(
@@ -666,7 +709,7 @@ impl PlayerApp {
                         if let Some(tex) = &self.video_tex {
                             ui.painter().image(tex.id(), rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
                         } else {
-                            ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, "LOADING...", egui::FontId::monospace(12.0), Color32::from_gray(120));
+                            ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, self.video_loading_text(), egui::FontId::monospace(12.0), Color32::from_gray(120));
                         }
                         if self.video_paused {
                             ui.painter().rect_stroke(rect, 0.0, egui::Stroke::new(3.0, Color32::from_rgb(255, 220, 80)), egui::StrokeKind::Inside);
@@ -721,5 +764,120 @@ impl PlayerApp {
         } else {
             ctx.set_cursor_icon(egui::CursorIcon::Default);
         }
+    }
+}
+
+/// Resolve the manual intro/credits markers that apply to `path`.
+///
+/// Markers are only ever written by the user pressing INTRO / CREDS, which
+/// stores both a per-file entry and a per-show ("preset") entry. There are no
+/// invented fallbacks: an unmarked video resolves to (0.0, 0.0), which every
+/// caller reads as "no marker". This is what stops the player from skipping or
+/// cutting a video on its own.
+pub fn resolve_bounds(
+    video_bounds: &HashMap<String, (f32, f32)>,
+    show_bounds: &HashMap<String, (f32, f32)>,
+    path: Option<&str>,
+) -> (f32, f32) {
+    let Some(p) = path else { return (0.0, 0.0) };
+    if let Some(&b) = video_bounds.get(p) {
+        return b;
+    }
+    if let Some(dir) = Path::new(p).parent().map(|x| x.to_string_lossy().to_string()) {
+        if let Some(&b) = show_bounds.get(&dir) {
+            return b;
+        }
+    }
+    (0.0, 0.0)
+}
+
+/// The index `queue_next` should move to, or `None` when there is no distinct
+/// next video.
+///
+/// A plain modulo would hand back the current index for a single-video queue,
+/// which made the player reopen the same file forever - and every reopen is a
+/// fresh full-screen decode, i.e. an endless black "LOADING..." screen.
+pub fn next_queue_idx(idx: usize, len: usize) -> Option<usize> {
+    if len < 2 {
+        return None;
+    }
+    let ni = (idx + 1) % len;
+    if ni == idx {
+        None
+    } else {
+        Some(ni)
+    }
+}
+
+#[cfg(test)]
+mod video_tests {
+    use super::*;
+
+    fn maps() -> (HashMap<String, (f32, f32)>, HashMap<String, (f32, f32)>) {
+        (HashMap::new(), HashMap::new())
+    }
+
+    /// The reported bug: with `intro_skip_enabled` on, every video was being
+    /// skipped 90s in and cut, because bounds were invented for any video that
+    /// had no stored marker.
+    #[test]
+    fn unmarked_video_has_no_bounds() {
+        let (v, s) = maps();
+        let (i, c) = resolve_bounds(&v, &s, Some(r"E:\DRAGONBALL\Dragon Ball.118.mkv"));
+        assert_eq!((i, c), (0.0, 0.0), "must not invent an intro bound");
+        assert_eq!((i, c), (0.0, 0.0), "must not invent a credits bound");
+    }
+
+    #[test]
+    fn no_current_video_has_no_bounds() {
+        let (v, s) = maps();
+        assert_eq!(resolve_bounds(&v, &s, None), (0.0, 0.0));
+    }
+
+    #[test]
+    fn manual_per_file_marker_is_used() {
+        let (mut v, s) = maps();
+        v.insert(r"E:\SHOW\ep01.mkv".to_string(), (81.0, 1349.5));
+        assert_eq!(resolve_bounds(&v, &s, Some(r"E:\SHOW\ep01.mkv")), (81.0, 1349.5));
+    }
+
+    /// The INTRO/CREDS buttons also record a per-show preset, which is what
+    /// carries a marker to the rest of an episode run.
+    #[test]
+    fn show_preset_applies_to_unmarked_episodes() {
+        let (v, mut s) = maps();
+        s.insert(r"E:\SHOW".to_string(), (81.0, 1349.5));
+        assert_eq!(resolve_bounds(&v, &s, Some(r"E:\SHOW\ep02.mkv")), (81.0, 1349.5));
+    }
+
+    #[test]
+    fn per_file_marker_wins_over_show_preset() {
+        let (mut v, mut s) = maps();
+        s.insert(r"E:\SHOW".to_string(), (81.0, 1349.5));
+        v.insert(r"E:\SHOW\ep02.mkv".to_string(), (12.0, 0.0));
+        assert_eq!(resolve_bounds(&v, &s, Some(r"E:\SHOW\ep02.mkv")), (12.0, 0.0));
+    }
+
+    #[test]
+    fn unrelated_directory_has_no_bounds() {
+        let (v, mut s) = maps();
+        s.insert(r"E:\SHOW".to_string(), (81.0, 1349.5));
+        assert_eq!(resolve_bounds(&v, &s, Some(r"C:\Other\clip.mkv")), (0.0, 0.0));
+    }
+
+    /// The reported bug: reaching the credits marker with one video queued
+    /// replayed that same video forever.
+    #[test]
+    fn single_video_queue_has_no_next() {
+        assert_eq!(next_queue_idx(0, 0), None);
+        assert_eq!(next_queue_idx(0, 1), None);
+    }
+
+    #[test]
+    fn multi_video_queue_advances_and_wraps() {
+        assert_eq!(next_queue_idx(0, 2), Some(1));
+        assert_eq!(next_queue_idx(1, 2), Some(0));
+        assert_eq!(next_queue_idx(0, 3), Some(1));
+        assert_eq!(next_queue_idx(2, 3), Some(0));
     }
 }

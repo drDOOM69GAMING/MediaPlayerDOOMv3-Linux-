@@ -30,6 +30,12 @@ use crate::{
 impl PlayerApp {
     pub(crate) fn yt_queue_add(&mut self, q: &str) {
         let q = q.trim().to_string();
+        // Open the queue window before anything else, so it comes up on every
+        // click. It used to be set further down, after the empty check, so
+        // clicking Add with nothing in the box flashed an error and returned
+        // without ever opening the window - which is what made the button look
+        // broken.
+        self.yt_queue_show = true;
         if q.is_empty() {
             self.set_error("Enter a YouTube URL or search term");
             return;
@@ -38,8 +44,20 @@ impl PlayerApp {
         self.yt_queue.push((q.clone(), q.clone()));
         self.yt_query.clear();
         self.yt_queue_show = true;
-        self.set_status(format!("Queued: {}", truncate_mid(&q, 50)));
-        let _ = self.yt_tx.send(YtCmd::Resolve { idx, query: q });
+        // Resolve every item, so the row shows a real title from the start. Only
+        // doing this for search terms left pasted URLs displaying as raw links,
+        // and a search term visibly changing text once the lookup returned read
+        // as a glitch.
+        let _ = self.yt_tx.send(YtCmd::Resolve { idx, query: q.clone() });
+        // Adding only enqueues. The download starts from Start in the queue
+        // window, so a song can be lined up before anything runs. Kicking the
+        // queue off from here instead meant the first song downloaded the
+        // instant it was added and vanished off the list.
+        self.set_status(format!(
+            "Queued ({}): {}",
+            self.yt_queue.len(),
+            truncate_mid(&q, 40)
+        ));
     }
 
     pub(crate) fn yt_queue_start(&mut self) {
@@ -48,6 +66,11 @@ impl PlayerApp {
         }
         self.yt_queue_processing = true;
         self.yt_queue_show = true;
+        // A fresh run (not a resume) restarts the n/m counter and drops the
+        // previous run's album folder, so whatever is first in this run decides
+        // where it files things.
+        self.yt_item_no = 0;
+        self.yt_queue_group = None;
         self.yt_queue_send_next();
     }
 
@@ -58,14 +81,23 @@ impl PlayerApp {
         if self.yt_queue.is_empty() {
             self.yt_queue_processing = false;
             self.yt_queue_active = None;
+            self.yt_queue_group = None;
             self.set_status("Queue finished");
             return;
         }
         let (q, disp) = self.yt_queue.remove(0);
         let shown = if disp.is_empty() { q.clone() } else { disp };
         self.yt_queue_active = Some(shown.clone());
+        // Each item restarts the bar and its clock; the n/m counter makes the
+        // reset legible instead of looking like the bar glitching.
+        self.yt_begin_item();
         self.set_status(format!("Queue: downloading \"{}\"...", truncate_mid(&shown, 60)));
-        let _ = self.yt_tx.send(YtCmd::Download { query: q, auto_play: false, chunks: 8 });
+        let _ = self.yt_tx.send(YtCmd::Download {
+            query: q,
+            auto_play: false,
+            chunks: 8,
+            group: self.yt_queue_group.clone(),
+        });
     }
 
     pub(crate) fn yt_queue_advance(&mut self) {
@@ -96,6 +128,8 @@ impl PlayerApp {
                     let clear_d = self.yt_queue_processing;
                     if retro_btn(ui, "Clear", if clear_d { darken(Color32::from_rgb(255, 160, 80), 0.5) } else { Color32::from_rgb(255, 160, 80) }, th.btn_bg).clicked() && !clear_d {
                         self.yt_queue.clear();
+                        self.yt_queue_group = None;
+                        self.yt_item_no = 0;
                         self.set_status("Queue cleared");
                     }
                     if retro_btn(ui, "Close", Color32::from_rgb(200, 80, 80), th.btn_bg).clicked() {
@@ -116,15 +150,23 @@ impl PlayerApp {
                     _ => {}
                 }
                 if self.yt_queue_processing && self.yt_pct > -1.0 {
-                    let status = if self.yt_speed.is_empty() {
-                        "starting...".to_string()
+                    let (n, m) = self.yt_item_counter();
+                    let elapsed = self.yt_started.map(|s| s.elapsed().as_secs()).unwrap_or(0);
+                    let status = if !self.yt_speed.is_empty() {
+                        format!("{} ETA {}", self.yt_speed, self.yt_eta)
+                    } else if !self.yt_band_label.is_empty() {
+                        self.yt_band_label.clone()
                     } else {
-                        format!("{}  ETA {}", self.yt_speed, self.yt_eta)
+                        "starting...".to_string()
                     };
-                    ui.add(egui::ProgressBar::new(self.yt_pct / 100.0)
-                        .desired_width(f32::INFINITY)
-                        .text(RichText::new(status).color(Color32::from_gray(200)).monospace().size(10.0))
-                        .fill(Color32::from_rgb(28, 224, 255)));
+                    ui.horizontal(|ui| {
+                        ui.add(egui::ProgressBar::new(self.yt_bar.clamp(0.0, 1.0))
+                            .desired_width(f32::INFINITY)
+                            .text(RichText::new(format!("{:.0}%  {}", self.yt_bar * 100.0, status)).color(Color32::from_gray(200)).monospace().size(10.0))
+                            .fill(Color32::from_rgb(28, 224, 255)));
+                        ui.label(RichText::new(format!("{}/{}  {}s", n, m, elapsed))
+                            .color(Color32::from_gray(150)).monospace().size(10.0));
+                    });
                 }
                 ui.separator();
                 egui::ScrollArea::vertical().max_height(max_h).auto_shrink([false, true]).show(ui, |ui| {
@@ -148,5 +190,11 @@ impl PlayerApp {
                 });
             });
         self.yt_queue_show = open && !closed;
+        if !self.yt_queue_show {
+            // The window is an egui window, so opening it pulls keyboard focus
+            // off the YT text box. Hand focus back on the way out, otherwise
+            // the next paste goes nowhere and the box stays empty.
+            self.yt_focus = true;
+        }
     }
 }

@@ -1,6 +1,7 @@
 ﻿#![allow(unused_imports)]
 #![allow(dead_code)]
 // Net thread: yt-dlp + web art/lyrics lookup.
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::Duration;
@@ -49,12 +50,16 @@ pub fn web_art_loop(rx: std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Receive
     }
 }
 
-pub fn yt_loop(rx: Receiver<YtCmd>, tx: Sender<Msg>) {
+pub fn yt_loop(
+    rx: Receiver<YtCmd>,
+    tx: Sender<Msg>,
+    album_index: std::sync::Arc<HashMap<String, String>>,
+) {
     while let Ok(cmd) = rx.recv() {
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             match cmd {
-                YtCmd::Download { query, auto_play, chunks } => {
-                    let r = yt_download_and_store(&query, chunks, &tx);
+                YtCmd::Download { query, auto_play, chunks, group } => {
+                    let r = yt_download_and_store(&query, chunks, group, &album_index, &tx);
                     match r {
                         Ok(path) => { let _ = tx.send(Msg::YtDone { path, auto_play }); }
                         Err(e) => { let _ = tx.send(Msg::YtFail { err: e, auto_play }); }

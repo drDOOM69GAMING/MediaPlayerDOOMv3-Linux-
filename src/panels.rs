@@ -959,11 +959,10 @@ impl PlayerApp {
                         if q.trim().is_empty() {
                             self.set_error("Enter a YouTube URL or search term");
                         } else {
-                            self.yt_pct = 0.0;
-                            self.yt_speed.clear();
-                            self.yt_eta.clear();
+                            self.yt_item_no = 0;
+                            self.yt_begin_item();
                             self.set_status(format!("YouTube: saving to {}", music_folder().display()));
-                            let _ = self.yt_tx.send(YtCmd::Download { query: q, auto_play: true, chunks: 1 });
+                            let _ = self.yt_tx.send(YtCmd::Download { query: q, auto_play: true, chunks: 1, group: None });
                         }
                     }
                 }
@@ -972,17 +971,27 @@ impl PlayerApp {
                 ui.label(RichText::new(truncate_mid(&folder, 46)).color(Color32::from_gray(120)).monospace().size(10.0));
             });
             if self.yt_pct > -1.0 {
-                let status = if self.yt_speed.is_empty() {
-                    "starting...".to_string()
+                // Counter, percentage, stage and elapsed time beside the bar.
+                // A bar that resets to 0% for the next item reads as a glitch
+                // unless something says which item is running.
+                let (n, m) = self.yt_item_counter();
+                let elapsed = self.yt_started.map(|s| s.elapsed().as_secs()).unwrap_or(0);
+                let status = if !self.yt_speed.is_empty() {
+                    format!("{} ETA {}", self.yt_speed, self.yt_eta)
+                } else if !self.yt_band_label.is_empty() {
+                    self.yt_band_label.clone()
                 } else {
-                    format!("{}  ETA {}", self.yt_speed, self.yt_eta)
+                    "starting...".to_string()
                 };
+                let pct = (self.yt_bar * 100.0).clamp(0.0, 100.0);
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("▼").color(th.accent).monospace().size(10.0));
-                    ui.add(egui::ProgressBar::new((self.yt_pct / 100.0).clamp(0.0, 1.0))
+                    ui.add(egui::ProgressBar::new(self.yt_bar.clamp(0.0, 1.0))
                         .desired_width(f32::INFINITY)
-                        .text(RichText::new(format!("{:.0}%  {}", self.yt_pct, status)).color(Color32::from_gray(230)).monospace().size(10.0))
+                        .text(RichText::new(format!("{:.0}%  {}", pct, status)).color(Color32::from_gray(230)).monospace().size(10.0))
                         .fill(Color32::from_rgb(28, 224, 255)));
+                    ui.label(RichText::new(format!("{}/{}  {}s", n, m, elapsed))
+                        .color(Color32::from_gray(150)).monospace().size(10.0));
                 });
             }
 
@@ -995,7 +1004,11 @@ impl PlayerApp {
                     self.playing_pl_idx
                         .filter(|i| *i < self.state.playlist.len())
                 });
-            let rows: Vec<(usize, String)> = self
+            // Indices only, not cloned labels: this runs every frame, and with
+            // a large library cloning one String per row allocated ~18k strings
+            // per repaint, which was a real drag on playback. The labels are
+            // read straight out of display_cache when a row is actually drawn.
+            let rows: Vec<usize> = self
                 .state
                 .playlist
                 .iter()
@@ -1008,7 +1021,7 @@ impl PlayerApp {
                     let path = p.to_lowercase();
                     d.contains(&query) || path.contains(&query)
                 })
-                .map(|(i, _)| (i, self.display_cache[i].clone()))
+                .map(|(i, _)| i)
                 .collect();
 
             ui.horizontal(|ui| {
@@ -1030,7 +1043,7 @@ impl PlayerApp {
             if cur_idx != self.pl_last_cur {
                 self.pl_last_cur = cur_idx;
                 if let Some(ci) = cur_idx {
-                    if let Some(pos) = rows.iter().position(|(i, _)| *i == ci) {
+                    if let Some(pos) = rows.iter().position(|i| *i == ci) {
                         let avail_h = ui.available_height().max(1.0);
                         let spacing_y = ui.spacing().item_spacing.y;
                         let sh = row_h + spacing_y;
@@ -1042,11 +1055,11 @@ impl PlayerApp {
             }
             sa.show_rows(ui, row_h, rows.len(), |ui, range| {
                     for i in range {
-                        let (idx, disp) = &rows[i];
-                        let is_current = cur_idx == Some(*idx);
+                        let idx = rows[i];
+                        let is_current = cur_idx == Some(idx);
                         let color = if is_current { th.playing_fg } else { th.fg };
                         let mark = if is_current { "▶ " } else { "  " };
-                        let row_text = format!("{} {:>3}  {}", mark, idx + 1, disp);
+                        let row_text = format!("{} {:>3}  {}", mark, idx + 1, self.display_cache[idx]);
                         let (row_rect, resp) = ui.allocate_exact_size(
                             egui::vec2(ui.available_width().max(1.0), row_h),
                             egui::Sense::click(),
@@ -1068,7 +1081,7 @@ impl PlayerApp {
                             egui::FontId::monospace(12.0),
                             color,
                         );
-                        let p_path = self.state.playlist[*idx].clone();
+                        let p_path = self.state.playlist[idx].clone();
                         let p_rating = self.song_rating(&p_path);
                         let mut star_pick: Option<u8> = None;
                         let sx0 = row_rect.right() - 4.0 - 5.0 * 13.0;
@@ -1077,7 +1090,7 @@ impl PlayerApp {
                                 egui::pos2(sx0 + k as f32 * 13.0, row_rect.center().y - 8.0),
                                 egui::vec2(13.0, 16.0),
                             );
-                            let sresp = ui.interact(sr, ui.id().with(("star", *idx, k)), egui::Sense::click());
+                            let sresp = ui.interact(sr, ui.id().with(("star", idx, k)), egui::Sense::click());
                             if sresp.clicked() {
                                 star_pick = Some((k + 1) as u8);
                             }
@@ -1108,15 +1121,15 @@ impl PlayerApp {
                             );
                         }
                         if resp.clicked() && self.drag_from.is_none() {
-                            play_choice = Some(*idx);
+                            play_choice = Some(idx);
                         }
                         if resp.drag_started() {
-                            self.drag_from = Some(*idx);
+                            self.drag_from = Some(idx);
                             self.drag_active = true;
                         }
                         if self.drag_active {
-                            if resp.hovered() && self.drag_from != Some(*idx) {
-                                self.drag_hover = Some(*idx);
+                            if resp.hovered() && self.drag_from != Some(idx) {
+                                self.drag_hover = Some(idx);
                             }
                             if resp.drag_stopped() {
                                 let from = self.drag_from;
@@ -1130,7 +1143,7 @@ impl PlayerApp {
                                     }
                                 }
                             }
-                            if self.drag_hover == Some(*idx) {
+                            if self.drag_hover == Some(idx) {
                                 ui.painter().hline(
                                     resp.rect.min.x..=resp.rect.max.x,
                                     resp.rect.bottom(),

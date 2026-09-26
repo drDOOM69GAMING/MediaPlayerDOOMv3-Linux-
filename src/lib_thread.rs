@@ -292,7 +292,7 @@ LibCmd::Scan(dir) => {
                 cmd.arg("-i").arg(&path)
                     .args(["-an", "-vf", &format!("scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2", tw, th, tw, th), "-pix_fmt", "rgb24", "-f", "rawvideo", "-"])
                     .stdout(std::process::Stdio::piped())
-                    .stderr(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::piped())
                     .creation_flags(NO_WINDOW);
                 let mut child = match cmd.spawn() {
                     Ok(c) => c,
@@ -308,6 +308,33 @@ LibCmd::Scan(dir) => {
                     std::thread::spawn(move || {
                         let dur = probe_video_duration(&p);
                         let _ = tx2.send(Msg::VideoMeta { gen, dur });
+                    });
+                }
+                if let Some(stderr) = child.stderr.take() {
+                    // ffmpeg's stderr used to go to Stdio::null(), so a file it
+                    // refused to decode just showed a silent black screen.
+                    // Forward the tail of it instead; the UI reports it if no
+                    // frame ever arrives.
+                    let tx2 = tx.clone();
+                    let gen2 = gen;
+                    std::thread::spawn(move || {
+                        use std::io::{BufRead, BufReader};
+                        let mut tail: Vec<String> = Vec::new();
+                        for line in BufReader::new(stderr).lines() {
+                            let Ok(s) = line else { break };
+                            let s = s.trim().to_string();
+                            if s.is_empty() {
+                                continue;
+                            }
+                            if tail.len() >= 4 {
+                                tail.remove(0);
+                            }
+                            tail.push(s);
+                        }
+                        let err = tail.join(" | ");
+                        if !err.is_empty() {
+                            let _ = tx2.send(Msg::VideoDecodeErr { gen: gen2, err });
+                        }
                     });
                 }
                 if let Some(stdout) = child.stdout.take() {

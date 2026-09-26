@@ -24,6 +24,10 @@ pub struct MetaCacheEntry {
 
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 pub struct Settings {
+    /// Bumped whenever a field needs a one-time repair on load. See
+    /// `SETTINGS_VERSION` in app.rs for what each version migrates.
+    #[serde(default)]
+    pub settings_version: u32,
     pub volume: u32,
     pub last_played: Option<String>,
     pub playlist: Vec<String>,
@@ -62,6 +66,15 @@ pub struct Settings {
     pub ratings: HashMap<String, u8>,
     #[serde(default)]
     pub rating_filter: u8,
+    /// Library root that the startup scan settled on.
+    ///
+    /// `find_music_folder()` recursively walks `Music` on *every* logical drive
+    /// on every launch, which on a large library is minutes of I/O before a
+    /// single song plays. Remembering the answer makes that a one-time cost;
+    /// a stale entry (drive unplugged, folder moved) is filtered on load and
+    /// the search simply runs again.
+    #[serde(default)]
+    pub music_root: Option<String>,
 }
 
 pub fn default_video_volume() -> u32 {

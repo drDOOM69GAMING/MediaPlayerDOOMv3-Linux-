@@ -119,12 +119,29 @@ pub(crate) struct PlayerApp {
     pub(crate) yt_queue_mode: bool,
     pub(crate) yt_queue: Vec<(String, String)>,
     pub(crate) yt_queue_processing: bool,
+    /// `(album identity, folder name)` opened by the current queue run, so
+    /// every later track from the same album joins that folder.
+    pub(crate) yt_queue_group: Option<(String, String)>,
     pub(crate) yt_queue_active: Option<String>,
     pub(crate) yt_queue_show: bool,
     pub(crate) eq_shared: std::sync::Arc<std::sync::Mutex<EqShared>>,
     pub(crate) eq_resume: Option<Duration>,
     pub(crate) yt_log: Vec<String>,
     pub(crate) yt_pct: f32,
+    /// Pipeline progress, 0..1, across lookup + download + transcode + save.
+    pub(crate) yt_bar: f32,
+    /// Which stage is running, and when it started. The stages yt-dlp reports no
+    /// percentage for are paced by the clock from here.
+    pub(crate) yt_stage_idx: u8,
+    pub(crate) yt_stage_since: Instant,
+    /// The real percentage yt-dlp last reported, valid only for the download
+    /// stage. Drives the bar directly when present.
+    pub(crate) yt_real_pct: Option<f32>,
+    pub(crate) yt_band_label: String,
+    pub(crate) yt_started: Option<Instant>,
+    /// 1-based position of the item being downloaded, so the bar resetting to
+    /// 0% for the next item is obviously a new item and not a glitch.
+    pub(crate) yt_item_no: usize,
     pub(crate) yt_speed: String,
     pub(crate) yt_eta: String,
     pub(crate) last_skip: Instant,
@@ -205,6 +222,8 @@ pub(crate) struct PlayerApp {
     pub(crate) disc_in: bool,
     pub(crate) disc_label: String,
     pub(crate) last_cd_dir: Option<String>,
+    /// Remembered library root, so startup doesn't re-walk every drive.
+    pub(crate) music_root: Option<String>,
     pub(crate) disc_saved: Vec<String>,
     pub(crate) band_map: HashMap<String, Vec<String>>,
     pub(crate) full_library: Vec<String>,
@@ -223,6 +242,14 @@ pub(crate) struct PlayerApp {
     pub(crate) video_clock: std::sync::Arc<std::sync::atomic::AtomicU64>,
     pub(crate) video_seek_base: f32,
     pub(crate) video_deferred_open: bool,
+    /// When the current open/seek started waiting for its first frame, and
+    /// whether we already gave up on it. Used to turn a permanent black
+    /// "LOADING..." into an actual error message.
+    pub(crate) video_loading_since: Option<Instant>,
+    pub(crate) video_load_timed_out: bool,
+    /// Last few lines ffmpeg wrote to stderr for the current open, so a failed
+    /// decode can say why instead of just "LOADING...".
+    pub(crate) video_decode_error: String,
     pub(crate) video_last_mouse: f64,
     pub(crate) video_bar_visible: bool,
     pub(crate) video_queue: Vec<String>,
@@ -253,6 +280,10 @@ pub(crate) struct PlayerApp {
     pub(crate) ratings: HashMap<String, u8>,
     pub(crate) rating_filter: u8,
 }
+
+/// Current settings schema/migration level written to settings.json.
+/// Bump when a new one-time repair is needed in PlayerApp::new.
+const SETTINGS_VERSION: u32 = 1;
 
 impl PlayerApp {
     fn load_meta_cache() -> HashMap<String, MetaCacheEntry> {
@@ -288,6 +319,7 @@ impl PlayerApp {
         let mut ratings: HashMap<String, u8> = HashMap::new();
         let mut rating_filter = 0u8;
         let mut last_cd_dir: Option<String> = None;
+        let mut music_root: Option<String> = None;
         let mut video_positions: HashMap<String, f32> = HashMap::new();
         let mut intro_skip_enabled = false;
         let mut intro_skip_secs: f32 = 90.0;
@@ -296,6 +328,8 @@ impl PlayerApp {
         let mut credits_skip_secs: f32 = 90.0;
         let mut video_bounds: HashMap<String, (f32, f32)> = HashMap::new();
         let mut show_bounds: HashMap<String, (f32, f32)> = HashMap::new();
+        let mut video_cut_cache: HashMap<String, String> = HashMap::new();
+        let mut settings_version = 0u32;
         if let Ok(text) = std::fs::read_to_string(&settings_path) {
             if let Ok(s) = serde_json::from_str::<Settings>(&text) {
                 state.volume = s.volume.clamp(0, 100);
@@ -307,17 +341,72 @@ impl PlayerApp {
                 video_aspect_default = s.video_aspect_default;
                 video_volume = s.video_volume.clamp(0, 200);
                 last_cd_dir = s.last_cd_dir.filter(|d| Path::new(d).is_dir());
+                // Same idea: keep the remembered root only while it still
+                // exists, so an unplugged drive falls back to a fresh search.
+                music_root = s.music_root.filter(|d| Path::new(d).is_dir());
                 video_positions = s.video_positions;
                 intro_skip_enabled = s.intro_skip_enabled;
                 intro_skip_secs = s.intro_skip_secs;
                 credits_skip_secs = s.credits_skip_secs;
                 video_bounds = s.video_bounds;
                 show_bounds = s.show_bounds;
+                video_cut_cache = s.video_cut_cache;
+                settings_version = s.settings_version;
                 eq_on = s.eq_on;
                 if !s.eq_preset.is_empty() { state.eq_preset = s.eq_preset; }
                 eq_custom = s.eq_custom;
                 ratings = s.ratings;
                 rating_filter = s.rating_filter.min(5);
+            }
+        }
+        if settings_version < SETTINGS_VERSION {
+            // v1: intro/credits markers used to be auto-detected on playback
+            // and written straight into these maps, spread folder-wide via
+            // show_bounds. That made the player skip/cut on its own, and it is
+            // impossible to tell those entries apart from ones the user really
+            // set by hand. Markers are manual-only now, so throw the polluted
+            // data away and start skipping off. Nothing else is touched.
+            if !video_bounds.is_empty() || !show_bounds.is_empty() {
+                av_log(&format!(
+                    "settings v{}: clearing {} auto file / {} show intro-credit markers",
+                    settings_version, video_bounds.len(), show_bounds.len()
+                ));
+            }
+            video_bounds.clear();
+            show_bounds.clear();
+            video_cut_cache.clear();
+            intro_skip_enabled = false;
+            settings_version = SETTINGS_VERSION;
+            // Persist the upgrade straight away so the repair is one-time even
+            // if the session ends before anything else triggers a save.
+            // Mirrors save_settings(); keep the two in step.
+            let upgraded = Settings {
+                settings_version,
+                volume: state.volume,
+                last_played: state.current_song.clone(),
+                playlist: state.playlist.clone(),
+                theme: state.theme.clone(),
+                video_aspects: video_aspects.clone(),
+                video_aspect_default,
+                video_volume,
+                last_cd_dir: last_cd_dir.clone(),
+                music_root: music_root.clone(),
+                video_positions: video_positions.clone(),
+                intro_skip_enabled,
+                intro_skip_secs,
+                credits_skip_secs,
+                video_bounds: video_bounds.clone(),
+                show_bounds: show_bounds.clone(),
+                eq_on,
+                eq_preset: state.eq_preset.clone(),
+                eq_custom,
+                video_cut_cache: video_cut_cache.clone(),
+                video_cut_inflight: HashSet::new(),
+                ratings: ratings.clone(),
+                rating_filter,
+            };
+            if let Ok(text) = serde_json::to_string_pretty(&upgraded) {
+                let _ = std::fs::write(&settings_path, text);
             }
         }
         if let Ok(text) = std::fs::read_to_string(&history_path) {
@@ -332,6 +421,11 @@ impl PlayerApp {
         let (net_tx, net_rx) = channel::<NetCmd>();
         let (web_tx, web_rx) = channel::<NetCmd>();
         let (yt_tx, yt_rx) = channel::<YtCmd>();
+        // Built before the workers start so the download thread can consult the
+        // local library to learn which album a single-song download belongs to.
+        // This is a startup snapshot; albums discovered later aren't included.
+        let meta_cache_boot = Self::load_meta_cache();
+        let yt_album_index = std::sync::Arc::new(build_album_index(&meta_cache_boot));
         let (msg_tx, msg_rx) = channel::<Msg>();
         {
             let tx = msg_tx.clone();
@@ -350,7 +444,7 @@ impl PlayerApp {
         }
         {
             let tx = msg_tx.clone();
-            thread::spawn(move || yt_loop(yt_rx, tx));
+            thread::spawn(move || yt_loop(yt_rx, tx, std::sync::Arc::clone(&yt_album_index)));
         }
 
         let display_cache: Vec<String> = state.playlist.iter().map(|p| make_display(p)).collect();
@@ -396,7 +490,7 @@ impl PlayerApp {
             display_cache,
             tag_names: HashMap::new(),
             tags_pending: HashSet::new(),
-            meta_cache: Self::load_meta_cache(),
+            meta_cache: meta_cache_boot,
             meta_cache_dirty: false,
             meta_cache_last_save: Instant::now(),
             meta_all_pending: HashSet::new(),
@@ -413,12 +507,20 @@ impl PlayerApp {
             yt_queue_mode: false,
             yt_queue: Vec::new(),
             yt_queue_processing: false,
+            yt_queue_group: None,
             yt_queue_active: None,
             yt_queue_show: false,
             eq_shared: std::sync::Arc::new(std::sync::Mutex::new(EqShared { gains: [0.0; 10], dirty: false })),
             eq_resume: None,
             yt_log: Vec::new(),
             yt_pct: -1.0,
+            yt_bar: 0.0,
+            yt_stage_idx: STAGE_LOOKUP,
+            yt_stage_since: Instant::now(),
+            yt_real_pct: None,
+            yt_band_label: String::new(),
+            yt_started: None,
+            yt_item_no: 0,
             yt_speed: String::new(),
             yt_eta: String::new(),
             last_skip: Instant::now(),
@@ -465,6 +567,7 @@ impl PlayerApp {
             disc_in: false,
             disc_label: String::new(),
             last_cd_dir,
+            music_root,
             disc_saved: Vec::new(),
             band_map,
             full_library,
@@ -482,6 +585,9 @@ impl PlayerApp {
             video_clock,
             video_seek_base: 0.0,
             video_deferred_open: false,
+            video_loading_since: None,
+            video_load_timed_out: false,
+            video_decode_error: String::new(),
             video_last_mouse: 0.0,
             video_bar_visible: false,
             video_queue: Vec::new(),
@@ -503,7 +609,7 @@ video_ended: false,
         intro_skip_secs: intro_skip_secs,
         credits_skip_secs: credits_skip_secs,
         video_bounds: video_bounds,
-        video_cut_cache: HashMap::new(),
+        video_cut_cache: video_cut_cache,
         video_cut_inflight: HashSet::new(),
         show_bounds: show_bounds,
             analyzing_video: HashSet::new(),
@@ -548,13 +654,27 @@ video_ended: false,
             quit_id,
         };
         app.apply_eq_live();
-        let _ = app.lib_tx.send(LibCmd::FindMusicFolder);
+        // Reuse the remembered library root when it still exists. The full
+        // search walks `Music` recursively on *every* logical drive, so paying
+        // for that on each launch is what made startup take minutes before any
+        // music played. A stale root is already filtered out during load.
+        match app.music_root.clone() {
+            Some(root) => {
+                av_log(&format!("startup: using remembered library root {}", root));
+                let _ = app.lib_tx.send(LibCmd::Scan(root));
+            }
+            None => {
+                av_log("startup: no remembered library root, searching drives");
+                let _ = app.lib_tx.send(LibCmd::FindMusicFolder);
+            }
+        }
         app.request_playlist_tags();
         Ok(app)
     }
 
     pub(crate) fn save_settings(&self) {
         let s = Settings {
+            settings_version: SETTINGS_VERSION,
             volume: self.state.volume,
             last_played: self.state.current_song.clone(),
             playlist: self.state.playlist.clone(),
@@ -563,6 +683,7 @@ video_ended: false,
             video_aspect_default: self.video_aspect_default,
             video_volume: self.video_volume,
             last_cd_dir: self.last_cd_dir.clone(),
+            music_root: self.music_root.clone(),
             video_positions: self.video_positions.clone(),
             intro_skip_enabled: self.intro_skip_enabled,
             intro_skip_secs: self.intro_skip_secs,
@@ -803,438 +924,27 @@ video_ended: false,
     }
 
     pub(crate) fn drain_msg(&mut self) {
+        // Video frames are the only high-rate message: up to ~30/s, each one a
+        // full-resolution RGBA buffer that costs several MB of texture upload.
+        // Converting the entire backlog starves the UI, and a starved UI drains
+        // even slower, so the backlog grows every frame - that runaway is what
+        // left the movie view stuck on a black "LOADING..." for minutes. Keep
+        // only the newest frame and drop the stale ones; a dropped frame was
+        // never going to be seen anyway.
+        let mut newest_frame: Option<Msg> = None;
         while let Ok(m) = self.msg_rx.try_recv() {
             match m {
-                Msg::Error(s) => self.set_error(s),
-                Msg::DirScanned { dir, files } => {
-                    self.scanning = false;
-                    self.state.current_dir = Some(dir.clone());
-                    self.ingest_dir(&dir, &files);
-                    self.state.playlist = files;
-                    self.state.playlist.sort_by_key(|p| song_sort_key(p));
-                    self.state.song_count = 0;
-                    self.state.skip_count = 0;
-                    self.state.start_time = Some(Instant::now());
-                    self.playing_pl_idx = None;
-                    self.rebuild_display_cache();
-                    if self.state.playlist.is_empty() {
-                        self.set_status("No songs found");
-                    } else {
-                        self.set_status(format!("Loaded {} songs", self.state.playlist.len()));
+                Msg::VideoFrame { .. } => newest_frame = Some(m),
+                other => {
+                    if let Some(f) = newest_frame.take() {
+                        self.handle_msg(f);
                     }
-                    self.save_settings();
-                    if !self.state.playlist.is_empty() && !self.state.is_paused {
-                        self.skip_song();
-                    }
-                }
-                Msg::PlaylistSaved => self.set_status("Playlist saved"),
-                Msg::PlaylistLoaded { files } => {
-                    self.ingest_bands(&files, None);
-                    self.state.playlist = files;
-                    self.state.playlist.sort_by_key(|p| song_sort_key(p));
-                    self.rebuild_display_cache();
-                    self.set_status("Playlist loaded");
-                    self.save_settings();
-                }
-                Msg::Added { files } => {
-                    self.scanning = false;
-                    self.ingest_bands(&files, None);
-                    let mut n = 0;
-                    for f in files {
-                        if !self.state.playlist.contains(&f) {
-                            self.state.playlist.push(f);
-                            n += 1;
-                        }
-                    }
-                    self.state.playlist.sort_by_key(|p| song_sort_key(p));
-                    self.rebuild_display_cache();
-                    self.set_status(format!("Added {} files", n));
-                    self.save_settings();
-                }
-                Msg::ScanProgress { found } => {
-                    self.scanning = true;
-                    self.scan_found = found;
-                    self.scan_tick = std::time::Instant::now();
-                }
-                Msg::FolderFound { folder } => {
-                    if let Some(f) = folder {
-                        self.set_status(format!("Auto-loaded: {}", f));
-                        let _ = self.lib_tx.send(LibCmd::Scan(f));
-                    } else {
-                        self.scanning = false;
-                        self.set_status("No Music folder found — use ADD DIR to pick one");
-                    }
-                }
-                Msg::Meta { path, title, artist, album, duration } => {
-                    if self.state.current_song.as_deref() == Some(&path) {
-                        let mut artist = artist;
-                        let mut album = album;
-                        if artist == "Unknown" || album == "Unknown" {
-                            if let Some((a, al)) = folder_artist_album(&path) {
-                                if artist == "Unknown" {
-                                    artist = a;
-                                }
-                                if album == "Unknown" {
-                                    album = al;
-                                }
-                            }
-                        }
-                        self.meta = (title.clone(), artist.clone(), album.clone());
-                        self.state.song_length = duration;
-                        let d = duration.as_secs_f32();
-                        if d > 0.0 {
-                            self.len_secs = d;
-                        }
-                        self.want_web = artist != "Unknown" && album != "Unknown";
-                        self.ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!("♪ {} - {}", artist, title)));
-                        self.meta_cache.insert(path.clone(), MetaCacheEntry { title, artist, album, secs: duration.as_secs_f32() });
-                        self.meta_cache_dirty = true;
-                    }
-                }
-                Msg::Tags { entries } => {
-                    let mut changed = false;
-                    let in_pl: HashSet<String> = self.state.playlist.iter().cloned().collect();
-                    for (path, artist, title) in entries {
-                        self.tags_pending.remove(&path);
-                        if self.tag_names.contains_key(&path) {
-                            continue;
-                        }
-                        self.tag_names.insert(path.clone(), playlist_display(&artist, &title, &path));
-                        if in_pl.contains(&path) {
-                            changed = true;
-                        }
-                    }
-                    if changed {
-                        self.rebuild_display_cache();
-                    }
-                }
-                Msg::BatchMeta { entries } => {
-                    let mut changed = false;
-                    for (path, title, artist, album, secs) in entries {
-                        self.meta_all_pending.remove(&path);
-                        self.meta_cache.insert(path.clone(), MetaCacheEntry { title, artist, album, secs });
-                        self.meta_cache_dirty = true;
-                        if !self.tag_names.contains_key(&path) {
-                            let e = self.meta_cache.get(&path).unwrap();
-                            let n = playlist_display(&e.artist, &e.title, &path);
-                            self.tag_names.insert(path.clone(), n);
-                            changed = true;
-                        }
-                    }
-                    if changed {
-                        self.rebuild_display_cache();
-                    }
-                    self.meta_all_tick(format!("Meta All: {} tag jobs, {} covers, {} web left", self.meta_all_pending.len(), self.art_all_pending.len(), self.web_all_pending.len()));
-                }
-                Msg::ArtLocal { bytes } => {
-                    if let Some(b) = bytes {
-                        self.art_local_valid = true;
-                        self.load_art_texture(b.clone());
-                        if let Some(cur) = self.state.current_song.clone() {
-                            if let Some(nb) = normalize_art(&b) {
-                                let _ = write_art_cache(&cur, &nb);
-                            }
-                        }
-                    } else if self.want_web {
-                        let (a, al) = (self.meta.1.clone(), self.meta.2.clone());
-                        self.web_art_for = self.state.current_song.clone();
-                        let _ = self.net_tx.send(NetCmd::WebArt(a, al));
-                    }
-                }
-                Msg::ArtWeb { bytes } => {
-                    if self.web_art_for.as_deref() == self.state.current_song.as_deref() {
-                        if let Some(b) = bytes {
-                            if self.want_web && !self.art_local_valid {
-                                self.load_art_texture(b.clone());
-                            }
-                            if let Some(cur) = self.state.current_song.clone() {
-                                if let Some(nb) = normalize_art(&b) {
-                                    let _ = write_art_cache(&cur, &nb);
-                                }
-                            }
-                        }
-                    }
-                }
-                Msg::ArtAll { missing } => {
-                    let mut web: Vec<(String, String, String)> = Vec::new();
-                    for p in missing {
-                        self.art_all_pending.remove(&p);
-                        if art_cache_path(&p).is_file() {
-                            continue;
-                        }
-                        if let Some(e) = self.meta_cache.get(&p) {
-                            let mut artist = e.artist.clone();
-                            let mut album = e.album.clone();
-                            if artist == "Unknown" || album == "Unknown" {
-                                if let Some((a, al)) = folder_artist_album(&p) {
-                                    if artist == "Unknown" {
-                                        artist = a;
-                                    }
-                                    if album == "Unknown" {
-                                        album = al;
-                                    }
-                                }
-                            }
-                            if artist != "Unknown" && album != "Unknown" && !self.web_all_pending.contains(&p) {
-                                self.web_all_pending.insert(p.clone());
-                                web.push((p, artist, album));
-                            } else if artist == "Unknown" || album == "Unknown" {
-                                // Tags are known but there's nothing to web-search
-                                // with - and no local art was found. Remember this
-                                // track as art-less so Meta All skips it next run.
-                                if self.no_art.insert(p.clone()) {
-                                    self.no_art_dirty = true;
-                                }
-                            }
-                        }
-                    }
-                    for (p, a, al) in web {
-                        let _ = self.web_tx.send(NetCmd::WebArtFor { path: p, artist: a, album: al });
-                    }
-                    self.meta_all_tick(format!("Meta All: {} covers, {} web left", self.art_all_pending.len(), self.web_all_pending.len()));
-                }
-                Msg::ArtWebFor { path, bytes } => {
-                    self.web_all_pending.remove(&path);
-                    if let Some(b) = bytes {
-                        if let Some(nb) = normalize_art(&b) {
-                            if write_art_cache(&path, &nb) {
-                                if self.no_art.remove(&path) {
-                                    self.no_art_dirty = true;
-                                }
-                            } else if self.no_art.insert(path.clone()) {
-                                self.no_art_dirty = true;
-                            }
-                        } else if self.no_art.insert(path.clone()) {
-                            self.no_art_dirty = true;
-                        }
-                    } else if self.no_art.insert(path.clone()) {
-                        self.no_art_dirty = true;
-                    }
-                    self.meta_all_tick(format!("Meta All: {} web art left", self.web_all_pending.len()));
-                }
-                Msg::Lyrics { artist, title, text } => {
-                    if self.lyrics_for.as_deref() == self.state.current_song.as_deref() {
-                        if let Some(t) = text {
-                            self.lyrics = Some(t);
-                            self.lyrics_title = format!("{} - {}", artist, title);
-                        } else {
-                            self.set_error("Lyrics not found");
-                        }
-                    }
-                }
-                Msg::YtStatus(s) => {
-                    self.status = s;
-                    self.status_until = Some(Instant::now() + Duration::from_secs(8));
-                }
-                Msg::YtLog(s) => {
-                    if let Some((p, sp, et)) = parse_yt_progress(&s) {
-                        self.yt_pct = p;
-                        self.yt_speed = sp;
-                        self.yt_eta = et;
-                    }
-                    self.yt_log.push(s);
-                    const MAX_LOG: usize = 60;
-                    if self.yt_log.len() > MAX_LOG {
-                        let over = self.yt_log.len() - MAX_LOG;
-                        self.yt_log.drain(0..over);
-                    }
-                }
-                Msg::YtDone { path, auto_play } => {
-                    self.yt_pct = -1.0;
-                    self.yt_speed.clear();
-                    self.yt_eta.clear();
-                    let s = path.to_string_lossy().to_string();
-                    if !self.state.playlist.contains(&s) {
-                        self.state.playlist.push(s.clone());
-                        self.state.playlist.sort_by_key(|p| song_sort_key(p));
-                        self.rebuild_display_cache();
-                        self.save_settings();
-                        self.ingest_bands(&[s.clone()], None);
-                    }
-                    if auto_play {
-                        self.play_song(&s);
-                    }
-                    self.set_status(format!("Downloaded: {}", stem(&s)));
-                    if !auto_play && self.yt_queue_processing {
-                        self.yt_queue_advance();
-                    }
-                }
-                Msg::YtFail { err, auto_play } => {
-                    self.yt_pct = -1.0;
-                    self.yt_speed.clear();
-                    self.yt_eta.clear();
-                    self.set_error(err);
-                    if !auto_play && self.yt_queue_processing {
-                        self.yt_queue_advance();
-                    }
-                }
-                Msg::YtResolved { idx, query, display } => {
-                    if let Some(e) = self.yt_queue.get_mut(idx) {
-                        if e.0 == query {
-                            e.1 = display;
-                        }
-                    }
-                }
-                Msg::Transcoded { display, wav } => {
-                    let wavs = wav.to_string_lossy().to_string();
-                    if let Some((pd, pa)) = self.pending_transcode.take() {
-                        self.transcodes.insert(pa.clone(), wavs.clone());
-                        if pd == display {
-                            self.do_play(&display, &pa);
-                        }
-                    } else if !self.transcodes.contains_key(&display) {
-                        self.transcodes.insert(display.clone(), wavs);
-                    }
-                }
-                Msg::TranscodeFail { display, err } => {
-                    if let Some((pd, _)) = self.pending_transcode.take() {
-                        if pd == display {
-                            self.state.current_song = None;
-                            self.playing = String::new();
-                            self.pos = 0.0;
-                            self.len_secs = 0.0;
-                            self.play_started = None;
-                            self.set_error(format!("{}: {}", stem(&display), err));
-                        }
-                    }
-                }
-                Msg::Recorded { display, path } => {
-                    self.recording = false;
-                    let p = Path::new(&path);
-                    let dir = p.parent().map(|d| d.to_string_lossy().to_string()).unwrap_or_default();
-                    self.set_status(format!("Recorded: {} → {}", stem(&display), dir));
-                }
-                Msg::RecordFail { display, err } => {
-                    self.recording = false;
-                    self.set_error(format!("{}: {}", stem(&display), err));
-                }
-                Msg::VideoFrame { w, h, rgba, gen } => {
-                    if gen == self.video_gen {
-                        self.video_dims = (w, h);
-                        let size = [w as usize, h as usize];
-                        let img = egui::ColorImage::from_rgba_unmultiplied(size, &rgba);
-                        self.video_tex = Some(self.ctx.load_texture("video", img, egui::TextureOptions::LINEAR));
-                        if self.video_audio_pending && !self.video_paused {
-                            self.video_audio_pending = false;
-                            if let Some(s) = &self.video_sink {
-                                s.play();
-                                av_log("audio started on first frame");
-                            }
-                        }
-                        if self.video_deferred_open {
-                            self.video_deferred_open = false;
-                            av_log(&format!("FIRST FRAME {:.3}s after open", self.ctx.input(|i| i.time) - self.video_open_at));
-                            if let Some(p) = self.video_current.clone() {
-                                av_log(&format!("first frame shown, deferred analyze/cut for {}", p));
-                                self.maybe_analyze_video(&p);
-                                self.try_cut_current_video(p);
-                            }
-                        }
-                    }
-                }
-                Msg::VideoClosed { gen } => {
-                    let was_eof = gen == self.video_gen && !self.video_closing;
-                    if was_eof {
-                        if let Some(path) = self.video_current.clone() {
-                            self.video_positions.remove(&path);
-                            self.save_settings();
-                        }
-                        if !self.video_queue.is_empty() {
-                            self.queue_next();
-                        } else {
-                            self.video_ended = true;
-                            self.video_paused = true;
-                            self.set_status("MOVIE: end - PLAY to replay");
-                        }
-                    }
-                }
-                Msg::VideoPos { gen, secs } => {
-                    if gen == self.video_gen {
-                        self.video_cur_secs = secs;
-                        let apos = self.video_sink.as_ref().map(|s| s.get_pos().as_secs_f32()).unwrap_or(-1.0);
-                        if apos >= 0.0 && self.video_seek_base <= secs {
-                            let audio_file = self.video_seek_base + apos;
-                            av_log(&format!("tick video={:.3} audio={:.3} drift={:+.0}ms", secs, audio_file, (audio_file - secs) * 1000.0));
-                        }
-                        if self.intro_skip_enabled && self.video_dur_secs > 0.0 {
-                            let cur_path = self.video_current.clone().unwrap_or_default();
-                            if !cur_path.ends_with("_cut.mkv") {
-                                let (ie, cs) = self.video_bound_secs();
-                                if secs < ie && ie > 2.0 {
-                                    if let Some(cut) = self.video_cut_cache.get(&cur_path).cloned() {
-                                        av_log(&format!("SKIP intro at {:.3}s -> cut file {}", secs, cut));
-                                        self.play_video_item(cut);
-                                        self.set_status("Auto-cut skip → cut file");
-                                    } else {
-                                        av_log(&format!("SKIP intro at {:.3}s -> seek {:.3}s (no cut file)", secs, ie + 1.0));
-                                        self.seek_video(ie + 1.0);
-                                        self.set_status(format!("Skipped intro → {:.0}s ({})", ie, fmt_time(ie)));
-                                    }
-                                } else if cs > 2.0 && secs >= cs {
-                                    if !self.video_queue.is_empty() {
-                                        av_log(&format!("SKIP credits at {:.3}s (cs={:.3}) -> next", secs, cs));
-                                        self.queue_next();
-                                        self.set_status("Skipped credits → next video");
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                Msg::VideoMeta { gen, dur } => {
-                    if gen == self.video_gen {
-                        self.video_dur_secs = dur;
-                    }
-                }
-                Msg::VideoBounds { gen, path, intro_end, credits_start } => {
-                    if gen == self.video_gen {
-                        self.analyzing_video.remove(&path);
-                        let had = self.video_bounds.get(&path).copied();
-                        if (intro_end > 2.0 || credits_start > 2.0) && had != Some((intro_end, credits_start)) {
-                            self.video_bounds.insert(path.clone(), (intro_end, credits_start));
-                            if let Some(dir) = Path::new(&path).parent().map(|p| p.to_string_lossy().to_string()) {
-                                let merged = self.show_bounds.get(&dir).copied();
-                                match merged {
-                                    Some((pi, pc)) => {
-                                        let ni = if intro_end > 2.0 { intro_end } else { pi };
-                                        let nc = if credits_start > 2.0 { credits_start } else { pc };
-                                        self.show_bounds.insert(dir, (ni, nc));
-                                    }
-                                    None => {
-                                        self.show_bounds.insert(dir, (intro_end, credits_start));
-                                    }
-                                }
-                            }
-                            self.save_settings();
-                            if self.intro_skip_enabled && !path.ends_with("_cut.mkv") && !self.video_cut_inflight.contains(&path) {
-                                let (i2, c2) = self.video_bounds.get(&path).copied().unwrap_or((0.0, 0.0));
-                                if i2 > 2.0 && c2 > 2.0 && mkvmerge_path().is_file() && !self.video_cut_cache.contains_key(&path) {
-                                    self.video_cut_inflight.insert(path.clone());
-                                    let _ = self.lib_tx.send(LibCmd::VideoCut { path: path.clone(), gen, intro_end: i2, credits_start: c2 });
-                                }
-                            }
-                        }
-                    }
-                }
-                Msg::VideoCutDone { gen, path, cut, err } => {
-                    if gen == self.video_gen {
-                        self.video_cut_inflight.remove(&path);
-                        if let Some(cp) = cut {
-                            self.video_cut_cache.insert(path.clone(), cp.clone());
-                            if let Some(&(ie, cs)) = self.video_bounds.get(&path) {
-                                self.video_bounds.insert(cp.clone(), (ie, cs));
-                            }
-                            self.save_settings();
-                            if self.video_current.as_deref() == Some(path.as_str()) {
-                                self.set_status(format!("Auto-cut done → playing {}", stem(&cp)));
-                                self.play_video_item(cp);
-                            }
-                        } else if let Some(e) = err {
-                            self.set_status(format!("Auto-cut failed: {}; using seek skip", e));
-                        }
-                    }
+                    self.handle_msg(other);
                 }
             }
+        }
+        if let Some(f) = newest_frame {
+            self.handle_msg(f);
         }
 
         // Debounced persist of the local tag cache while a big Meta All or
@@ -1244,6 +954,524 @@ video_ended: false,
         }
         if self.no_art_dirty && self.meta_cache_last_save.elapsed() > Duration::from_secs(3) {
             self.save_no_art();
+        }
+    }
+
+    /// Advance the bar. Called every frame and on every progress message.
+    ///
+    /// Three rules, so it behaves like an ordinary progress bar:
+    ///   * it never moves backwards within an item;
+    ///   * it never reads 100% until the item is actually finished - a value
+    ///     that then drops back down is what made this look broken;
+    ///   * a stage yt-dlp reports no percentage for is paced by the clock, so it
+    ///     keeps filling instead of freezing.
+    /// A new item resets it, and the `n/m` counter says so.
+    pub(crate) fn tick_yt_bar(&mut self) {
+        if self.yt_pct < 0.0 {
+            return;
+        }
+        let elapsed = self.yt_stage_since.elapsed().as_secs_f32();
+        let f = pipeline_frac(self.yt_stage_idx, elapsed, self.yt_real_pct);
+        self.yt_bar = self.yt_bar.max(f).clamp(0.0, 0.999);
+    }
+
+    /// Begin a new download item: reset the bar and its clock and set the
+    /// `n/m` position. Used by both the single Download button and each queue
+    /// item, so a bar dropping back to 0% always means "new item".
+    pub(crate) fn yt_begin_item(&mut self) {
+        self.yt_item_no += 1;
+        self.yt_pct = 0.0;
+        self.yt_bar = 0.0;
+        self.yt_real_pct = None;
+        self.yt_stage_idx = STAGE_LOOKUP;
+        self.yt_stage_since = Instant::now();
+        self.yt_band_label = "starting".to_string();
+        self.yt_started = Some(Instant::now());
+        self.yt_speed.clear();
+        self.yt_eta.clear();
+    }
+
+    /// The `n/m` beside the bar. Counts items already started plus anything
+    /// still queued, so the total grows if items are added mid-run.
+    pub(crate) fn yt_item_counter(&self) -> (usize, usize) {
+        let queued = self.yt_queue.len();
+        let total = if queued > 0 || self.yt_queue_processing {
+            self.yt_item_no + queued
+        } else {
+            1
+        };
+        (self.yt_item_no.max(1), total.max(1))
+    }
+
+    /// Handles a single message. `drain_msg` calls this for every queued
+    /// message except video frames, of which it keeps only the newest.
+    pub(crate) fn handle_msg(&mut self, m: Msg) {
+        match m {
+            Msg::Error(s) => self.set_error(s),
+            Msg::DirScanned { dir, files } => {
+                self.scanning = false;
+                self.state.current_dir = Some(dir.clone());
+                self.ingest_dir(&dir, &files);
+                self.state.playlist = files;
+                self.state.playlist.sort_by_key(|p| song_sort_key(p));
+                self.state.song_count = 0;
+                self.state.skip_count = 0;
+                self.state.start_time = Some(Instant::now());
+                self.playing_pl_idx = None;
+                self.rebuild_display_cache();
+                if self.state.playlist.is_empty() {
+                    self.set_status("No songs found");
+                } else {
+                    self.set_status(format!("Loaded {} songs", self.state.playlist.len()));
+                }
+                self.save_settings();
+                if !self.state.playlist.is_empty() && !self.state.is_paused {
+                    self.skip_song();
+                }
+            }
+            Msg::PlaylistSaved => self.set_status("Playlist saved"),
+            Msg::PlaylistLoaded { files } => {
+                self.ingest_bands(&files, None);
+                self.state.playlist = files;
+                self.state.playlist.sort_by_key(|p| song_sort_key(p));
+                self.rebuild_display_cache();
+                self.set_status("Playlist loaded");
+                self.save_settings();
+            }
+            Msg::Added { files } => {
+                self.scanning = false;
+                self.ingest_bands(&files, None);
+                let mut n = 0;
+                for f in files {
+                    if !self.state.playlist.contains(&f) {
+                        self.state.playlist.push(f);
+                        n += 1;
+                    }
+                }
+                self.state.playlist.sort_by_key(|p| song_sort_key(p));
+                self.rebuild_display_cache();
+                self.set_status(format!("Added {} files", n));
+                self.save_settings();
+            }
+            Msg::ScanProgress { found } => {
+                self.scanning = true;
+                self.scan_found = found;
+                self.scan_tick = std::time::Instant::now();
+            }
+            Msg::FolderFound { folder } => {
+                if let Some(f) = folder {
+                    self.set_status(format!("Auto-loaded: {}", f));
+                    // Remember it so the next launch goes straight to Scan
+                    // instead of re-walking every drive looking for this.
+                    if self.music_root.as_deref() != Some(f.as_str()) {
+                        self.music_root = Some(f.clone());
+                        self.save_settings();
+                    }
+                    let _ = self.lib_tx.send(LibCmd::Scan(f));
+                } else {
+                    self.scanning = false;
+                    self.set_status("No Music folder found — use ADD DIR to pick one");
+                }
+            }
+            Msg::Meta { path, title, artist, album, duration } => {
+                if self.state.current_song.as_deref() == Some(&path) {
+                    let mut artist = artist;
+                    let mut album = album;
+                    if artist == "Unknown" || album == "Unknown" {
+                        if let Some((a, al)) = folder_artist_album(&path) {
+                            if artist == "Unknown" {
+                                artist = a;
+                            }
+                            if album == "Unknown" {
+                                album = al;
+                            }
+                        }
+                    }
+                    self.meta = (title.clone(), artist.clone(), album.clone());
+                    self.state.song_length = duration;
+                    let d = duration.as_secs_f32();
+                    if d > 0.0 {
+                        self.len_secs = d;
+                    }
+                    self.want_web = artist != "Unknown" && album != "Unknown";
+                    self.ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!("♪ {} - {}", artist, title)));
+                    self.meta_cache.insert(path.clone(), MetaCacheEntry { title, artist, album, secs: duration.as_secs_f32() });
+                    self.meta_cache_dirty = true;
+                }
+            }
+            Msg::Tags { entries } => {
+                let mut changed = false;
+                let in_pl: HashSet<String> = self.state.playlist.iter().cloned().collect();
+                for (path, artist, title) in entries {
+                    self.tags_pending.remove(&path);
+                    if self.tag_names.contains_key(&path) {
+                        continue;
+                    }
+                    self.tag_names.insert(path.clone(), playlist_display(&artist, &title, &path));
+                    if in_pl.contains(&path) {
+                        changed = true;
+                    }
+                }
+                if changed {
+                    self.rebuild_display_cache();
+                }
+            }
+            Msg::BatchMeta { entries } => {
+                let mut changed = false;
+                for (path, title, artist, album, secs) in entries {
+                    self.meta_all_pending.remove(&path);
+                    self.meta_cache.insert(path.clone(), MetaCacheEntry { title, artist, album, secs });
+                    self.meta_cache_dirty = true;
+                    if !self.tag_names.contains_key(&path) {
+                        let e = self.meta_cache.get(&path).unwrap();
+                        let n = playlist_display(&e.artist, &e.title, &path);
+                        self.tag_names.insert(path.clone(), n);
+                        changed = true;
+                    }
+                }
+                if changed {
+                    self.rebuild_display_cache();
+                }
+                self.meta_all_tick(format!("Meta All: {} tag jobs, {} covers, {} web left", self.meta_all_pending.len(), self.art_all_pending.len(), self.web_all_pending.len()));
+            }
+            Msg::ArtLocal { bytes } => {
+                if let Some(b) = bytes {
+                    self.art_local_valid = true;
+                    self.load_art_texture(b.clone());
+                    if let Some(cur) = self.state.current_song.clone() {
+                        if let Some(nb) = normalize_art(&b) {
+                            let _ = write_art_cache(&cur, &nb);
+                        }
+                    }
+                } else if self.want_web {
+                    let (a, al) = (self.meta.1.clone(), self.meta.2.clone());
+                    self.web_art_for = self.state.current_song.clone();
+                    let _ = self.net_tx.send(NetCmd::WebArt(a, al));
+                }
+            }
+            Msg::ArtWeb { bytes } => {
+                if self.web_art_for.as_deref() == self.state.current_song.as_deref() {
+                    if let Some(b) = bytes {
+                        if self.want_web && !self.art_local_valid {
+                            self.load_art_texture(b.clone());
+                        }
+                        if let Some(cur) = self.state.current_song.clone() {
+                            if let Some(nb) = normalize_art(&b) {
+                                let _ = write_art_cache(&cur, &nb);
+                            }
+                        }
+                    }
+                }
+            }
+            Msg::ArtAll { missing } => {
+                let mut web: Vec<(String, String, String)> = Vec::new();
+                for p in missing {
+                    self.art_all_pending.remove(&p);
+                    if art_cache_path(&p).is_file() {
+                        continue;
+                    }
+                    if let Some(e) = self.meta_cache.get(&p) {
+                        let mut artist = e.artist.clone();
+                        let mut album = e.album.clone();
+                        if artist == "Unknown" || album == "Unknown" {
+                            if let Some((a, al)) = folder_artist_album(&p) {
+                                if artist == "Unknown" {
+                                    artist = a;
+                                }
+                                if album == "Unknown" {
+                                    album = al;
+                                }
+                            }
+                        }
+                        if artist != "Unknown" && album != "Unknown" && !self.web_all_pending.contains(&p) {
+                            self.web_all_pending.insert(p.clone());
+                            web.push((p, artist, album));
+                        } else if artist == "Unknown" || album == "Unknown" {
+                            // Tags are known but there's nothing to web-search
+                            // with - and no local art was found. Remember this
+                            // track as art-less so Meta All skips it next run.
+                            if self.no_art.insert(p.clone()) {
+                                self.no_art_dirty = true;
+                            }
+                        }
+                    }
+                }
+                for (p, a, al) in web {
+                    let _ = self.web_tx.send(NetCmd::WebArtFor { path: p, artist: a, album: al });
+                }
+                self.meta_all_tick(format!("Meta All: {} covers, {} web left", self.art_all_pending.len(), self.web_all_pending.len()));
+            }
+            Msg::ArtWebFor { path, bytes } => {
+                self.web_all_pending.remove(&path);
+                if let Some(b) = bytes {
+                    if let Some(nb) = normalize_art(&b) {
+                        if write_art_cache(&path, &nb) {
+                            if self.no_art.remove(&path) {
+                                self.no_art_dirty = true;
+                            }
+                        } else if self.no_art.insert(path.clone()) {
+                            self.no_art_dirty = true;
+                        }
+                    } else if self.no_art.insert(path.clone()) {
+                        self.no_art_dirty = true;
+                    }
+                } else if self.no_art.insert(path.clone()) {
+                    self.no_art_dirty = true;
+                }
+                self.meta_all_tick(format!("Meta All: {} web art left", self.web_all_pending.len()));
+            }
+            Msg::Lyrics { artist, title, text } => {
+                if self.lyrics_for.as_deref() == self.state.current_song.as_deref() {
+                    if let Some(t) = text {
+                        self.lyrics = Some(t);
+                        self.lyrics_title = format!("{} - {}", artist, title);
+                    } else {
+                        self.set_error("Lyrics not found");
+                    }
+                }
+            }
+            Msg::YtStatus(s) => {
+                self.status = s;
+                self.status_until = Some(Instant::now() + Duration::from_secs(8));
+            }
+            Msg::YtStage { stage, label } => {
+                // A stage change restarts the clock for the paced stages and
+                // drops any stale real percentage, but the bar itself only ever
+                // moves forward.
+                if stage != self.yt_stage_idx {
+                    self.yt_stage_idx = stage;
+                    self.yt_stage_since = Instant::now();
+                }
+                self.yt_real_pct = None;
+                self.yt_band_label = label;
+                if self.yt_started.is_none() {
+                    self.yt_started = Some(Instant::now());
+                }
+                self.tick_yt_bar();
+            }
+            Msg::YtLog(s) => {
+                if let Some((p, sp, et)) = parse_yt_progress(&s) {
+                    self.yt_pct = p;
+                    self.yt_speed = sp;
+                    self.yt_eta = et;
+                    // yt-dlp's own percentage drives the download stage.
+                    self.yt_real_pct = Some(p);
+                    self.tick_yt_bar();
+                }
+                self.yt_log.push(s);
+                const MAX_LOG: usize = 60;
+                if self.yt_log.len() > MAX_LOG {
+                    let over = self.yt_log.len() - MAX_LOG;
+                    self.yt_log.drain(0..over);
+                }
+            }
+            Msg::YtDone { path, auto_play } => {
+                self.yt_pct = -1.0;
+                self.yt_started = None;
+                self.yt_bar = 1.0;
+                self.yt_speed.clear();
+                self.yt_eta.clear();
+                let s = path.to_string_lossy().to_string();
+                if !self.state.playlist.contains(&s) {
+                    self.state.playlist.push(s.clone());
+                    self.state.playlist.sort_by_key(|p| song_sort_key(p));
+                    self.rebuild_display_cache();
+                    self.save_settings();
+                    self.ingest_bands(&[s.clone()], None);
+                }
+                if auto_play {
+                    self.play_song(&s);
+                }
+                self.set_status(format!("Downloaded: {}", stem(&s)));
+                if !auto_play && self.yt_queue_processing {
+                    self.yt_queue_advance();
+                }
+            }
+            Msg::YtFail { err, auto_play } => {
+                self.yt_pct = -1.0;
+                self.yt_started = None;
+                self.yt_speed.clear();
+                self.yt_eta.clear();
+                // set_error only flashes for a few seconds, so a download that
+                // failed could easily pass unnoticed. Keep it in the YT log
+                // too - that panel holds its last 60 lines.
+                self.yt_log.push(format!("FAILED: {}", err));
+                const MAX_FAIL_LOG: usize = 60;
+                if self.yt_log.len() > MAX_FAIL_LOG {
+                    let over = self.yt_log.len() - MAX_FAIL_LOG;
+                    self.yt_log.drain(0..over);
+                }
+                self.set_error(err);
+                if !auto_play && self.yt_queue_processing {
+                    self.yt_queue_advance();
+                }
+            }
+            Msg::YtGroupEstablished { key, folder } => {
+                // Remember where this queue run started filing things so the
+                // next track from the same album joins the same folder.
+                if !self.yt_queue_processing {
+                    self.yt_queue_group = None;
+                } else {
+                    self.yt_queue_group = Some((key, folder));
+                }
+            }
+            Msg::YtResolved { idx, query, display } => {
+                if let Some(e) = self.yt_queue.get_mut(idx) {
+                    if e.0 == query {
+                        e.1 = display;
+                    }
+                }
+            }
+            Msg::Transcoded { display, wav } => {
+                let wavs = wav.to_string_lossy().to_string();
+                if let Some((pd, pa)) = self.pending_transcode.take() {
+                    self.transcodes.insert(pa.clone(), wavs.clone());
+                    if pd == display {
+                        self.do_play(&display, &pa);
+                    }
+                } else if !self.transcodes.contains_key(&display) {
+                    self.transcodes.insert(display.clone(), wavs);
+                }
+            }
+            Msg::TranscodeFail { display, err } => {
+                if let Some((pd, _)) = self.pending_transcode.take() {
+                    if pd == display {
+                        self.state.current_song = None;
+                        self.playing = String::new();
+                        self.pos = 0.0;
+                        self.len_secs = 0.0;
+                        self.play_started = None;
+                        self.set_error(format!("{}: {}", stem(&display), err));
+                    }
+                }
+            }
+            Msg::Recorded { display, path } => {
+                self.recording = false;
+                let p = Path::new(&path);
+                let dir = p.parent().map(|d| d.to_string_lossy().to_string()).unwrap_or_default();
+                self.set_status(format!("Recorded: {} → {}", stem(&display), dir));
+            }
+            Msg::RecordFail { display, err } => {
+                self.recording = false;
+                self.set_error(format!("{}: {}", stem(&display), err));
+            }
+            Msg::VideoFrame { w, h, rgba, gen } => {
+                if gen == self.video_gen {
+                    self.video_dims = (w, h);
+                    let size = [w as usize, h as usize];
+                    let img = egui::ColorImage::from_rgba_unmultiplied(size, &rgba);
+                    self.video_tex = Some(self.ctx.load_texture("video", img, egui::TextureOptions::LINEAR));
+                    self.video_loading_since = None;
+                    self.video_load_timed_out = false;
+                    if self.video_audio_pending && !self.video_paused {
+                        self.video_audio_pending = false;
+                        if let Some(s) = &self.video_sink {
+                            s.play();
+                            av_log("audio started on first frame");
+                        }
+                    }
+                    if self.video_deferred_open {
+                        self.video_deferred_open = false;
+                        av_log(&format!("FIRST FRAME {:.3}s after open", self.ctx.input(|i| i.time) - self.video_open_at));
+                    }
+                }
+            }
+            Msg::VideoDecodeErr { gen, err } => {
+                if gen == self.video_gen && !err.is_empty() {
+                    av_log(&format!("ffmpeg stderr: {}", err));
+                    self.video_decode_error = err;
+                }
+            }
+            Msg::VideoClosed { gen } => {
+                let was_eof = gen == self.video_gen && !self.video_closing;
+                if was_eof {
+                    if let Some(path) = self.video_current.clone() {
+                        self.video_positions.remove(&path);
+                        self.save_settings();
+                    }
+                    if !self.queue_next() {
+                        self.video_ended = true;
+                        self.video_paused = true;
+                        self.set_status("MOVIE: end - PLAY to replay");
+                    }
+                }
+            }
+            Msg::VideoPos { gen, secs } => {
+                if gen == self.video_gen {
+                    self.video_cur_secs = secs;
+                    let apos = self.video_sink.as_ref().map(|s| s.get_pos().as_secs_f32()).unwrap_or(-1.0);
+                    if apos >= 0.0 && self.video_seek_base <= secs {
+                        let audio_file = self.video_seek_base + apos;
+                        av_log(&format!("tick video={:.3} audio={:.3} drift={:+.0}ms", secs, audio_file, (audio_file - secs) * 1000.0));
+                    }
+                    if self.intro_skip_enabled && self.video_dur_secs > 0.0 {
+                        let cur_path = self.video_current.clone().unwrap_or_default();
+                        if !cur_path.ends_with("_cut.mkv") {
+                            // Only markers the user set by hand can trigger
+                            // this; unmarked videos read back as 0.0/0.0.
+                            let (ie, cs) = self.video_bound_secs();
+                            if secs < ie && ie > 2.0 {
+                                if let Some(cut) = self.video_cut_cache.get(&cur_path).cloned() {
+                                    av_log(&format!("SKIP intro at {:.3}s -> cut file {}", secs, cut));
+                                    self.play_video_item(cut);
+                                    self.set_status("Auto-cut skip → cut file");
+                                } else {
+                                    av_log(&format!("SKIP intro at {:.3}s -> seek {:.3}s (no cut file)", secs, ie + 1.0));
+                                    self.seek_video(ie + 1.0);
+                                    self.set_status(format!("Skipped intro → {:.0}s ({})", ie, fmt_time(ie)));
+                                }
+                            } else if cs > 2.0 && secs >= cs {
+                                if self.queue_next() {
+                                    av_log(&format!("SKIP credits at {:.3}s (cs={:.3}) -> next", secs, cs));
+                                    self.set_status("Skipped credits → next video");
+                                } else {
+                                    // Nothing to advance to (single-video
+                                    // queue): stop instead of replaying the
+                                    // same file over and over.
+                                    av_log(&format!("SKIP credits at {:.3}s (cs={:.3}) -> end", secs, cs));
+                                    self.video_paused = true;
+                                    self.video_ended = true;
+                                    self.set_status("Credits reached → PLAY to replay");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Msg::VideoMeta { gen, dur } => {
+                if gen == self.video_gen {
+                    self.video_dur_secs = dur;
+                }
+            }
+            Msg::VideoBounds { gen, path, intro_end, credits_start } => {
+                // Intentionally ignored. Intro/credits markers are manual
+                // only: nothing may auto-detect them, persist them, or
+                // auto-cut a video because they happen to look plausible.
+                if gen == self.video_gen {
+                    av_log(&format!(
+                        "ignoring auto-detected bounds {} intro={:.1} credits={:.1}",
+                        stem(&path), intro_end, credits_start
+                    ));
+                }
+            }
+            Msg::VideoCutDone { gen, path, cut, err } => {
+                if gen == self.video_gen {
+                    self.video_cut_inflight.remove(&path);
+                    if let Some(cp) = cut {
+                        self.video_cut_cache.insert(path.clone(), cp.clone());
+                        if let Some(&(ie, cs)) = self.video_bounds.get(&path) {
+                            self.video_bounds.insert(cp.clone(), (ie, cs));
+                        }
+                        self.save_settings();
+                        if self.video_current.as_deref() == Some(path.as_str()) {
+                            self.set_status(format!("Auto-cut done → playing {}", stem(&cp)));
+                            self.play_video_item(cp);
+                        }
+                    } else if let Some(e) = err {
+                        self.set_status(format!("Auto-cut failed: {}; using seek skip", e));
+                    }
+                }
+            }
         }
     }
 
@@ -1298,6 +1526,7 @@ impl eframe::App for PlayerApp {
         let now = ctx.input(|i| i.time);
         let dt = ((now - self.last_time) as f32).clamp(0.0, 0.1);
         self.last_time = now;
+        self.tick_yt_bar();
         self.step_tape(dt);
         self.step_wind(dt);
         self.apply_visuals(&self.ctx);
@@ -1322,6 +1551,28 @@ impl eframe::App for PlayerApp {
             self.video_audio_pending = false;
             if let Some(s) = &self.video_sink {
                 s.play();
+            }
+        }
+        // A decode that never produces its first frame used to leave the movie
+        // view on a black "LOADING..." with no way to tell whether it was still
+        // working. Say so once instead. Deliberately does NOT close the video:
+        // the lib thread queues VideoOpen behind library scans, so a long wait
+        // can be perfectly normal and killing it here would break playback.
+        if self.video_on && !self.video_load_timed_out {
+            if let Some(since) = self.video_loading_since {
+                let waited = since.elapsed().as_secs_f32();
+                if waited > 20.0 {
+                    self.video_load_timed_out = true;
+                    let name = stem(self.video_current.as_deref().unwrap_or("?"));
+                    let extra = self.video_decode_error.clone();
+                    let msg = if extra.is_empty() {
+                        format!("Still opening {} after {:.0}s", name, waited)
+                    } else {
+                        format!("Still opening {} after {:.0}s: {}", name, waited, extra)
+                    };
+                    self.set_error(msg);
+                    av_log(&format!("slow open: {} after {:.1}s (ffmpeg: {})", name, waited, extra));
+                }
             }
         }
         self.tick_radio(now);

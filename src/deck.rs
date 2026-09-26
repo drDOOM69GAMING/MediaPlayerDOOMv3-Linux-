@@ -349,6 +349,18 @@ impl PlayerApp {
         let root_name = root.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
         let nested_cnt = files.iter().filter(|f| Path::new(f).parent() != Some(root)).count();
         let library_mode = nested_cnt > 0 && nested_cnt > files.len() - nested_cnt;
+        // Membership used to be tested with `Vec::contains`, which is O(n) per
+        // file. On a library this size that is O(n^2) string comparisons - tens
+        // of millions of them, on every launch, before a song can play. Build
+        // the lookup sets once up front: a single pass of clones is
+        // milliseconds. Sets are owned (not borrowing self) so the
+        // `band_map.entry` below can still take a mutable borrow.
+        let mut lib_seen: HashSet<String> = self.full_library.iter().cloned().collect();
+        let mut band_seen: HashMap<String, HashSet<String>> = self
+            .band_map
+            .iter()
+            .map(|(k, v)| (k.clone(), v.iter().cloned().collect()))
+            .collect();
         let mut changed = false;
         for f in files {
             let p = Path::new(f);
@@ -366,12 +378,13 @@ impl PlayerApp {
                 root_name.clone()
             };
             if band.is_empty() { continue; }
-            if !self.full_library.contains(f) {
+            if lib_seen.insert(f.clone()) {
                 self.full_library.push(f.clone());
                 changed = true;
             }
             let list = self.band_map.entry(band.clone()).or_default();
-            if !list.contains(f) {
+            let seen = band_seen.entry(band.clone()).or_default();
+            if seen.insert(f.clone()) {
                 list.push(f.clone());
                 changed = true;
             }
