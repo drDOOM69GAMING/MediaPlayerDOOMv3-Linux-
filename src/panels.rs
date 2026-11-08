@@ -785,7 +785,7 @@ impl PlayerApp {
                         let _ = self.lib_tx.send(LibCmd::AddMany(entries));
                     }
                 }
-                if retro_btn(ui, "Meta All", th.playing_fg, th.btn_bg).on_hover_text("Fetch tags + cover art for every playlist track into the local %APPDATA% cache (one-time per track)").clicked() {
+                if retro_btn(ui, "Meta All", th.playing_fg, th.btn_bg).on_hover_text("Fetch tags + cover art for every playlist track into the local app-data cache (one-time per track)").clicked() {
                     self.download_all_meta();
                 }
             });

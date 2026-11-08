@@ -214,7 +214,7 @@ pub fn detect_credit_start(slice: &[f32], secs_per_sample: f32) -> f32 {
 pub fn cut_video_file(source: &str, intro_end: f32, credits_start: f32) -> Result<String, String> {
     let mm = mkvmerge_path();
     if !mm.is_file() {
-        return Err("mkvmerge.exe not available".into());
+        return Err("mkvmerge not available (install MKVToolNix)".into());
     }
     let src = Path::new(source);
     let stem = src.file_stem().unwrap_or_default().to_string_lossy();

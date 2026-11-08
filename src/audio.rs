@@ -152,7 +152,7 @@ impl PlayerApp {
             );
         if needs_ffmpeg {
             if !ffmpeg_path().is_file() {
-                self.set_error(format!("Cannot decode {} (ffmpeg missing from tools folder)", stem(display)));
+                self.set_error(format!("Cannot decode {} (ffmpeg not found - install it or add it to the tools folder)", stem(display)));
                 return;
             }
             self.begin_transcode(display, audio);
@@ -166,7 +166,7 @@ impl PlayerApp {
                     return;
                 }
                 if !ffmpeg_path().is_file() {
-                    self.set_error(format!("Cannot decode {} (ffmpeg missing from tools folder)", stem(display)));
+                    self.set_error(format!("Cannot decode {} (ffmpeg not found - install it or add it to the tools folder)", stem(display)));
                     return;
                 }
                 self.begin_transcode(display, audio);
