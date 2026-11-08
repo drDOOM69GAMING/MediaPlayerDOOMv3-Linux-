@@ -5,7 +5,6 @@ use eframe::egui::{Color32, ColorImage, RichText, TextureHandle, TextureOptions}
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::File;
 use std::io::{BufReader, Read};
-use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command};
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -15,9 +14,6 @@ use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use rand::Rng;
 use rodio::{Decoder, OutputStreamHandle, Sink, Source};
-use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
-use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
-use windows_sys::Win32::Foundation::HWND;
 use crate::app::{PlayerApp, PlayerState};
 use crate::{
     consts::*, deck_widgets::*, eq::*, ffmpeg::*, files::*, library::*,

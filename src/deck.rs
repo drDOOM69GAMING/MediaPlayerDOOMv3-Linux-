@@ -5,7 +5,6 @@ use eframe::egui::{Color32, ColorImage, RichText, TextureHandle, TextureOptions}
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::File;
 use std::io::{BufReader, Read};
-use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command};
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -15,9 +14,6 @@ use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use rand::Rng;
 use rodio::{Decoder, OutputStreamHandle, Sink, Source};
-use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
-use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
-use windows_sys::Win32::Foundation::HWND;
 use crate::app::{PlayerApp, PlayerState};
 use crate::{
     consts::*, deck_widgets::*, eq::*, ffmpeg::*, files::*, library::*,
@@ -37,6 +33,21 @@ impl PlayerApp {
         self.playing = Self::playing_display(path);
         self.do_play(path, path);
         self.set_status(format!("TAPE resumed: {}", stem(path)));
+    }
+
+    /// Cycle TAPE -> CD -> RADIO -> TAPE (the `D` shortcut).
+    pub(crate) fn cycle_deck_mode(&mut self) {
+        let next = match self.deck_mode {
+            DeckMode::Tape => DeckMode::Disc,
+            DeckMode::Disc => DeckMode::Radio,
+            DeckMode::Radio => DeckMode::Tape,
+        };
+        self.set_deck_mode(next);
+        self.set_status(format!("Deck: {}", match next {
+            DeckMode::Tape => "TAPE",
+            DeckMode::Disc => "CD",
+            DeckMode::Radio => "RADIO",
+        }));
     }
 
     pub(crate) fn set_deck_mode(&mut self, m: DeckMode) {
@@ -239,11 +250,7 @@ impl PlayerApp {
             return;
         };
         let st = self.radio_presets[idx].clone();
-        let rec_dir = std::env::current_exe()
-            .ok()
-            .and_then(|e| e.parent().map(|p| p.to_path_buf()))
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("Recordings");
+        let rec_dir = recordings_dir();
         let safe: String = st
             .name
             .chars()
@@ -626,11 +633,7 @@ impl PlayerApp {
             return;
         }
         let base = stem(&s);
-        let rec_dir = std::env::current_exe()
-            .ok()
-            .and_then(|e| e.parent().map(|p| p.to_path_buf()))
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("Recordings");
+        let rec_dir = recordings_dir();
         let mut dest = rec_dir.join(format!("{}_REC.wav", base));
         let mut n = 2;
         while dest.exists() {

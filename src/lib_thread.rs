@@ -2,7 +2,6 @@
 #![allow(dead_code)]
 // Background lib thread: video/audio decode via ffmpeg, frame pacing.
 use std::io::Read;
-use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -276,7 +275,7 @@ LibCmd::Scan(dir) => {
                 // stuck on a black screen forever. Un-pause it first so it
                 // resumes, hits the dead pipe, and exits cleanly.
                 video_pause.store(false, std::sync::atomic::Ordering::Relaxed);
-                if let Some(mut c) = video_child.take() { let _ = c.kill(); }
+                if let Some(mut c) = video_child.take() { let _ = c.kill(); let _ = c.wait(); }
                 if let Some(t) = video_thread.take() { let _ = t.join(); }
                 av_log("open: old video killed+joined");
                 let t_open = std::time::Instant::now();
@@ -293,7 +292,7 @@ LibCmd::Scan(dir) => {
                     .args(["-an", "-vf", &format!("scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2", tw, th, tw, th), "-pix_fmt", "rgb24", "-f", "rawvideo", "-"])
                     .stdout(std::process::Stdio::piped())
                     .stderr(std::process::Stdio::piped())
-                    .creation_flags(NO_WINDOW);
+                    .no_window();
                 let mut child = match cmd.spawn() {
                     Ok(c) => c,
                     Err(e) => {
@@ -459,7 +458,7 @@ LibCmd::Scan(dir) => {
                 // Same unpause-first reasoning as VideoOpen: a paused reader
                 // would otherwise never exit, deadlocking the join below.
                 video_pause.store(false, std::sync::atomic::Ordering::Relaxed);
-                if let Some(mut c) = video_child.take() { let _ = c.kill(); }
+                if let Some(mut c) = video_child.take() { let _ = c.kill(); let _ = c.wait(); }
                 if let Some(t) = video_thread.take() { let _ = t.join(); }
                 let _ = tx.send(Msg::VideoClosed { gen: 0 });
             }

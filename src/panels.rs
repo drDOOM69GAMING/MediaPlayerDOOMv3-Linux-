@@ -5,7 +5,6 @@ use eframe::egui::{Color32, ColorImage, RichText, TextureHandle, TextureOptions}
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::File;
 use std::io::{BufReader, Read};
-use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command};
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -15,9 +14,6 @@ use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use rand::Rng;
 use rodio::{Decoder, OutputStreamHandle, Sink, Source};
-use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
-use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
-use windows_sys::Win32::Foundation::HWND;
 use crate::app::{PlayerApp, PlayerState};
 use crate::{
     consts::*, deck_widgets::*, eq::*, ffmpeg::*, files::*, library::*,
@@ -1252,7 +1248,7 @@ impl PlayerApp {
                         egui::Stroke::new(1.0, if major { Color32::from_gray(170) } else { Color32::from_gray(90) }),
                     );
                     if major {
-                        let lab = if self.radio_band == "AM" { format!("{}", f.round()) } else { format!("{}", f.round()) };
+                        let lab = format!("{}", f.round());
                         p.text(
                             egui::pos2(x, screen.min.y + 60.0),
                             egui::Align2::CENTER_TOP,

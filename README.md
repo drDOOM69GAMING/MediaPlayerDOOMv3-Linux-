@@ -1,6 +1,6 @@
 # MediaPlayerDOOM v3
 
-A retro DOOM-styled media player for Windows, rendered in egui. Tape, CD, and Radio faces on the deck, plus a band/artist catalog, background pulsing speakers, recording, YouTube downloads, and a fullscreen in-app video player with a queue. ffmpeg, ffprobe, and yt-dlp are embedded in the exe, so it runs fully standalone.
+A retro DOOM-styled media player rendered in egui. Tape, CD, and Radio faces on the deck, plus a band/artist catalog, background pulsing speakers, recording, YouTube downloads, and a fullscreen in-app video player with a queue. Runs on Windows 10/11 and Linux (ported and tested on CachyOS/Arch with KDE Plasma on Wayland). On Windows it is a single self-contained exe; on Linux it uses the distro's ffmpeg/ffprobe/mkvmerge and downloads yt-dlp on first run.
 
 ## Features
 
@@ -25,28 +25,59 @@ A retro DOOM-styled media player for Windows, rendered in egui. Tape, CD, and Ra
 - **Album art**: local `cover/folder` art always wins; online lookup only as a fallback when no local art exists (so pictures never get replaced by wrong web matches)
 - **Lyrics**: Artist/Track auto-detected from the filename when tags are unknown
 - **Playlist management**: drag-to-reorder, save/load JSON, playlist-only mode, sequential mode, per-CD directory ordering, and a live current-song highlight that scrolls to and marks whatever is playing
-- **System tray** + global hotkeys (media keys)
-- **Taskbar icon**: the app icon is applied directly on the real window handle at launch, so it always shows in the taskbar and Alt-Tab
-- **YouTube**: paste a URL or search term to download audio/video via the embedded yt-dlp
+- **System tray** + global hotkeys (media keys where the desktop allows them)
+- **Taskbar icon**: on Windows the app icon is applied directly on the real window handle at launch; on Linux the window/tray icon comes from the icon data embedded in the binary
+- **YouTube**: paste a URL or search term to download audio/video via yt-dlp
 
 ## Requirements
 
-- Windows 10/11 x64
+**Windows 10/11 x64**
 - Rust toolchain to build from source
 
-**The exe is self-contained (single file).** ffmpeg, ffprobe, and yt-dlp are embedded at build time. On first run they self-extract to `%LOCALAPPDATA%\MediaPlayerOFDOOM\tools`, and nothing appears next to the exe. You can move or copy the exe anywhere by itself and everything still works.
+**Linux (tested on CachyOS, Arch-based, KDE Plasma/Wayland)**
+- Rust toolchain (`rustup` or the distro's `rust`)
+- Runtime tools: `ffmpeg` (includes ffprobe) and `mkvmerge` (MKVToolNix) from your distro
+- An XDG desktop portal for the file pickers (KDE/GNOME provide one)
+- PipeWire or PulseAudio for sound
+
+```bash
+sudo pacman -S --needed base-devel rust ffmpeg mkvtoolnix-cli \
+  alsa-lib openssl libxkbcommon wayland libx11
+```
+
+yt-dlp is downloaded automatically into the app data folder on first run if it
+is not already on `PATH`. The Linux tray uses the pure-Rust StatusNotifierItem
+implementation, so no GTK/libappindicator/libxdo packages are needed.
+
+**Windows builds** are self-contained (single file). ffmpeg, ffprobe, and yt-dlp
+are embedded at build time. On first run they self-extract to
+`%LOCALAPPDATA%\MediaPlayerOFDOOM\tools`, and nothing appears next to the exe.
+You can move or copy the exe anywhere by itself and everything still works.
 
 ## Build
 
-```
+```bash
 cargo build --release
 ```
 
-The binary lands at `target/release/mediaplayerofdoom.exe`. It finds your music automatically by scanning all drives for the `Music` folder with the most files, or pick any folder with **ADD DIR**.
+- Windows: `target/release/mediaplayerofdoom.exe`
+- Linux: `target/release/mediaplayerofdoom`
+
+It finds your music automatically (the XDG Music folder on Linux, and the
+`Music` folder with the most files on Windows), or pick any folder with
+**ADD DIR**.
+
+### Where files live on Linux
+
+- Data/tools/cache: `~/.local/share/mediaplayerofdoom/`
+- Recordings: `~/Music/Recordings/` (or your `XDG_MUSIC_DIR`)
+- Downloads: your Music folder
 
 ## Keyboard
 
-`P` play/pause · `S`/`N` skip · `Left` previous · `R` record · `+`/`-` volume · `F` fullscreen · `M` mute · `D` mode · `V` video · `L` lyrics
+`P` play/pause · `S`/`N` skip · `Left` previous · `Right` next · `Shift+Left/Right` seek 10s · `R` record · `+`/`-` volume · `F` fullscreen · `M` mute · `D` deck mode · `V` video · `L` lyrics · `O` playlist-only · `B` repeat · `J` search · `T` theme
+
+Global media keys (Play/Pause, Next, Previous, Stop) and `Ctrl+Alt+M` / `Ctrl+Alt+Q` also work where the desktop permits global grabs. Wayland usually reserves media keys for the desktop, so use the in-app shortcuts there.
 
 ## App Images
 <img width="3840" height="2160" alt="stars for the star" src="https://github.com/user-attachments/assets/c68a0bfc-d7ab-4d31-a8fd-d9bdf186a1ca" />
@@ -59,7 +90,10 @@ The binary lands at `target/release/mediaplayerofdoom.exe`. It finds your music 
 
 - The **AUTO preamp** in the EQ measures the boosted response and backs off the gain automatically so you never clip, even with a loud preset.
 - The EQ curve panel, preset cycling, band sliders, and the ON-OFF toggle all apply your changes live while music plays, with no restart and no temporary files.
-- If you build from source and have `tools/ffmpeg.exe`, `tools/ffprobe.exe`, `tools/yt-dlp.exe` next to `Cargo.toml`, they are embedded into the exe by `build.rs` (that folder is gitignored). Without them the app falls back to downloading on first run.
+- If you build from source on Windows and have `tools/ffmpeg.exe`, `tools/ffprobe.exe`, `tools/yt-dlp.exe` next to `Cargo.toml`, they are embedded into the exe by `build.rs` (that folder is gitignored). Without them the app falls back to downloading on first run.
+- On Linux the app resolves `ffmpeg`, `ffprobe`, `yt-dlp`, and `mkvmerge` from its own data folder first, then from `PATH`, so distro packages are used directly. Features that need a missing tool report a clear status instead of crashing.
+- Linux data/cache paths follow the XDG spec (`$XDG_DATA_HOME/mediaplayerofdoom`, normally `~/.local/share/mediaplayerofdoom`). Windows keeps the original `%APPDATA%\MediaPlayerOFDOOM` location, so existing libraries and settings are untouched.
+
 
 ## Acknowledgements
 
@@ -74,6 +108,20 @@ This app is built on the work of some incredible open-source projects, and it wo
 - The **Rust** language and its crate ecosystem.
 
 Full details, license texts, and donation links are in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). If you can, consider donating to FFmpeg, yt-dlp, and MKVToolNix - they give this all away for free.
+
+## v3.1.0 changelog
+
+- **Linux port (CachyOS / Arch tested)**: builds and runs natively on X11 and Wayland with the same UI and features as the Windows build.
+  - XDG data paths (`~/.local/share/mediaplayerofdoom`) and XDG Music folder detection, including removable drives under `/run/media`, `/media`, and `/mnt`
+  - Uses the distro's `ffmpeg`, `ffprobe`, and `mkvmerge` from `PATH`; downloads the Linux `yt-dlp` binary on first run
+  - Pure-Rust StatusNotifierItem tray (`ksni`) on Linux - no GTK, libappindicator, or libxdo dependencies
+  - Recordings save to `~/Music/Recordings` instead of next to the executable
+  - `xdg-open` for "show in folder"; process spawning is portable; media keys register where the desktop allows
+- **Fixed the embedded icon pipeline**: the 16:9 artwork is now center-cropped to a real square before resizing, so window/tray/taskbar icons get a correctly sized RGBA buffer on Windows and Linux instead of a truncated one.
+- **Keyboard shortcuts now match the documentation**: `P` play/pause, `S`/`N` skip, `Left` previous, `Right` next, `R` record, `M` mute, `D` deck mode, `V` video, `L` lyrics, `F` fullscreen, `O` playlist-only.
+- **Media/global hotkeys**: Play/Pause, Next, Previous, and Stop are registered best-effort in addition to `Ctrl+Alt+M` / `Ctrl+Alt+Q`.
+- Added media pipeline tests (ffmpeg probe/decode/transcode/record, mkvmerge cut) and icon/size checks; **58 tests pass**.
+- Version bump to **v3.1.0**
 
 ## v3.0.1 changelog
 

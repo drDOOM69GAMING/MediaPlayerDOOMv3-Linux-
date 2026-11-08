@@ -4,19 +4,18 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::os::windows::process::CommandExt;
 use crate::consts::NO_WINDOW;
 use crate::tools::*;
 use crate::util::*;
 pub fn probe_video_duration(path: &str) -> f32 {
-    let fp = tools_dir().join("ffprobe.exe");
+    let fp = ffprobe_path();
     if !fp.is_file() {
         return 0.0;
     }
     let out = std::process::Command::new(fp)
         .args(["-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1"])
         .arg(path)
-        .creation_flags(NO_WINDOW)
+        .no_window()
         .output();
     match out {
         Ok(o) => std::str::from_utf8(&o.stdout).ok()
@@ -27,14 +26,14 @@ pub fn probe_video_duration(path: &str) -> f32 {
 }
 
 pub fn probe_video_info(path: &str) -> (u32, u32, f32) {
-    let fp = tools_dir().join("ffprobe.exe");
+    let fp = ffprobe_path();
     if !fp.is_file() {
         return (0, 0, 0.0);
     }
     let out = std::process::Command::new(fp)
         .args(["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height,avg_frame_rate", "-of", "default=noprint_wrappers=1:nokey=1"])
         .arg(path)
-        .creation_flags(NO_WINDOW)
+        .no_window()
         .output();
     match out {
         Ok(o) => {
@@ -86,7 +85,7 @@ pub fn video_audio_levels(path: &str, ffmpeg: &Path, start: f32, len: f32) -> Ve
         .args(["-vn", "-ac", "1", "-ar", "8000", "-f", "s16le", "-"])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
-        .creation_flags(NO_WINDOW);
+        .no_window();
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(_) => return vec![],
@@ -248,7 +247,7 @@ pub fn cut_video_file(source: &str, intro_end: f32, credits_start: f32) -> Resul
     args.push(spec);
     args.push(source.to_string());
     let out = std::process::Command::new(mm)
-        .creation_flags(NO_WINDOW)
+        .no_window()
         .args(&args)
         .output()
         .map_err(|e| format!("mkvmerge failed to start: {}", e))?;
@@ -268,5 +267,92 @@ pub fn cut_video_file(source: &str, intro_end: f32, credits_start: f32) -> Resul
         return Err("mkvmerge finished but cut file not found".into());
     }
     Ok(cut_path.to_string_lossy().to_string())
+}
+
+#[cfg(test)]
+mod media_pipeline_tests {
+    use super::*;
+    use crate::pipe::spawn_video_audio;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn scratch() -> PathBuf {
+        let n = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let d = std::env::temp_dir().join(format!("mediaplayerofdoom-test-{}-{}", std::process::id(), n));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// Generate a tiny MP4 with video + audio using the same ffmpeg the app uses.
+    fn make_video(dir: &Path) -> PathBuf {
+        let out = dir.join("sample.mp4");
+        let st = Command::new(ffmpeg_path())
+            .args([
+                "-hide_banner", "-loglevel", "error", "-y",
+                "-f", "lavfi", "-i", "testsrc=size=320x240:rate=24:duration=3",
+                "-f", "lavfi", "-i", "sine=frequency=440:duration=3",
+                "-c:v", "mpeg4", "-c:a", "aac", "-shortest",
+            ])
+            .arg(&out)
+            .status()
+            .expect("ffmpeg should start");
+        assert!(st.success(), "ffmpeg failed to generate test media");
+        out
+    }
+
+    #[test]
+    fn helper_tools_resolve_on_this_platform() {
+        assert!(ffmpeg_path().is_file(), "ffmpeg not found: use PATH or the tools folder");
+        assert!(ffprobe_path().is_file(), "ffprobe not found: use PATH or the tools folder");
+        assert_ne!(ffmpeg_path(), ffprobe_path());
+    }
+
+    #[test]
+    fn probes_a_real_video() {
+        let dir = scratch();
+        let v = make_video(&dir);
+        let (w, h, fps) = probe_video_info(&v.to_string_lossy());
+        assert_eq!((w, h), (320, 240));
+        assert!((fps - 24.0).abs() < 0.5, "fps was {fps}");
+        let dur = probe_video_duration(&v.to_string_lossy());
+        assert!((dur - 3.0).abs() < 0.3, "duration was {dur}");
+        let levels = video_audio_levels(&v.to_string_lossy(), &ffmpeg_path(), 0.0, 2.0);
+        assert!(!levels.is_empty());
+        assert!(levels.iter().any(|db| *db > -60.0), "tone was not detected");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn video_audio_pipes_decoded_samples() {
+        let dir = scratch();
+        let v = make_video(&dir);
+        let (mut child, mut pipe) = spawn_video_audio(&v.to_string_lossy(), &ffmpeg_path(), 0.0)
+            .expect("audio pipe should start");
+        let mut got = 0usize;
+        for _ in 0..(44100 / 10 * 2) {
+            match pipe.next() {
+                Some(_) => got += 1,
+                None => break,
+            }
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(got > 100, "only got {got} audio samples");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cuts_a_video_with_mkvmerge_when_available() {
+        if !mkvmerge_path().is_file() {
+            eprintln!("mkvmerge not installed, skipping cut test");
+            return;
+        }
+        let dir = scratch();
+        let v = make_video(&dir);
+        let cut = cut_video_file(&v.to_string_lossy(), 1.0, 2.0).expect("cut should succeed");
+        assert!(Path::new(&cut).is_file());
+        assert!(std::fs::metadata(&cut).unwrap().len() > 1024);
+        let _ = std::fs::remove_file(&cut);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 

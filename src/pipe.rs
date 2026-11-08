@@ -6,11 +6,11 @@ use std::io::{BufReader, Read};
 use std::path::Path;
 use std::process::{Child, ChildStdout, Command, Stdio};
 use std::time::Duration;
-use std::os::windows::process::CommandExt;
 use rodio::{Sample, Source};
 use crate::consts::NO_WINDOW;
 use crate::eq::EqShared;
 use crate::tools::ffmpeg_path;
+use crate::util::CommandNoWindow;
 pub struct PipeSource {
     reader: BufReader<ChildStdout>,
     pending: VecDeque<i16>,
@@ -62,7 +62,7 @@ pub fn spawn_radio_stream(url: &str, ffmpeg: &Path) -> Result<(Child, PipeSource
     let mut child = Command::new(ffmpeg.to_string_lossy().to_string())
         .args(["-i", url, "-vn", "-ac", "2", "-ar", "44100", "-f", "s16le", "-"])
         .stdout(std::process::Stdio::piped())
-        .creation_flags(NO_WINDOW)
+        .no_window()
         .spawn()
         .map_err(|e| format!("ffmpeg failed to start: {}", e))?;
     let stdout = child.stdout.take().ok_or("ffmpeg gave no output")?;
@@ -82,7 +82,7 @@ pub fn spawn_video_audio(path: &str, ffmpeg: &Path, seek: f32) -> Result<(Child,
     let mut child = Command::new(ffmpeg.to_string_lossy().to_string())
         .args(&args)
         .stdout(std::process::Stdio::piped())
-        .creation_flags(NO_WINDOW)
+        .no_window()
         .spawn()
         .map_err(|e| format!("ffmpeg video audio failed to start: {}", e))?;
     let stdout = child.stdout.take().ok_or("ffmpeg gave no audio output")?;

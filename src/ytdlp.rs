@@ -7,7 +7,6 @@ use std::sync::mpsc::Sender;
 use std::time::Duration;
 use std::collections::HashMap;
 use std::io::{BufReader, Read};
-use std::os::windows::process::CommandExt;
 use crate::consts::NO_WINDOW;
 use crate::network::percent_encode;
 use crate::tools::*;
@@ -53,7 +52,7 @@ pub fn yt_lookup(
     target: &str,
 ) -> Result<(String, String, String, String, String, f64), String> {
     let mut child = std::process::Command::new(yt)
-        .creation_flags(NO_WINDOW)
+        .no_window()
         .args(["--skip-download", "--no-warnings", "--newline", "--print", "%(id)s|%(title)s|%(artist)s|%(uploader)s|%(album)s|%(duration)s", target])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -418,7 +417,7 @@ fn yt_retag(
     }
     args.push(dst.to_string_lossy().to_string());
     let out = std::process::Command::new(ffmpeg)
-        .creation_flags(NO_WINDOW)
+        .no_window()
         .args(&args)
         .output()
         .map_err(|e| format!("ffmpeg failed to start: {}", e))?;
@@ -479,7 +478,7 @@ pub fn yt_grab(
     args.push(tpl.to_string_lossy().to_string());
     args.push(target.to_string());
     let mut child = std::process::Command::new(yt)
-        .creation_flags(NO_WINDOW)
+        .no_window()
         .args(&args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -568,7 +567,7 @@ pub fn yt_grab(
         Ok(()) => {
             // Windows rename will not overwrite, so the original goes first.
             let _ = std::fs::remove_file(&final_mp3);
-            if let Err(e) = std::fs::rename(&tagged, &final_mp3) {
+            if let Err(e) = move_file(&tagged, &final_mp3) {
                 let _ = std::fs::remove_file(&tagged);
                 yt_stage(tx, format!("[2/3] WARNING: could not replace tags: {}", e));
             }
@@ -785,7 +784,7 @@ pub fn yt_download_and_store(
     }
     yt_stage(tx, format!("[3/3] saving to {}", final_path.display()));
     yt_stage_bar(tx, STAGE_SAVE, "saving to Music folder");
-    std::fs::rename(&mp3, &final_path).map_err(|e| {
+    move_file(&mp3, &final_path).map_err(|e| {
         let m = format!("could not save to Music folder: {}", e);
         yt_stage(tx, format!("[3/3] FAILED: {}", m));
         m

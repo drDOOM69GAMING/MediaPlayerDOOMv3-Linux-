@@ -1,6 +1,6 @@
 [package]
 name = "mediaplayerofdoom"
-version = "3.0.1"
+version = "3.1.0"
 edition = "2021"
 
 [dependencies]
@@ -17,16 +17,21 @@ serde_json = "1"
 regex = "1"
 rand = "0.9"
 rfd = "0.14"
-tray-icon = "0.24"
 global-hotkey = "0.8"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
-[target.'cfg(target_os = "windows")'.dependencies]
+[target.'cfg(windows)'.dependencies]
+tray-icon = "0.24"
 raw-window-handle = "0.6"
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+# Linux tray uses the pure-Rust StatusNotifierItem implementation so the app
+# needs no GTK/libappindicator/libxdo at build or run time.
+[target.'cfg(target_os = "linux")'.dependencies]
+ksni = { version = "0.3", features = ["blocking"] }
 
 [build-dependencies]
 embed-resource = "2"

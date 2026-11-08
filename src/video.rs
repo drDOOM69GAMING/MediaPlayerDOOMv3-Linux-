@@ -5,7 +5,6 @@ use eframe::egui::{Color32, ColorImage, RichText, TextureHandle, TextureOptions}
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::File;
 use std::io::{BufReader, Read};
-use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command};
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -15,9 +14,6 @@ use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use rand::Rng;
 use rodio::{Decoder, OutputStreamHandle, Sink, Source};
-use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
-use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
-use windows_sys::Win32::Foundation::HWND;
 use crate::app::{PlayerApp, PlayerState};
 use crate::{
     consts::*, deck_widgets::*, eq::*, ffmpeg::*, files::*, library::*,
@@ -97,6 +93,7 @@ impl PlayerApp {
                     self.video_sink = Some(sink);
                 } else {
                     let _ = child.kill();
+                    let _ = child.wait();
                     av_log("audio sink creation FAILED");
                 }
             }
@@ -117,6 +114,7 @@ impl PlayerApp {
         }
         if let Some(mut c) = self.video_audio_proc.take() {
             let _ = c.kill();
+            let _ = c.wait();
         }
         if let Some(s) = self.video_sink.take() {
             s.stop();
@@ -154,6 +152,7 @@ impl PlayerApp {
         self.video_closing = false;
         if let Some(mut c) = self.video_audio_proc.take() {
             let _ = c.kill();
+            let _ = c.wait();
         }
         if let Some(s) = self.video_sink.take() {
             s.stop();
@@ -355,6 +354,7 @@ impl PlayerApp {
         self.set_video_fs(false);
         if let Some(mut c) = self.video_audio_proc.take() {
             let _ = c.kill();
+            let _ = c.wait();
         }
         if let Some(s) = self.video_sink.take() {
             s.stop();
@@ -817,13 +817,24 @@ mod video_tests {
         (HashMap::new(), HashMap::new())
     }
 
+    /// Build a platform-native path so these tests exercise the OS separator
+    /// logic that `resolve_bounds` actually uses (a hard-coded `E:\...` only
+    /// works on Windows and silently broke on Linux).
+    fn p(parts: &[&str]) -> String {
+        let mut b = std::path::PathBuf::new();
+        for part in parts {
+            b.push(part);
+        }
+        b.to_string_lossy().to_string()
+    }
+
     /// The reported bug: with `intro_skip_enabled` on, every video was being
     /// skipped 90s in and cut, because bounds were invented for any video that
     /// had no stored marker.
     #[test]
     fn unmarked_video_has_no_bounds() {
         let (v, s) = maps();
-        let (i, c) = resolve_bounds(&v, &s, Some(r"E:\DRAGONBALL\Dragon Ball.118.mkv"));
+        let (i, c) = resolve_bounds(&v, &s, Some(&p(&["DRAGONBALL", "Dragon Ball.118.mkv"])));
         assert_eq!((i, c), (0.0, 0.0), "must not invent an intro bound");
         assert_eq!((i, c), (0.0, 0.0), "must not invent a credits bound");
     }
@@ -837,8 +848,9 @@ mod video_tests {
     #[test]
     fn manual_per_file_marker_is_used() {
         let (mut v, s) = maps();
-        v.insert(r"E:\SHOW\ep01.mkv".to_string(), (81.0, 1349.5));
-        assert_eq!(resolve_bounds(&v, &s, Some(r"E:\SHOW\ep01.mkv")), (81.0, 1349.5));
+        let file = p(&["SHOW", "ep01.mkv"]);
+        v.insert(file.clone(), (81.0, 1349.5));
+        assert_eq!(resolve_bounds(&v, &s, Some(&file)), (81.0, 1349.5));
     }
 
     /// The INTRO/CREDS buttons also record a per-show preset, which is what
@@ -846,23 +858,27 @@ mod video_tests {
     #[test]
     fn show_preset_applies_to_unmarked_episodes() {
         let (v, mut s) = maps();
-        s.insert(r"E:\SHOW".to_string(), (81.0, 1349.5));
-        assert_eq!(resolve_bounds(&v, &s, Some(r"E:\SHOW\ep02.mkv")), (81.0, 1349.5));
+        s.insert(p(&["SHOW"]), (81.0, 1349.5));
+        assert_eq!(
+            resolve_bounds(&v, &s, Some(&p(&["SHOW", "ep02.mkv"]))),
+            (81.0, 1349.5)
+        );
     }
 
     #[test]
     fn per_file_marker_wins_over_show_preset() {
         let (mut v, mut s) = maps();
-        s.insert(r"E:\SHOW".to_string(), (81.0, 1349.5));
-        v.insert(r"E:\SHOW\ep02.mkv".to_string(), (12.0, 0.0));
-        assert_eq!(resolve_bounds(&v, &s, Some(r"E:\SHOW\ep02.mkv")), (12.0, 0.0));
+        s.insert(p(&["SHOW"]), (81.0, 1349.5));
+        let file = p(&["SHOW", "ep02.mkv"]);
+        v.insert(file.clone(), (12.0, 0.0));
+        assert_eq!(resolve_bounds(&v, &s, Some(&file)), (12.0, 0.0));
     }
 
     #[test]
     fn unrelated_directory_has_no_bounds() {
         let (v, mut s) = maps();
-        s.insert(r"E:\SHOW".to_string(), (81.0, 1349.5));
-        assert_eq!(resolve_bounds(&v, &s, Some(r"C:\Other\clip.mkv")), (0.0, 0.0));
+        s.insert(p(&["SHOW"]), (81.0, 1349.5));
+        assert_eq!(resolve_bounds(&v, &s, Some(&p(&["Other", "clip.mkv"]))), (0.0, 0.0));
     }
 
     /// The reported bug: reaching the credits marker with one video queued

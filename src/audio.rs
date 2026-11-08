@@ -5,7 +5,6 @@ use eframe::egui::{Color32, ColorImage, RichText, TextureHandle, TextureOptions}
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::File;
 use std::io::{BufReader, Read};
-use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command};
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -15,9 +14,6 @@ use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use rand::Rng;
 use rodio::{Decoder, OutputStreamHandle, Sink, Source};
-use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
-use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
-use windows_sys::Win32::Foundation::HWND;
 use crate::app::{PlayerApp, PlayerState};
 use crate::{
     consts::*, deck_widgets::*, eq::*, ffmpeg::*, files::*, library::*,
@@ -484,6 +480,20 @@ impl PlayerApp {
 
     pub(crate) fn decrease_volume(&mut self) {
         self.set_volume(self.state.volume.saturating_sub(5));
+    }
+
+    /// M toggles between the current volume and silence, remembering the level
+    /// so unmuting restores exactly what the user had.
+    pub(crate) fn toggle_mute(&mut self) {
+        if self.state.volume == 0 {
+            let restore = if self.muted_volume == 0 { 50 } else { self.muted_volume };
+            self.set_volume(restore);
+            self.set_status("Unmuted");
+        } else {
+            self.muted_volume = self.state.volume;
+            self.set_volume(0);
+            self.set_status("Muted");
+        }
     }
 
     /// Seek the current song. Tries the decoder's native seek first; if the

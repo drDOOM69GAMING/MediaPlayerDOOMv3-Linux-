@@ -5,7 +5,6 @@ use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::os::windows::process::CommandExt;
 use std::sync::mpsc::Sender;
 use lofty::prelude::*;
 use crate::consts::NO_WINDOW;
@@ -67,7 +66,7 @@ pub fn transcode_with_ffmpeg(audio: &str, ffmpeg: &Path) -> Result<PathBuf, Stri
     let po = out.to_string_lossy().to_string();
     let st = std::process::Command::new(ff)
         .args(["-y", "-i", audio, "-vn", "-ac", "2", "-ar", "44100", "-f", "wav", &po])
-        .creation_flags(NO_WINDOW)
+        .no_window()
         .status()
         .map_err(|e| format!("ffmpeg failed to start: {}", e))?;
     if st.success() && out.exists() {
@@ -85,7 +84,7 @@ pub fn record_with_ffmpeg(audio: &str, ffmpeg: &Path, dest: &Path) -> Result<Pat
     let _ = std::fs::remove_file(dest);
     let st = std::process::Command::new(ffmpeg.to_string_lossy().to_string())
         .args(["-y", "-i", audio, "-vn", "-ac", "2", "-ar", "44100", "-f", "wav", &po])
-        .creation_flags(NO_WINDOW)
+        .no_window()
         .status()
         .map_err(|e| format!("ffmpeg failed to start: {}", e))?;
     if st.success() && dest.exists() {
@@ -104,7 +103,7 @@ pub fn record_flight_ffmpeg(url: &str, ffmpeg: &Path, dest: &Path, secs: u32) ->
     let secs = secs.to_string();
     let st = std::process::Command::new(ffmpeg.to_string_lossy().to_string())
         .args(["-y", "-i", url, "-vn", "-ac", "2", "-ar", "44100", "-f", "wav", "-t", &secs, &po])
-        .creation_flags(NO_WINDOW)
+        .no_window()
         .status()
         .map_err(|e| format!("ffmpeg failed to start: {}", e))?;
     if st.success() && dest.exists() {
@@ -125,10 +124,12 @@ pub fn find_music_folder() -> Option<String> {
             }
         }
     };
-    if let Ok(h) = std::env::var("USERPROFILE") {
-        let home = PathBuf::from(&h);
+    if let Some(home) = crate::util::home_dir() {
         check(&home.join("Music"), 100);
         check(&home.join("OneDrive").join("Music"), 100);
+        if let Some(music) = crate::tools::music_dir() {
+            check(&music, 120);
+        }
     }
     for root in existing_drive_roots() {
         check(&root.join("Music"), 40);
@@ -156,7 +157,27 @@ pub fn existing_drive_roots() -> Vec<PathBuf> {
     }
     #[cfg(not(windows))]
     {
+        // Common Linux mount points. Only `Music` directly below each root is
+        // checked, so this stays cheap even with several mounted drives.
         roots.push(PathBuf::from("/"));
+        roots.push(PathBuf::from("/media"));
+        roots.push(PathBuf::from("/mnt"));
+        if let Some(home) = crate::util::home_dir() {
+            let user = home.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            let removable = PathBuf::from("/run/media").join(&user);
+            if removable.is_dir() {
+                roots.push(removable.clone());
+                if let Ok(rd) = std::fs::read_dir(&removable) {
+                    roots.extend(rd.flatten().map(|e| e.path()));
+                }
+            }
+            roots.push(home);
+        }
+        for base in ["/media", "/mnt"] {
+            if let Ok(rd) = std::fs::read_dir(base) {
+                roots.extend(rd.flatten().map(|e| e.path()));
+            }
+        }
     }
     roots
 }
@@ -218,3 +239,79 @@ pub fn normalize_art(bytes: &[u8]) -> Option<Vec<u8>> {
     Some(out.into_inner())
 }
 
+
+#[cfg(test)]
+mod file_pipeline_tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::process::Command;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn scratch() -> PathBuf {
+        let n = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let d = std::env::temp_dir().join(format!("mpdoom-files-{}-{}", std::process::id(), n));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn make_audio(dir: &Path) -> PathBuf {
+        let out = dir.join("tone.mp3");
+        let st = Command::new(ffmpeg_path())
+            .args([
+                "-hide_banner", "-loglevel", "error", "-y",
+                "-f", "lavfi", "-i", "sine=frequency=440:duration=2",
+                "-c:a", "libmp3lame",
+            ])
+            .arg(&out)
+            .status()
+            .expect("ffmpeg should start");
+        assert!(st.success(), "could not create test mp3");
+        out
+    }
+
+    #[test]
+    fn collects_supported_audio_recursively() {
+        let dir = scratch();
+        let a = make_audio(&dir);
+        let sub = dir.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        let b = sub.join("copy.flac");
+        std::fs::copy(&a, &b).unwrap();
+        std::fs::write(dir.join("notes.txt"), "not audio").unwrap();
+        let found = collect_audio(&dir.to_string_lossy());
+        assert_eq!(found.len(), 2, "found: {found:?}");
+        assert!(found.iter().any(|p| p.ends_with("tone.mp3")));
+        assert!(found.iter().any(|p| p.ends_with("copy.flac")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn transcodes_and_records_with_ffmpeg() {
+        let dir = scratch();
+        let a = make_audio(&dir);
+        let tc = transcode_with_ffmpeg(&a.to_string_lossy(), &ffmpeg_path()).expect("transcode");
+        assert!(tc.is_file());
+        assert!(std::fs::metadata(&tc).unwrap().len() > 4096);
+        let dest = dir.join("rec.wav");
+        let rec = record_with_ffmpeg(&a.to_string_lossy(), &ffmpeg_path(), &dest).expect("record");
+        assert!(rec.is_file());
+        assert!(std::fs::metadata(&rec).unwrap().len() > 4096);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reads_tags_and_normalizes_art() {
+        let dir = scratch();
+        let a = make_audio(&dir);
+        // No tags were written, but lofty must still be able to open the file.
+        let tagged = load_tagged(&a.to_string_lossy());
+        assert!(tagged.is_some(), "lofty could not open the generated mp3");
+        let img = image::RgbaImage::from_pixel(400, 400, image::Rgba([10, 200, 30, 255]));
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(img).write_to(&mut png, image::ImageFormat::Png).unwrap();
+        let small = normalize_art(&png.into_inner()).expect("normalize art");
+        let decoded = image::load_from_memory(&small).expect("cached jpeg should decode");
+        assert!(decoded.width() <= 220 && decoded.height() <= 220);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

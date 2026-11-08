@@ -4,6 +4,27 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use crate::consts::AUDIO_FORMATS;
+
+/// Hide the console window for spawned helper processes on Windows.
+/// On Unix this is a no-op (there is no console to hide), which keeps every
+/// call site identical on all platforms.
+pub trait CommandNoWindow {
+    fn no_window(&mut self) -> &mut Self;
+}
+
+impl CommandNoWindow for std::process::Command {
+    fn no_window(&mut self) -> &mut Self {
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            self.creation_flags(crate::consts::NO_WINDOW)
+        }
+        #[cfg(not(windows))]
+        {
+            self
+        }
+    }
+}
 pub static BEAUTIFY_RE: [std::sync::OnceLock<regex::Regex>; 4] = [
     std::sync::OnceLock::new(),
     std::sync::OnceLock::new(),
@@ -57,17 +78,64 @@ pub fn fmt_run(d: Duration) -> String {
     format!("{}:{:02}:{:02}", s / 3600, (s % 3600) / 60, s % 60)
 }
 
+/// Per-user application data directory.
+///
+/// Windows keeps `%APPDATA%\MediaPlayerOFDOOM` (unchanged from v3).
+/// Linux follows the XDG spec: `$XDG_DATA_HOME/MediaPlayerOFDOOM`, falling
+/// back to `~/.local/share/MediaPlayerOFDOOM`.
 pub fn data_dir() -> PathBuf {
-    let base = if let Ok(a) = std::env::var("APPDATA") {
-        PathBuf::from(a)
-    } else if let Ok(h) = std::env::var("USERPROFILE") {
-        PathBuf::from(h)
-    } else {
-        PathBuf::from(".")
-    };
-    let d = base.join("MediaPlayerOFDOOM");
+    #[cfg(windows)]
+    let base = std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("."));
+    #[cfg(not(windows))]
+    let base = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
+        .unwrap_or_else(|| PathBuf::from("."));
+    #[cfg(windows)]
+    let app_folder = "MediaPlayerOFDOOM";
+    #[cfg(not(windows))]
+    let app_folder = "mediaplayerofdoom";
+    let d = base.join(app_folder);
     let _ = std::fs::create_dir_all(&d);
     d
+}
+
+/// Per-user config directory (Linux: `$XDG_CONFIG_HOME/MediaPlayerOFDOOM`).
+/// Windows still uses the data dir, so existing installs keep their files.
+pub fn config_dir() -> PathBuf {
+    #[cfg(windows)]
+    {
+        data_dir()
+    }
+    #[cfg(not(windows))]
+    {
+        let base = std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+            .unwrap_or_else(|| PathBuf::from("."));
+        let d = base.join("mediaplayerofdoom");
+        let _ = std::fs::create_dir_all(&d);
+        d
+    }
+}
+
+/// User's home directory, cross-platform.
+pub fn home_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        std::env::var_os("USERPROFILE")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+    }
+    #[cfg(not(windows))]
+    {
+        std::env::var_os("HOME").map(PathBuf::from)
+    }
 }
 
 /// Scratch/work area for transient files (video cuts, transcodes, yt-dlp
@@ -126,6 +194,21 @@ pub fn sanitize_win(s: &str) -> String {
     out
 }
 
+/// Move a file, falling back to copy+delete when `rename` cannot cross
+/// filesystems. On Linux the download scratch area lives on the home
+/// filesystem while the Music library is often on another disk (`/run/media`,
+/// `/mnt`, a separate partition), where `rename` fails with EXDEV.
+pub fn move_file(from: &Path, to: &Path) -> std::io::Result<()> {
+    match std::fs::rename(from, to) {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            std::fs::copy(from, to)?;
+            std::fs::remove_file(from)?;
+            Ok(())
+        }
+    }
+}
+
 pub fn next_track_num(dir: &Path) -> u32 {
     let mut max = 0u32;
     if let Ok(rd) = std::fs::read_dir(dir) {
@@ -140,3 +223,51 @@ pub fn next_track_num(dir: &Path) -> u32 {
     max + 1
 }
 
+
+#[cfg(test)]
+mod portability_tests {
+    use super::*;
+
+    fn unique(name: &str) -> PathBuf {
+        let n = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("mpdoom-move-{}-{}-{}", std::process::id(), n, name))
+    }
+
+    #[test]
+    fn move_file_works_within_a_filesystem() {
+        let from = unique("a.bin");
+        let to = unique("b.bin");
+        std::fs::write(&from, b"hello").unwrap();
+        move_file(&from, &to).unwrap();
+        assert!(!from.exists());
+        assert_eq!(std::fs::read(&to).unwrap(), b"hello");
+        let _ = std::fs::remove_file(&to);
+    }
+
+    #[test]
+    fn move_file_copies_across_filesystems() {
+        // /dev/shm is usually a separate tmpfs; this is exactly the EXDEV case
+        // that broke YouTube downloads when Music lived on another drive.
+        let shm = Path::new("/dev/shm");
+        if !shm.is_dir() {
+            return;
+        }
+        let from = unique("from.bin");
+        let to = shm.join(unique("to.bin").file_name().unwrap());
+        std::fs::write(&from, b"cross-device payload").unwrap();
+        move_file(&from, &to).unwrap();
+        assert!(!from.exists());
+        assert_eq!(std::fs::read(&to).unwrap(), b"cross-device payload");
+        let _ = std::fs::remove_file(&to);
+    }
+
+    #[test]
+    fn linux_data_dir_follows_xdg_layout() {
+        let d = data_dir();
+        assert!(d.is_dir());
+        assert!(d.ends_with(if cfg!(windows) { "MediaPlayerOFDOOM" } else { "mediaplayerofdoom" }));
+    }
+}

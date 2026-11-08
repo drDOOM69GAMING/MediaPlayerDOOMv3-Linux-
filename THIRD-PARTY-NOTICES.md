@@ -56,6 +56,9 @@ The application is built with the Rust crates listed in `Cargo.toml`. Each crate
 ### MIT
 `rfd`, `zip`, `embed-resource`, `libloading`, `crossbeam`, `memmap2`, `walkdir`, `tempfile`.
 
+### Unlicense
+`ksni` (Linux StatusNotifierItem tray implementation).
+
 ### MPL-2.0
 `symphonia` and the `symphonia-*` family.
 

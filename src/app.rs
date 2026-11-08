@@ -14,7 +14,6 @@ use crate::{
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::File;
 use std::io::{BufReader, Read};
-use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command};
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -26,8 +25,6 @@ use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use rand::Rng;
 use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink, Source};
-use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
-use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
 use lofty::prelude::*;
 
@@ -198,10 +195,12 @@ pub(crate) struct PlayerApp {
     pub(crate) drag_from: Option<usize>,
     pub(crate) drag_hover: Option<usize>,
     pub(crate) drag_active: bool,
-    pub(crate) _tray: Option<TrayIcon>,
+    pub(crate) _tray: Option<PlatformTray>,
     pub(crate) _hkm: Option<GlobalHotKeyManager>,
     pub(crate) show_id: u32,
     pub(crate) quit_id: u32,
+    /// Volume to restore when un-muting.
+    pub(crate) muted_volume: u32,
     pub(crate) radio_presets: Vec<RadioStation>,
     pub(crate) show_radio: bool,
     pub(crate) deck_mode: DeckMode,
@@ -461,8 +460,17 @@ impl PlayerApp {
         let band_map = load_bands(&bands_path);
         let full_library: Vec<String> = state.playlist.clone();
 
-        let tray_config = make_tray().ok();
-        let hotkeys = make_hotkeys();
+        // tray-icon dynamically loads libappindicator on Linux. If the distro
+        // package is missing the crate panics instead of returning Err, so a
+        // missing tray must never take the whole player down.
+        let tray_config = std::panic::catch_unwind(std::panic::AssertUnwindSafe(make_tray))
+            .ok()
+            .and_then(|r| r.ok());
+        // global-hotkey talks to X11; on a pure Wayland session without
+        // XWayland it may panic while probing the server. Hotkeys are optional.
+        let hotkeys = std::panic::catch_unwind(std::panic::AssertUnwindSafe(make_hotkeys))
+            .ok()
+            .flatten();
         let (show_id, quit_id) = hotkeys.as_ref().map(|(_, s, q)| (*s, *q)).unwrap_or((0, 0));
 
         let mut app = Self {
@@ -652,6 +660,7 @@ video_ended: false,
             _hkm: hotkeys.map(|(h, _, _)| h),
             show_id,
             quit_id,
+            muted_volume: 50,
         };
         app.apply_eq_live();
         // Reuse the remembered library root when it still exists. The full

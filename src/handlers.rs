@@ -5,7 +5,6 @@ use eframe::egui::{Color32, ColorImage, RichText, TextureHandle, TextureOptions}
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::File;
 use std::io::{BufReader, Read};
-use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command};
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -15,9 +14,6 @@ use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use rand::Rng;
 use rodio::{Decoder, OutputStreamHandle, Sink, Source};
-use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
-use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
-use windows_sys::Win32::Foundation::HWND;
 use crate::app::{PlayerApp, PlayerState};
 use crate::{
     consts::*, deck_widgets::*, eq::*, ffmpeg::*, files::*, library::*,
@@ -195,31 +191,39 @@ impl PlayerApp {
     }
 
     pub(crate) fn poll_ext(&mut self) {
-        while let Ok(e) = MenuEvent::receiver().try_recv() {
-            if e.id == MenuId::new("show") {
-                self.ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-                self.ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-            } else if e.id == MenuId::new("play_pause") {
-                self.toggle_pause();
-            } else if e.id == MenuId::new("skip") {
-                self.skip_song();
-            } else if e.id == MenuId::new("prev") {
-                self.prev_song();
-            } else if e.id == MenuId::new("stop") {
-                self.stop_music();
-            } else if e.id == MenuId::new("quit") {
-                let ctx = self.ctx.clone();
-                self.request_quit(&ctx);
+        while let Some(id) = poll_tray_menu() {
+            match id.as_str() {
+                "show" => {
+                    self.ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                    self.ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                }
+                "play_pause" => self.toggle_pause(),
+                "skip" => self.skip_song(),
+                "prev" => self.prev_song(),
+                "stop" => self.stop_music(),
+                "quit" => {
+                    let ctx = self.ctx.clone();
+                    self.request_quit(&ctx);
+                }
+                _ => {}
             }
         }
         if let Ok(e) = GlobalHotKeyEvent::receiver().try_recv() {
             if e.state == HotKeyState::Pressed {
-                if e.id == self.show_id {
-                    self.ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-                    self.ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-                } else if e.id == self.quit_id {
-                    let ctx = self.ctx.clone();
-                    self.request_quit(&ctx);
+                match hotkey_action(e.id) {
+                    Some("show") => {
+                        self.ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                        self.ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                    }
+                    Some("quit") => {
+                        let ctx = self.ctx.clone();
+                        self.request_quit(&ctx);
+                    }
+                    Some("play_pause") => self.toggle_pause(),
+                    Some("skip") => self.skip_song(),
+                    Some("prev") => self.prev_song(),
+                    Some("stop") => self.stop_music(),
+                    _ => {}
                 }
             }
         }
@@ -284,12 +288,21 @@ impl PlayerApp {
                 match c {
                     '+' | '=' => self.increase_volume(),
                     '-' | '_' => self.decrease_volume(),
-                    's' | 'S' => self.smart_shuffle(),
-                    't' | 'T' => self.cycle_theme(),
+                    // Documented shortcuts (README) first, then the older
+                    // single-letter ones kept as aliases.
+                    'p' | 'P' | 'x' | 'X' => self.toggle_pause(),
+                    's' | 'S' | 'n' | 'N' => self.skip_song(),
                     'z' | 'Z' => self.prev_song(),
-                    'x' | 'X' => self.toggle_pause(),
+                    'm' | 'M' => self.toggle_mute(),
+                    'd' | 'D' => self.cycle_deck_mode(),
+                    'r' | 'R' => {
+                        if self.radio_on { self.record_radio() } else { self.req_record() }
+                    }
+                    'v' | 'V' => self.play_video(),
+                    'l' | 'L' => self.fetch_lyrics(),
+                    't' | 'T' => self.cycle_theme(),
                     'c' | 'C' => self.stop_music(),
-                    'v' | 'V' => self.toggle_playlist_only(),
+                    'o' | 'O' => self.toggle_playlist_only(),
                     'b' | 'B' => self.toggle_repeat(),
                     'j' | 'J' => self.search_focus = true,
                     _ => {}
