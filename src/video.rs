@@ -37,6 +37,46 @@ impl PlayerApp {
         self.set_status(format!("DVD: {}", crate::dvd::display_name(&crate::dvd::wrap(source))));
     }
 
+    pub(crate) fn play_bluray_source(&mut self, source: &str) {
+        let source = source.trim();
+        if source.is_empty() {
+            self.set_error("No Blu-ray source");
+            return;
+        }
+        let wrapped = crate::bluray::wrap(source);
+        self.video_queue = vec![wrapped.clone()];
+        self.video_queue_idx = 0;
+        self.play_video_item(wrapped);
+        self.set_status(format!("BLU-RAY: {}", crate::bluray::display_name(&crate::bluray::wrap(source))));
+    }
+
+    pub(crate) fn play_bluray_drive(&mut self) {
+        match crate::bluray::first_drive() {
+            Some(d) => self.play_bluray_source(&d),
+            None => self.set_error("No optical drive found"),
+        }
+    }
+
+    pub(crate) fn open_bluray_iso(&mut self) {
+        if let Some(p) = rfd::FileDialog::new()
+            .add_filter("Blu-ray image or folder", &["iso", "img"])
+            .pick_file()
+        {
+            self.play_bluray_source(&p.to_string_lossy());
+        }
+    }
+
+    pub(crate) fn eject_bluray(&mut self) {
+        let current = self.video_current.clone().filter(|p| crate::bluray::is_bluray(p));
+        if let Some(cur) = current {
+            crate::bluray::eject(&cur);
+            self.close_video();
+            self.set_status("Blu-ray tray ejected");
+        } else if let Some(d) = crate::bluray::first_drive() {
+            crate::bluray::eject(&crate::bluray::wrap(&d));
+        }
+    }
+
     pub(crate) fn play_dvd_drive(&mut self) {
         match crate::dvd::first_drive() {
             Some(d) => self.play_dvd_source(&d),
@@ -237,7 +277,11 @@ impl PlayerApp {
         self.attach_video_audio(&path, saved_pos);
         self.video_cur_secs = saved_pos;
         self.auto_bounds.remove(&path);
-        if self.intro_skip_enabled && !path.ends_with("_cut.mkv") && !crate::dvd::is_dvd(&path) {
+        if self.intro_skip_enabled
+            && !path.ends_with("_cut.mkv")
+            && !crate::dvd::is_dvd(&path)
+            && !crate::bluray::is_bluray(&path)
+        {
             // No manual and no learned markers? Analyse this episode's audio
             // in the worker thread while it plays. Analysis is advisory: it
             // only seek-skips, never cuts and never writes settings.
@@ -250,7 +294,13 @@ impl PlayerApp {
             "MOVIE {}/{}: {}",
             self.video_queue_idx + 1,
             self.video_queue.len(),
-            if crate::dvd::is_dvd(&path) { crate::dvd::display_name(&path) } else { stem(&path) }
+            if crate::dvd::is_dvd(&path) {
+                crate::dvd::display_name(&path)
+            } else if crate::bluray::is_bluray(&path) {
+                crate::bluray::display_name(&path)
+            } else {
+                stem(&path)
+            }
         ));
         self.video_deferred_open = true;
     }
@@ -380,7 +430,7 @@ impl PlayerApp {
         if path.ends_with("_cut.mkv") || self.video_cut_inflight.contains(&path) || self.video_cut_cache.contains_key(&path) {
             return;
         }
-        if crate::dvd::is_dvd(&path) {
+        if crate::dvd::is_dvd(&path) || crate::bluray::is_bluray(&path) {
             return;
         }
         let (ie, cs) = self.video_bounds.get(&path).copied().unwrap_or((0.0, 0.0));

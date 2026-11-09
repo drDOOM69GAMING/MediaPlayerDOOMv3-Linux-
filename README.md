@@ -11,6 +11,7 @@ A retro DOOM-styled media player rendered in egui. Tape, CD, and Radio faces on 
   - **CD**: spinning disc tray with track counter, LCDs, in-order playback, and **physical audio CD** support on Linux: discs in the optical tray are detected automatically and can be ripped as lossless FLAC (tags, cover art and correct `Artist/Album/01 - Title.flac` naming)
   - **RADIO**: FM/AM dial with click-and-drag tuning, presets, SCAN, live web streams, and an **ADD STATION** dialog to save your own FM/AM stream presets
   - **DVD**: play a DVD movie directly from the optical drive or from an `.iso`/`.img` image using ffmpeg's `dvdvideo` demuxer; encrypted discs are decrypted with libdvdcss when installed
+  - **BLU-RAY**: play a Blu-ray movie from the optical drive or an `.iso`/`.img` using ffmpeg's `bluray` protocol. AACS keys are read from the user's own `~/.config/aacs/KEYDB.cfg` (or `$XDG_CONFIG_HOME/aacs/KEYDB.cfg`); no keys are shipped with the app. English audio is preferred and subtitles are disabled by default for DVD/Blu-ray
 - **Bands catalog**: songs grouped by artist folder (A-Z, scrollable), rebuilt from whatever folder you add
 - **Play order switch**: flip the retro wall switch under BANDS. ON = random shuffle, OFF = normal in-order playback
 - **Smart shuffle**: weighted by your listening history, or plain shuffle
@@ -117,10 +118,11 @@ Start on the CD deck directly (useful with a disc in the tray):
 ./target/release/mediaplayerofdoom --mode cd
 ```
 
-Play a DVD ISO directly (or use the DVD deck for the optical drive):
+Play a DVD or Blu-ray ISO directly (or use the matching deck for the optical drive):
 
 ```bash
 ./target/release/mediaplayerofdoom --dvd "/path/movie.iso"
+./target/release/mediaplayerofdoom --bluray "/path/movie.iso"
 ```
 
 ### Install with icon and launcher (Linux)
@@ -185,6 +187,19 @@ This app is built on the work of some incredible open-source projects, and it wo
 - The **Rust** language and its crate ecosystem.
 
 Full details, license texts, and donation links are in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). If you can, consider donating to FFmpeg, yt-dlp, and MKVToolNix - they give this all away for free.
+
+## v3.2.9 changelog
+
+- **New Blu-ray deck mode**
+  - Play Blu-ray movies from the optical drive or an `.iso`/`.img` via ffmpeg's `bluray` protocol
+  - AACS keys are discovered on the user's system (`$XDG_CONFIG_HOME/aacs/KEYDB.cfg`, `~/.config/aacs/KEYDB.cfg`, `~/.aacs/KEYDB.cfg`, `/etc/xdg/aacs/KEYDB.cfg`); no keys are bundled or downloaded
+  - If the KEYDB is in a non-standard location, the app creates a private config symlink for the ffmpeg child so libaacs still finds it
+  - `--mode bluray` opens the deck; `--bluray /path/movie.iso` starts a movie immediately
+- **Optical-disc defaults**
+  - DVD and Blu-ray audio defaults to an **English** track when one is present (falls back to the first audio track)
+  - Subtitles are explicitly disabled (`-sn`) for optical playback
+- Added libbluray/libaacs to dependency installers; libbdplus is optional for BD+ discs
+- Version bump to **v3.2.9**
 
 ## v3.2.8 changelog
 

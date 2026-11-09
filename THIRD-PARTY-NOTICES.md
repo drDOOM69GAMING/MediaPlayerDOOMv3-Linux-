@@ -30,6 +30,13 @@ Thank you to the entire FFmpeg team and the gyan.dev build maintainers for makin
 
 Thank you to the yt-dlp team for maintaining the best open-source YouTube downloader.
 
+### libbluray / libaacs
+
+- **Used for:** Blu-ray playback through ffmpeg's `bluray` protocol and AACS decryption.
+- **License:** GNU LGPL v2.1 (libbluray) / GNU LGPL v2.1 (libaacs)
+- **Projects:** <https://www.videolan.org/developers/libbluray.html> - <https://www.videolan.org/developers/libaacs.html>
+- **Keys:** the app does not bundle or download AACS keys; it only reads the user's own `KEYDB.cfg`.
+
 ### libdvdread / libdvdnav / libdvdcss
 
 - **Used for:** DVD-Video playback (ffmpeg `dvdvideo` demuxer). `libdvdcss` decrypts encrypted commercial DVDs.

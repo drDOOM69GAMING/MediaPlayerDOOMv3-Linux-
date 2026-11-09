@@ -9,6 +9,7 @@ pub enum DeckMode {
     Tape,
     Disc,
     Dvd,
+    BluRay,
     Radio,
 }
 

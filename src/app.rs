@@ -319,7 +319,7 @@ impl PlayerApp {
             .unwrap_or_default()
     }
 
-    pub(crate) fn new(cc: &eframe::CreationContext<'_>, startup_video: Option<String>, windowed: bool, startup_mode: Option<String>, startup_dvd: Option<String>) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    pub(crate) fn new(cc: &eframe::CreationContext<'_>, startup_video: Option<String>, windowed: bool, startup_mode: Option<String>, startup_dvd: Option<String>, startup_bluray: Option<String>) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         #[cfg(target_os = "windows")]
         apply_taskbar_icon(cc);
         let ctx = cc.egui_ctx.clone();
@@ -724,6 +724,7 @@ video_ended: false,
         match startup_mode.as_deref() {
             Some("cd") | Some("disc") => app.set_deck_mode(DeckMode::Disc),
             Some("dvd") => app.set_deck_mode(DeckMode::Dvd),
+            Some("bluray") | Some("blu-ray") | Some("bd") => app.set_deck_mode(DeckMode::BluRay),
             Some("radio") => app.set_deck_mode(DeckMode::Radio),
             Some("tape") => app.set_deck_mode(DeckMode::Tape),
             _ => {}
@@ -739,6 +740,10 @@ video_ended: false,
         }
         if let Some(d) = startup_dvd {
             app.play_dvd_source(&d);
+            app.set_video_fs(true);
+        }
+        if let Some(b) = startup_bluray {
+            app.play_bluray_source(&b);
             app.set_video_fs(true);
         }
         // Reuse the remembered library root when it still exists. The full
@@ -1839,7 +1844,7 @@ impl eframe::App for PlayerApp {
     }
 }
 
-pub fn run(startup_video: Option<String>, windowed: bool, startup_mode: Option<String>, startup_dvd: Option<String>) -> eframe::Result {
+pub fn run(startup_video: Option<String>, windowed: bool, startup_mode: Option<String>, startup_dvd: Option<String>, startup_bluray: Option<String>) -> eframe::Result {
 std::panic::set_hook(Box::new(|info| {
         // Expected, caught decode panics (rodio symphonia init-seek bug) are
         // muted here; open_decoder logs a clean decode-skip line instead.
@@ -1874,7 +1879,7 @@ std::panic::set_hook(Box::new(|info| {
         APP_NAME,
         options,
         Box::new(|cc| {
-            let app = PlayerApp::new(cc, startup_video.clone(), windowed, startup_mode.clone(), startup_dvd.clone())?;
+            let app = PlayerApp::new(cc, startup_video.clone(), windowed, startup_mode.clone(), startup_dvd.clone(), startup_bluray.clone())?;
             Ok(Box::new(app) as Box<dyn eframe::App>)
         }),
     )

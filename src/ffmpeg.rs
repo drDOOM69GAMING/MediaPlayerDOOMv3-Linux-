@@ -13,11 +13,15 @@ pub fn probe_video_duration(path: &str) -> f32 {
         return 0.0;
     }
     let dvd = crate::dvd::is_dvd(path);
-    let input = crate::dvd::source(path);
+    let bd = crate::bluray::is_bluray(path);
+    let input = if dvd { crate::dvd::source(path) } else { path };
     let mut cmd = std::process::Command::new(fp);
     cmd.args(["-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1"]);
     if dvd {
         cmd.args(["-f", "dvdvideo"]);
+    }
+    if bd {
+        crate::bluray::configure_command(&mut cmd);
     }
     let out = cmd.arg(input).no_window().output();
     match out {
@@ -34,11 +38,14 @@ pub fn probe_video_info(path: &str) -> (u32, u32, f32) {
         return (0, 0, 0.0);
     }
     let dvd = crate::dvd::is_dvd(path);
-    let input = crate::dvd::source(path);
+    let input = if dvd { crate::dvd::source(path) } else { path };
     let mut cmd = std::process::Command::new(fp);
     cmd.args(["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height,avg_frame_rate", "-of", "default=noprint_wrappers=1:nokey=1"]);
     if dvd {
         cmd.args(["-f", "dvdvideo"]);
+    }
+    if crate::bluray::is_bluray(path) {
+        crate::bluray::configure_command(&mut cmd);
     }
     let out = cmd.arg(input).no_window().output();
     match out {
@@ -159,7 +166,7 @@ pub fn fit_video_dims(w: u32, h: u32, max_w: u32, max_h: u32) -> (u32, u32) {
 
 pub fn video_audio_levels(path: &str, ffmpeg: &Path, start: f32, len: f32) -> Vec<f32> {
     // Auto intro/credits detection is for local episode files, not DVDs.
-    if crate::dvd::is_dvd(path) {
+    if crate::dvd::is_dvd(path) || crate::bluray::is_bluray(path) {
         return Vec::new();
     }
     let mut cmd = Command::new(ffmpeg);
@@ -370,8 +377,8 @@ pub fn detect_credit_start(slice: &[f32], secs_per_sample: f32) -> f32 {
 }
 
 pub fn cut_video_file(source: &str, intro_end: f32, credits_start: f32) -> Result<String, String> {
-    if crate::dvd::is_dvd(source) {
-        return Err("cannot cut a DVD title with mkvmerge".into());
+    if crate::dvd::is_dvd(source) || crate::bluray::is_bluray(source) {
+        return Err("cannot cut an optical disc title with mkvmerge".into());
     }
     let mm = mkvmerge_path();
     if !mm.is_file() {
@@ -428,6 +435,74 @@ pub fn cut_video_file(source: &str, intro_end: f32, credits_start: f32) -> Resul
         return Err("mkvmerge finished but cut file not found".into());
     }
     Ok(cut_path.to_string_lossy().to_string())
+}
+
+/// Choose an English audio stream for optical discs, falling back to the first
+/// audio stream. Returned in ffmpeg `-map 0:a:N` form.
+pub fn preferred_audio_map(path: &str) -> Option<String> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(m) = cache.lock() {
+        if let Some(v) = m.get(path) {
+            return Some(v.clone());
+        }
+    }
+    let dvd = crate::dvd::is_dvd(path);
+    let bd = crate::bluray::is_bluray(path);
+    if !dvd && !bd {
+        return None;
+    }
+    let fp = ffprobe_path();
+    if !fp.is_file() {
+        return None;
+    }
+    let input = if dvd { crate::dvd::source(path) } else { path };
+    let mut cmd = std::process::Command::new(fp);
+    cmd.args(["-v", "error", "-select_streams", "a", "-show_entries", "stream_tags=language", "-of", "json"]);
+    if dvd {
+        cmd.args(["-f", "dvdvideo"]);
+    }
+    if bd {
+        crate::bluray::configure_command(&mut cmd);
+    }
+    let out = cmd.arg(input).no_window().output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let langs = parse_audio_languages(&String::from_utf8_lossy(&out.stdout))?;
+    if langs.is_empty() {
+        return None;
+    }
+    let chosen = langs.iter().position(|l| is_english(l)).unwrap_or(0);
+    let map = format!("0:a:{}", chosen);
+    if let Ok(mut m) = cache.lock() {
+        m.insert(path.to_string(), map.clone());
+    }
+    Some(map)
+}
+
+pub fn parse_audio_languages(json: &str) -> Option<Vec<String>> {
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    let streams = v.get("streams")?.as_array()?;
+    Some(
+        streams
+            .iter()
+            .map(|s| {
+                s.get("tags")
+                    .and_then(|t| t.get("language"))
+                    .and_then(|l| l.as_str())
+                    .unwrap_or("")
+                    .to_ascii_lowercase()
+            })
+            .collect(),
+    )
+}
+
+pub fn is_english(lang: &str) -> bool {
+    let l = lang.trim().to_ascii_lowercase();
+    matches!(l.as_str(), "en" | "eng" | "english" | "en-us" | "en-gb")
 }
 
 #[cfg(test)]
@@ -532,6 +607,20 @@ mod media_pipeline_tests {
         let ch = parse_chapters_json(text);
         assert_eq!(ch.len(), 2);
         assert_eq!(bounds_from_chapters(&ch), (108.65, 1351.559));
+    }
+
+    #[test]
+    fn preferred_audio_parser_picks_english() {
+        let json = r#"{"streams":[
+            {"tags":{"language":"fre"}},
+            {"tags":{"language":"eng"}},
+            {"tags":{"language":"spa"}}
+        ]}"#;
+        let langs = parse_audio_languages(json).unwrap();
+        assert_eq!(langs.iter().position(|l| is_english(l)), Some(1));
+        assert_eq!(parse_audio_languages(r#"{"streams":[]}"#).unwrap().len(), 0);
+        assert!(is_english("ENG"));
+        assert!(!is_english("fre"));
     }
 
     #[test]

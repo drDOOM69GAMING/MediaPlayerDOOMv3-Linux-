@@ -380,6 +380,7 @@ impl PlayerApp {
                 DeckMode::Tape => ("  CASSETTE DECK  •  REV C", th.accent),
                 DeckMode::Disc => ("  CD DECK  •  COMPACT DISC", th.playing_fg),
                 DeckMode::Dvd => ("  DVD DECK  •  DVD VIDEO", Color32::from_rgb(160, 200, 255)),
+                DeckMode::BluRay => ("  BLU-RAY DECK  •  BD VIDEO", Color32::from_rgb(130, 210, 255)),
                 DeckMode::Radio => ("  RADIO TUNER  •  FM / AM", Color32::from_rgb(255, 170, 80)),
             };
             plaque(ui, ui.available_width(), deck_plaque, deck_plaque_fg, th.bg);
@@ -687,6 +688,74 @@ impl PlayerApp {
                         });
                     }
                 }
+                DeckMode::BluRay => {
+                    let drive = crate::bluray::first_drive();
+                    let keydb = crate::bluray::keydb_path();
+                    let current = self.video_current.clone().filter(|p| crate::bluray::is_bluray(p));
+                    ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
+                            ui.label(RichText::new("BLU-RAY VIDEO").color(th.accent).monospace().strong().size(16.0));
+                            ui.label(
+                                RichText::new(match &drive {
+                                    Some(d) => format!("DRIVE  {}", d),
+                                    None => "NO OPTICAL DRIVE DETECTED".to_string(),
+                                })
+                                .color(Color32::from_gray(150))
+                                .monospace()
+                                .size(10.0),
+                            );
+                            ui.label(
+                                RichText::new(match &keydb {
+                                    Some(k) => format!("AACS KEYDB  {}", k.display()),
+                                    None => "AACS KEYDB  not found (~/.config/aacs/KEYDB.cfg)".to_string(),
+                                })
+                                .color(if keydb.is_some() { Color32::from_rgb(120, 255, 150) } else { Color32::from_rgb(255, 160, 120) })
+                                .monospace()
+                                .size(9.0),
+                            );
+                            ui.label(
+                                RichText::new("English audio preferred • subtitles off • libbluray/libaacs")
+                                    .color(Color32::from_gray(115))
+                                    .monospace()
+                                    .size(9.0),
+                            );
+                        });
+                    });
+                    ui.add_space(8.0);
+                    if let Some(src) = &current {
+                        ui.label(
+                            RichText::new(format!("NOW  {}", crate::bluray::display_name(src)))
+                                .color(th.playing_fg)
+                                .monospace()
+                                .size(12.0),
+                        );
+                        ui.horizontal(|ui| {
+                            if retro_btn(ui, "⏹ STOP", th.btn_fg, th.btn_bg).clicked() {
+                                self.close_video();
+                            }
+                            if crate::bluray::source(src).starts_with("/dev/") {
+                                if retro_btn(ui, "⏏ EJECT TRAY", th.fg, th.btn_bg).clicked() {
+                                    self.eject_bluray();
+                                }
+                            }
+                        });
+                    } else {
+                        ui.label(
+                            RichText::new("Insert a Blu-ray disc or choose a Blu-ray ISO/folder")
+                                .color(Color32::from_gray(120))
+                                .monospace()
+                                .size(11.0),
+                        );
+                        ui.horizontal(|ui| {
+                            if retro_btn(ui, "▶ PLAY BLU-RAY", Color32::from_rgb(140, 220, 255), th.btn_bg).clicked() {
+                                self.play_bluray_drive();
+                            }
+                            if retro_btn(ui, "OPEN BLU-RAY ISO...", th.fg, th.btn_bg).clicked() {
+                                self.open_bluray_iso();
+                            }
+                        });
+                    }
+                }
                 DeckMode::Tape => {
                     ui.horizontal(|ui| {
                         ui.vertical(|ui| {
@@ -764,7 +833,7 @@ impl PlayerApp {
 
             ui.horizontal(|ui| {
                 ui.label(RichText::new("DECK").color(darken(th.accent, 0.4)).monospace().size(9.0));
-                let modes = [(DeckMode::Tape, "TAPE"), (DeckMode::Disc, "CD"), (DeckMode::Dvd, "DVD"), (DeckMode::Radio, "RADIO")];
+                let modes = [(DeckMode::Tape, "TAPE"), (DeckMode::Disc, "CD"), (DeckMode::Dvd, "DVD"), (DeckMode::BluRay, "BLU-RAY"), (DeckMode::Radio, "RADIO")];
                 for (m, lbl) in modes {
                     let on = self.deck_mode == m;
                     if retro_btn(ui, lbl, if on { th.playing_fg } else { th.btn_fg }, th.btn_bg).clicked() {

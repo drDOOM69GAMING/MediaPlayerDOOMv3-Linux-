@@ -40,7 +40,8 @@ impl PlayerApp {
         let next = match self.deck_mode {
             DeckMode::Tape => DeckMode::Disc,
             DeckMode::Disc => DeckMode::Dvd,
-            DeckMode::Dvd => DeckMode::Radio,
+            DeckMode::Dvd => DeckMode::BluRay,
+            DeckMode::BluRay => DeckMode::Radio,
             DeckMode::Radio => DeckMode::Tape,
         };
         self.set_deck_mode(next);
@@ -48,6 +49,7 @@ impl PlayerApp {
             DeckMode::Tape => "TAPE",
             DeckMode::Disc => "CD",
             DeckMode::Dvd => "DVD",
+            DeckMode::BluRay => "BLU-RAY",
             DeckMode::Radio => "RADIO",
         }));
     }

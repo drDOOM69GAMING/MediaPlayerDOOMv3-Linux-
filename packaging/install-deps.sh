@@ -7,7 +7,7 @@ if command -v pacman >/dev/null 2>&1; then
     echo "Detected Arch/CachyOS (pacman)"
     sudo pacman -S --needed --noconfirm \
         base-devel rust ffmpeg mkvtoolnix-cli cdparanoia \
-        libdvdread libdvdnav libdvdcss \
+        libdvdread libdvdnav libdvdcss libbluray libaacs \
         alsa-lib openssl libxkbcommon libxkbcommon-x11 wayland libx11 xdg-utils
 elif command -v apt >/dev/null 2>&1; then
     echo "Detected Debian/Ubuntu/Mint (apt)"
@@ -15,7 +15,7 @@ elif command -v apt >/dev/null 2>&1; then
     sudo apt install -y \
         build-essential pkg-config libasound2-dev \
         libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-dev \
-        libssl-dev ffmpeg mkvtoolnix cdparanoia xdg-utils \
+        libssl-dev ffmpeg mkvtoolnix cdparanoia libbluray2 libaacs0 xdg-utils \
         xdg-desktop-portal xdg-desktop-portal-gtk
 elif command -v dnf >/dev/null 2>&1; then
     echo "Detected Fedora (dnf)"

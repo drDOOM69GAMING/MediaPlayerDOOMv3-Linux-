@@ -75,7 +75,8 @@ pub fn spawn_radio_stream(url: &str, ffmpeg: &Path) -> Result<(Child, PipeSource
 
 pub fn spawn_video_audio(path: &str, ffmpeg: &Path, seek: f32) -> Result<(Child, PipeSource), String> {
     let dvd = crate::dvd::is_dvd(path);
-    let input = crate::dvd::source(path);
+    let bd = crate::bluray::is_bluray(path);
+    let input = if dvd { crate::dvd::source(path) } else { path };
     let mut args: Vec<String> = vec!["-hide_banner".to_string(), "-loglevel".to_string(), "error".to_string()];
     if dvd {
         args.push("-f".into());
@@ -86,12 +87,24 @@ pub fn spawn_video_audio(path: &str, ffmpeg: &Path, seek: f32) -> Result<(Child,
         args.push("-ss".to_string());
         args.push(format!("{:.3}", seek));
     }
-    args.extend(["-i", input, "-vn", "-ac", "2", "-ar", "44100", "-f", "s16le", "-"].iter().map(|s| s.to_string()));
-    let mut child = Command::new(ffmpeg.to_string_lossy().to_string())
-        .args(&args)
+    args.push("-i".into());
+    args.push(input.to_string());
+    if dvd || bd {
+        if let Some(map) = crate::ffmpeg::preferred_audio_map(path) {
+            args.push("-map".into());
+            args.push(map);
+        }
+    }
+    args.extend(["-vn", "-sn", "-ac", "2", "-ar", "44100", "-f", "s16le", "-"].iter().map(|s| s.to_string()));
+    let mut cmd = Command::new(ffmpeg.to_string_lossy().to_string());
+    cmd.args(&args)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
-        .no_window()
+        .no_window();
+    if bd {
+        crate::bluray::configure_command(&mut cmd);
+    }
+    let mut child = cmd
         .spawn()
         .map_err(|e| format!("ffmpeg video audio failed to start: {}", e))?;
     let stdout = child.stdout.take().ok_or("ffmpeg gave no audio output")?;
