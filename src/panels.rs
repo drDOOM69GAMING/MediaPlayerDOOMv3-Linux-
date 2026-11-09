@@ -74,6 +74,19 @@ impl PlayerApp {
         }
     }
 
+    /// DVD dump pair: raw archival ISO plus a CSS-decrypted, playable ISO.
+    pub(crate) fn draw_dvd_dump_buttons(&mut self, ui: &mut egui::Ui, th: &ThemePalette) {
+        self.draw_disc_dump(ui, "DVD", th);
+        if !self.disc_dumping {
+            if retro_btn(ui, "DECRYPT → ISO", th.fg, th.btn_bg)
+                .on_hover_text("Decrypt a CSS DVD to a playable ISO with MakeMKV (requires the physical disc)")
+                .clicked()
+            {
+                self.start_dvd_decrypted_dump();
+            }
+        }
+    }
+
     pub(crate) fn draw_sleep_timer(&mut self, ctx: &egui::Context) {
         if self.fading {
             let t = (Instant::now() - self.fade_start).as_secs_f32();
@@ -720,7 +733,7 @@ impl PlayerApp {
                                     self.eject_dvd();
                                 }
                             }
-                            self.draw_disc_dump(ui, "DVD", &th);
+                            self.draw_dvd_dump_buttons(ui, &th);
                         });
                     } else {
                         ui.label(
@@ -736,7 +749,7 @@ impl PlayerApp {
                             if retro_btn(ui, "OPEN DVD ISO...", th.fg, th.btn_bg).clicked() {
                                 self.open_dvd_iso();
                             }
-                            self.draw_disc_dump(ui, "DVD", &th);
+                            self.draw_dvd_dump_buttons(ui, &th);
                         });
                     }
                 }
@@ -1773,6 +1786,58 @@ impl PlayerApp {
                 let g = Color32::from_rgb(0, 255, 0);
                 let dim = Color32::from_rgb(100, 200, 100);
                 let acc = th.accent;
+
+                ui.label(
+                    RichText::new(format!("RANDOM SHUFFLE PLAYER v{}", APP_VERSION))
+                        .color(acc)
+                        .monospace()
+                        .strong(),
+                );
+                ui.add_space(6.0);
+
+                ui.label(RichText::new("CONVERT MUSIC").color(acc).monospace().strong());
+                ui.label(RichText::new("Convert button ...... Convert a folder recursively (MP3, AAC, FLAC, OGG, Opus, WAV, AIFF, ALAC, WMA, or same as source)").color(dim).monospace());
+                ui.label(RichText::new("Quality 1-10 ........ Lossy: bitrate; FLAC: compression level; WAV/AIFF/ALAC: bit depth").color(dim).monospace());
+                ui.label(RichText::new("Output .............. ~/Music/<picked folder> (<format>); tags and embedded art preserved where supported").color(dim).monospace());
+                ui.label(RichText::new("Progress / Cancel ... Per-file progress; HIDE keeps it running; CANCEL stops ffmpeg").color(dim).monospace());
+                ui.add_space(6.0);
+
+                ui.label(RichText::new("META ALL (TAGS, COVERS, RATINGS)").color(acc).monospace().strong());
+                ui.label(RichText::new("Meta All ............ Fetch tags, covers and MusicBrainz ratings; progress bar, ETA and CANCEL").color(dim).monospace());
+                ui.label(RichText::new("Covers .............. local folder art, iTunes, Deezer, Cover Art Archive, TheAudioDB; one lookup per album").color(dim).monospace());
+                ui.label(RichText::new("Song fallback ....... If the album is unknown, search by artist + song title (iTunes/Deezer)").color(dim).monospace());
+                ui.label(RichText::new("Ratings ............. MusicBrainz community 1-5 stars; current album auto-fetched; album fallback").color(dim).monospace());
+                ui.label(RichText::new("Your stars .......... Clicking stars sets a manual rating that Meta All never overwrites").color(dim).monospace());
+                ui.label(RichText::new("Metadata repair ..... Missing title/artist/album and track-number-only tags are filled from the filename/folder").color(dim).monospace());
+                ui.label(RichText::new("Not everything ...... Songs with no MusicBrainz rating or no available art stay unrated/art-less; final status reports counts").color(dim).monospace());
+                ui.add_space(6.0);
+
+                ui.label(RichText::new("DVD / BLU-RAY").color(acc).monospace().strong());
+                ui.label(RichText::new("Play ................ Drive or ISO; English audio preferred; subtitles off; fullscreen player with seek bar and STOP").color(dim).monospace());
+                ui.label(RichText::new("DVD seeking ......... Software MPEG-2 decode + CPU filters; metadata probed once so seeks do not thrash the drive").color(dim).monospace());
+                ui.label(RichText::new("Blu-ray ............. VAAPI hardware decode + GPU scale/pad/RGBA; libbluray streamer gives real time seeking").color(dim).monospace());
+                ui.label(RichText::new("DUMP DISC → ISO ..... Raw 1:1 archival image (preserves CSS/encryption); drive-limited speed with MB/s and ETA").color(dim).monospace());
+                ui.label(RichText::new("DECRYPT → ISO ....... DVD only: MakeMKV backup to a clean, playable ISO (requires the physical disc and makemkvcon)").color(dim).monospace());
+                ui.label(RichText::new("Raw ISO note ........ A raw copy of an encrypted DVD is not playable as-is; use DECRYPT → ISO or play the disc").color(dim).monospace());
+                ui.add_space(6.0);
+
+                ui.label(RichText::new("CD MODE").color(acc).monospace().strong());
+                ui.label(RichText::new("Insert audio CD ..... Detect tracks/TOC; rip whole disc losslessly to FLAC with MusicBrainz tags and cover art").color(dim).monospace());
+                ui.label(RichText::new("Eject ............... Open the tray when the rip is done").color(dim).monospace());
+                ui.add_space(6.0);
+
+                ui.label(RichText::new("GRAPHICS / HARDWARE").color(acc).monospace().strong());
+                ui.label(RichText::new("AMD / Intel ......... VAAPI hardware decode (auto-detected from /sys/class/drm render node)").color(dim).monospace());
+                ui.label(RichText::new("NVIDIA .............. CUDA/NVDEC when the proprietary driver is present").color(dim).monospace());
+                ui.label(RichText::new("Disable ............. MPDOOM_NO_HWACCEL=1 forces software decoding").color(dim).monospace());
+                ui.add_space(6.0);
+
+                ui.label(RichText::new("TROUBLESHOOTING").color(acc).monospace().strong());
+                ui.label(RichText::new("DVD blocks .......... Raw CSS ISO? Use DECRYPT → ISO or play the physical disc").color(dim).monospace());
+                ui.label(RichText::new("Ratings missing ..... MusicBrainz has no community rating for that track/album; no public star feed covers everything").color(dim).monospace());
+                ui.label(RichText::new("Covers missing ...... No local/web match; Meta All retries every run and reports the count without art").color(dim).monospace());
+                ui.label(RichText::new("Dump slow ........... Optical CAV/riplock; check the live MB/s and ETA; dirty discs are slower").color(dim).monospace());
+                ui.add_space(8.0);
 
                 ui.label(RichText::new("KEYBOARD SHORTCUTS").color(acc).monospace().strong());
                 ui.label(RichText::new("SPACE .............. Play / Pause").color(g).monospace());

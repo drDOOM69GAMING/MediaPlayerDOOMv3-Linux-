@@ -247,6 +247,155 @@ pub fn dump(
     }
 }
 
+/// Destination for a decrypted DVD image, named `<disc label> (decrypted).iso`.
+pub fn decrypted_iso_path(dir: &Path, device: &str) -> PathBuf {
+    let label = disc_label(device)
+        .map(|l| sanitize_win(&l))
+        .filter(|l| !l.trim().is_empty())
+        .unwrap_or_else(|| "dvd".to_string());
+    for n in 0..1000 {
+        let name = if n == 0 {
+            format!("{} (decrypted).iso", label)
+        } else {
+            format!("{} (decrypted) ({}).iso", label, n + 1)
+        };
+        let p = dir.join(name);
+        if !p.exists() {
+            return p;
+        }
+    }
+    dir.join(format!("{} (decrypted).iso", label))
+}
+
+/// Decrypt a CSS DVD to a playable ISO using MakeMKV's `backup` mode.
+/// Unlike raw `dd`, this removes CSS so the image plays cleanly in the app or
+/// any other player. Requires the physical disc and `makemkvcon`.
+pub fn dump_decrypted_dvd(
+    device: &str,
+    dir: &Path,
+    tx: &Sender<Msg>,
+    cancel: &AtomicBool,
+) -> Result<PathBuf, String> {
+    #[cfg(windows)]
+    {
+        let _ = (device, dir, tx, cancel);
+        return Err("decrypted disc imaging is only supported on Linux".into());
+    }
+    #[cfg(not(windows))]
+    {
+    if !Path::new(device).exists() {
+        return Err(format!("{} not found", device));
+    }
+    std::fs::create_dir_all(dir)
+        .map_err(|e| format!("cannot create destination folder: {}", e))?;
+    let target = decrypted_iso_path(dir, device);
+    // MakeMKV treats a destination ending in `.iso` as something other than a
+    // backup target, so write to the same name without the extension and
+    // rename it once the backup is complete.
+    let staging = target.with_extension("");
+    let _ = std::fs::remove_file(&staging);
+    let total = device_size(device);
+    let _ = tx.send(Msg::DiscDumpProgress {
+        done: 0,
+        total: total.unwrap_or(0),
+        text: format!(
+            "Decrypting DVD with MakeMKV to {} (this removes CSS)...",
+            target.display()
+        ),
+    });
+    let mut cmd = Command::new("makemkvcon");
+    cmd.args(["-r", "backup", "disc:0"])
+        .arg(&staging)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+                Ok(())
+            });
+        }
+    }
+    let mut child = cmd.spawn().map_err(|e| {
+        format!("MakeMKV failed to start (is makemkvcon installed?): {}", e)
+    })?;
+    let err_handle = child.stderr.take().map(|mut e| {
+        std::thread::spawn(move || {
+            let mut s = String::new();
+            let _ = e.read_to_string(&mut s);
+            s
+        })
+    });
+    let mut last_sent = Instant::now() - Duration::from_secs(5);
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = std::fs::remove_file(&staging);
+            let _ = std::fs::remove_file(&target);
+            return Err("cancelled".into());
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let err = err_handle.and_then(|h| h.join().ok()).unwrap_or_default();
+                if !status.success() {
+                    let _ = std::fs::remove_file(&staging);
+                    let _ = std::fs::remove_file(&target);
+                    let tail = err.lines().rev().take(3).collect::<Vec<_>>().join(" | ");
+                    return Err(format!(
+                        "MakeMKV failed{}",
+                        if tail.is_empty() { String::new() } else { format!(": {}", tail) }
+                    ));
+                }
+                break;
+            }
+            Ok(None) => {}
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = std::fs::remove_file(&staging);
+                let _ = std::fs::remove_file(&target);
+                return Err(format!("MakeMKV error: {}", e));
+            }
+        }
+        let done = std::fs::metadata(&staging).map(|m| m.len()).unwrap_or(0);
+        if last_sent.elapsed() >= Duration::from_millis(500) {
+            last_sent = Instant::now();
+            let pct = total
+                .map(|t| (done.saturating_mul(100) / t).min(100))
+                .unwrap_or(0);
+            let text = match total {
+                Some(t) if t > 0 => format!(
+                    "Decrypting DVD... {}%  ({:.1} / {:.1} GB)",
+                    pct,
+                    done as f64 / 1e9,
+                    t as f64 / 1e9
+                ),
+                _ => format!("Decrypting DVD... {:.1} GB", done as f64 / 1e9),
+            };
+            let _ = tx.send(Msg::DiscDumpProgress {
+                done,
+                total: total.unwrap_or(0),
+                text,
+            });
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let size = std::fs::metadata(&staging).map(|m| m.len()).unwrap_or(0);
+    if size == 0 {
+        let _ = std::fs::remove_file(&staging);
+        return Err("MakeMKV produced an empty image".into());
+    }
+    if let Err(e) = std::fs::rename(&staging, &target) {
+        let _ = std::fs::remove_file(&staging);
+        return Err(format!("could not finalize decrypted image: {}", e));
+    }
+    Ok(target)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

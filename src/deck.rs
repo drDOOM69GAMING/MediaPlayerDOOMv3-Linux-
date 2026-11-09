@@ -785,6 +785,67 @@ impl PlayerApp {
         }));
     }
 
+    /// Decrypt a CSS DVD to a clean ISO with MakeMKV. This is separate from
+    /// the raw `dd` archival copy, which preserves encryption.
+    pub(crate) fn start_dvd_decrypted_dump(&mut self) {
+        if self.disc_dumping {
+            return;
+        }
+        let Some(device) = crate::dvd::first_drive() else {
+            self.set_error("No DVD drive found");
+            return;
+        };
+        let playing_optical = self
+            .video_current
+            .as_deref()
+            .map(|p| crate::dvd::is_dvd(p) || crate::bluray::is_bluray(p))
+            .unwrap_or(false);
+        if playing_optical {
+            self.close_video();
+        }
+        let start_dir = crate::disc::videos_dir();
+        let Some(dir) = rfd::FileDialog::new()
+            .set_title("Choose where to save the decrypted DVD image")
+            .set_directory(&start_dir)
+            .pick_folder()
+        else {
+            self.set_status("Decrypted dump cancelled");
+            return;
+        };
+        if let Some(h) = self.disc_dump_thread.take() {
+            let _ = h.join();
+        }
+        self.disc_dump_cancel.store(false, Ordering::Relaxed);
+        self.disc_dumping = true;
+        self.disc_dump_done = 0;
+        self.disc_dump_total = 0;
+        self.disc_dump_speed = 0.0;
+        self.disc_dump_last_done = 0;
+        self.disc_dump_last_at = Instant::now();
+        let text = format!(
+            "Decrypting DVD from {} to {} with MakeMKV...",
+            device,
+            dir.display()
+        );
+        self.disc_dump_text = text.clone();
+        self.set_status(text);
+        let tx = self.msg_tx.clone();
+        let cancel = self.disc_dump_cancel.clone();
+        self.disc_dump_thread = Some(std::thread::spawn(move || {
+            match crate::disc::dump_decrypted_dvd(&device, &dir, &tx, &cancel) {
+                Ok(path) => {
+                    let _ = tx.send(Msg::DiscDumpDone(path.to_string_lossy().to_string()));
+                }
+                Err(_) if cancel.load(Ordering::Relaxed) => {
+                    let _ = tx.send(Msg::DiscDumpCancelled);
+                }
+                Err(e) => {
+                    let _ = tx.send(Msg::DiscDumpFail(e));
+                }
+            }
+        }));
+    }
+
     /// Stop a running disc dump, kill dd promptly, and remove the partial ISO.
     pub(crate) fn cancel_disc_dump(&mut self) {
         if !self.disc_dumping && self.disc_dump_thread.is_none() {

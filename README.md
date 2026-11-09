@@ -189,6 +189,18 @@ This app is built on the work of some incredible open-source projects, and it wo
 
 Full details, license texts, and donation links are in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). If you can, consider donating to FFmpeg, yt-dlp, and MKVToolNix - they give this all away for free.
 
+## v3.2.26 changelog
+
+- **Decrypted DVD → ISO**
+  - New **DECRYPT → ISO** button in the DVD deck (next to the raw DUMP DISC → ISO button)
+  - Uses MakeMKV’s backup mode to remove CSS while reading the **physical disc**, producing a clean, directly playable ISO
+  - Raw `dd` images are still available for archival, but they preserve encryption; a raw CSS ISO will show chunky blocks when played
+  - Same progress bar, live MB/s, ETA and CANCEL; the partial decrypted image is removed on cancel
+  - Requires `makemkvcon`; if it is not installed the app reports the error instead of producing a corrupt image
+- **Help menu updated**
+  - Documents Convert Music, Meta All / covers / ratings / metadata repair, DVD and Blu-ray playback/seeking, raw vs decrypted ISO dumping, CD ripping, hardware acceleration and common troubleshooting
+- Version bump to **v3.2.26**
+
 ## v3.2.25 changelog
 
 - **Metadata repair from the filename/folder**
