@@ -670,6 +670,10 @@ impl PlayerApp {
                                     self.eject_dvd();
                                 }
                             }
+                            let dump_lbl = if self.disc_dumping { "DUMPING..." } else { "DUMP DISC → ISO" };
+                            if retro_btn(ui, dump_lbl, th.fg, th.btn_bg).clicked() && !self.disc_dumping {
+                                self.start_disc_dump("DVD");
+                            }
                         });
                     } else {
                         ui.label(
@@ -684,6 +688,10 @@ impl PlayerApp {
                             }
                             if retro_btn(ui, "OPEN DVD ISO...", th.fg, th.btn_bg).clicked() {
                                 self.open_dvd_iso();
+                            }
+                            let dump_lbl = if self.disc_dumping { "DUMPING..." } else { "DUMP DISC → ISO" };
+                            if retro_btn(ui, dump_lbl, th.fg, th.btn_bg).clicked() && !self.disc_dumping {
+                                self.start_disc_dump("DVD");
                             }
                         });
                     }
@@ -738,6 +746,10 @@ impl PlayerApp {
                                     self.eject_bluray();
                                 }
                             }
+                            let dump_lbl = if self.disc_dumping { "DUMPING..." } else { "DUMP DISC → ISO" };
+                            if retro_btn(ui, dump_lbl, th.fg, th.btn_bg).clicked() && !self.disc_dumping {
+                                self.start_disc_dump("BLU-RAY");
+                            }
                         });
                     } else {
                         ui.label(
@@ -752,6 +764,10 @@ impl PlayerApp {
                             }
                             if retro_btn(ui, "OPEN BLU-RAY ISO...", th.fg, th.btn_bg).clicked() {
                                 self.open_bluray_iso();
+                            }
+                            let dump_lbl = if self.disc_dumping { "DUMPING..." } else { "DUMP DISC → ISO" };
+                            if retro_btn(ui, dump_lbl, th.fg, th.btn_bg).clicked() && !self.disc_dumping {
+                                self.start_disc_dump("BLU-RAY");
                             }
                         });
                     }

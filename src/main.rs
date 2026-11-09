@@ -12,6 +12,7 @@ pub(crate) mod app;
 pub(crate) mod audio;
 pub(crate) mod consts;
 pub(crate) mod bluray;
+pub(crate) mod disc;
 pub(crate) mod dvd;
 #[cfg(target_os = "linux")]
 pub(crate) mod cd;

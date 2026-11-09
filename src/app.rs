@@ -236,6 +236,7 @@ pub(crate) struct PlayerApp {
     /// Physical audio CD detected in an optical drive.
     pub(crate) cd_physical: Option<CdInfo>,
     pub(crate) cd_ripping: bool,
+    pub(crate) disc_dumping: bool,
     pub(crate) msg_tx: Sender<Msg>,
     pub(crate) last_cd_dir: Option<String>,
     /// Remembered library root, so startup doesn't re-walk every drive.
@@ -630,6 +631,7 @@ impl PlayerApp {
             disc_label: String::new(),
             cd_physical: None,
             cd_ripping: false,
+            disc_dumping: false,
             msg_tx: msg_tx.clone(),
             last_cd_dir,
             music_root,
@@ -1684,6 +1686,18 @@ video_ended: false,
             Msg::CdFail(e) => {
                 self.cd_ripping = false;
                 self.set_error(format!("CD rip failed: {}", e));
+            }
+            Msg::DiscDumpProgress(text) => {
+                self.disc_dumping = true;
+                self.set_status(text);
+            }
+            Msg::DiscDumpDone(path) => {
+                self.disc_dumping = false;
+                self.set_status(format!("Disc image written: {}", path));
+            }
+            Msg::DiscDumpFail(e) => {
+                self.disc_dumping = false;
+                self.set_error(format!("Disc dump failed: {}", e));
             }
             Msg::VideoCutDone { gen, path, cut, err } => {
                 if gen == self.video_gen {

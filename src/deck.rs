@@ -720,6 +720,33 @@ impl PlayerApp {
 }
 
 impl PlayerApp {
+    /// Copy a whole DVD/Blu-ray disc to an ISO on a worker thread.
+    pub(crate) fn start_disc_dump(&mut self, kind: &str) {
+        if self.disc_dumping {
+            return;
+        }
+        let source = match kind {
+            "DVD" => crate::dvd::first_drive(),
+            _ => crate::bluray::first_drive(),
+        };
+        let Some(device) = source else {
+            self.set_error("No optical drive found");
+            return;
+        };
+        self.disc_dumping = true;
+        self.set_status(format!("Dumping {} disc from {}...", kind, device));
+        let kind = kind.to_string();
+        let tx = self.msg_tx.clone();
+        std::thread::spawn(move || match crate::disc::dump(&device, &kind, &tx) {
+            Ok(path) => {
+                let _ = tx.send(Msg::DiscDumpDone(path.to_string_lossy().to_string()));
+            }
+            Err(e) => {
+                let _ = tx.send(Msg::DiscDumpFail(e));
+            }
+        });
+    }
+
     /// start_cd_rip ---------------------------------------------------------
     pub(crate) fn start_cd_rip(&mut self) {
         if self.cd_ripping {

@@ -12,6 +12,7 @@ A retro DOOM-styled media player rendered in egui. Tape, CD, and Radio faces on 
   - **RADIO**: FM/AM dial with click-and-drag tuning, presets, SCAN, live web streams, and an **ADD STATION** dialog to save your own FM/AM stream presets
   - **DVD**: play a DVD movie directly from the optical drive or from an `.iso`/`.img` image using ffmpeg's `dvdvideo` demuxer; encrypted discs are decrypted with libdvdcss when installed
   - **BLU-RAY**: play a Blu-ray movie from the optical drive or an `.iso`/`.img` using ffmpeg's `bluray` protocol. AACS keys are read from the user's own `~/.config/aacs/KEYDB.cfg` (or `$XDG_CONFIG_HOME/aacs/KEYDB.cfg`); no keys are shipped with the app. English audio is preferred and subtitles are disabled by default for DVD/Blu-ray
+  - **Disc imaging**: both the DVD and Blu-ray decks have **DUMP DISC → ISO**, which copies the entire disc (menus, extras and all) to a uniquely named `.iso` in your XDG Videos folder using a background `dd` worker with progress
 - **Bands catalog**: songs grouped by artist folder (A-Z, scrollable), rebuilt from whatever folder you add
 - **Play order switch**: flip the retro wall switch under BANDS. ON = random shuffle, OFF = normal in-order playback
 - **Smart shuffle**: weighted by your listening history, or plain shuffle
@@ -188,6 +189,25 @@ This app is built on the work of some incredible open-source projects, and it wo
 
 Full details, license texts, and donation links are in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). If you can, consider donating to FFmpeg, yt-dlp, and MKVToolNix - they give this all away for free.
 
+## v3.2.11 changelog
+
+- **Whole-disc ISO dumping for DVD and Blu-ray**
+  - New **DUMP DISC → ISO** button in both optical decks
+  - Copies every sector of the disc (menus, extras, all titles) with `dd` in a background thread - the UI stays responsive and shows percentage progress
+  - Images are written to the XDG Videos folder (`~/Videos`), named from the disc label with automatic `(2)`, `(3)` suffixes instead of overwriting
+  - Raw images of encrypted discs still need the user's AACS/CSS keys to play, just like the physical disc
+- Version bump to **v3.2.11**
+
+## v3.2.10 changelog
+
+- **Hardware-accelerated video decoding**
+  - ffmpeg now uses `-hwaccel auto`: VAAPI on AMD/Intel, CUDA/NVDEC on NVIDIA, with automatic software fallback
+  - Tested on AMD Radeon RX 6800 (Mesa VAAPI): DVD/MPEG-2 and H.264 decode offload working, including a 6 s seek completing in under 100 ms
+  - Set `MPDOOM_NO_HWACCEL=1` to force software decoding if a driver or profile misbehaves
+- **Removed the per-frame RGB→RGBA conversion**
+  - ffmpeg now emits RGBA directly, so the video thread no longer copies every pixel and the UI receives the buffer without an extra full-frame pass
+- Version bump to **v3.2.10**
+
 ## v3.2.9 changelog
 
 - **New Blu-ray deck mode**
@@ -207,8 +227,9 @@ Full details, license texts, and donation links are in [THIRD-PARTY-NOTICES.md](
   - Play a DVD movie directly from the optical drive or from an `.iso`/`.img` image
   - Uses ffmpeg's `dvdvideo` demuxer (libdvdread/libdvdnav); libdvdcss handles encrypted commercial discs when installed
   - The existing fullscreen video player, queue, seek bar and A/V clock are reused, with the main title selected automatically
+  - Video is decoded through ffmpeg's **hardware acceleration** when available (VAAPI on AMD/Intel, CUDA on NVIDIA), which keeps 1080p Blu-ray seeking responsive; `MPDOOM_NO_HWACCEL=1` disables it if a driver misbehaves
   - `--mode dvd` opens the deck directly; `--dvd /path/movie.iso` starts a movie immediately
-  - Verified with a real generated DVD-Video ISO: 720x480, 29.97 fps, audio drift within about 35 ms
+  - Verified with a real generated DVD-Video ISO: 720x480, 29.97 fps, audio drift within about 35 ms; seeking to 6 s reached the first frame in under 100 ms
   - DVD titles are excluded from mkvmerge auto-cut and automatic intro/credits detection (those are for episode files)
 - Added libdvdread/libdvdnav/libdvdcss to the Arch/CachyOS dependency installer; documented libdvdcss for other distros
 - Version bump to **v3.2.8**

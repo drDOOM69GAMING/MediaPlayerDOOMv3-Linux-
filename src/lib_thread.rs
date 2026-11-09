@@ -289,6 +289,12 @@ LibCmd::Scan(dir) => {
                 let input = if dvd { crate::dvd::source(&path) } else { path.as_str() };
                 let mut cmd = std::process::Command::new(ffmpeg_path());
                 cmd.args(["-hide_banner", "-loglevel", "error"]);
+                // Hardware decode (VAAPI/CUDA/VDPAU...) when the driver and
+                // ffmpeg support it; "auto" falls back to software. Users can
+                // disable it with MPDOOM_NO_HWACCEL=1 if a driver misbehaves.
+                if std::env::var_os("MPDOOM_NO_HWACCEL").is_none() {
+                    cmd.args(["-hwaccel", "auto"]);
+                }
                 if dvd {
                     cmd.args(["-f", "dvdvideo"]);
                 }
@@ -299,7 +305,7 @@ LibCmd::Scan(dir) => {
                     cmd.args(["-ss"]).arg(format!("{:.3}", seek));
                 }
                 cmd.arg("-i").arg(input)
-                    .args(["-an", "-sn", "-vf", &format!("scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2", tw, th, tw, th), "-pix_fmt", "rgb24", "-f", "rawvideo", "-"])
+                    .args(["-an", "-sn", "-vf", &format!("scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2", tw, th, tw, th), "-pix_fmt", "rgba", "-f", "rawvideo", "-"])
                     .stdout(std::process::Stdio::piped())
                     .stderr(std::process::Stdio::piped())
                     .no_window();
@@ -356,7 +362,7 @@ LibCmd::Scan(dir) => {
                     let pos_send = (fps as u64).max(1);
                     *video_thread = Some(std::thread::spawn(move || {
                         use std::io::Read;
-                        let frame = (w * h * 3) as usize;
+                        let frame = (w * h * 4) as usize;
                         let mut buf = vec![0u8; frame];
                         let mut pipe = stdout;
                         let fps = fps;
@@ -384,13 +390,10 @@ LibCmd::Scan(dir) => {
                                     break;
                                 }
                                 {
-                                    let mut rgba = Vec::with_capacity(frame / 3 * 4);
-                                    for p in buf.chunks_exact(3) {
-                                        rgba.extend_from_slice(&[p[0], p[1], p[2], 255]);
-                                    }
-                                    if tx2.send(Msg::VideoFrame { w, h, rgba, gen: gen2 }).is_err() {
+                                    if tx2.send(Msg::VideoFrame { w, h, rgba: buf, gen: gen2 }).is_err() {
                                         break;
                                     }
+                                    buf = vec![0u8; frame];
                                 }
                                 next_t = std::time::Instant::now();
                                 std::thread::sleep(std::time::Duration::from_millis(30));
@@ -439,13 +442,10 @@ LibCmd::Scan(dir) => {
                                 }
                             }
                             if !drop_frame {
-                                let mut rgba = Vec::with_capacity(frame / 3 * 4);
-                                for p in buf.chunks_exact(3) {
-                                    rgba.extend_from_slice(&[p[0], p[1], p[2], 255]);
-                                }
-                                if tx2.send(Msg::VideoFrame { w, h, rgba, gen: gen2 }).is_err() {
+                                if tx2.send(Msg::VideoFrame { w, h, rgba: buf, gen: gen2 }).is_err() {
                                     break;
                                 }
+                                buf = vec![0u8; frame];
                                 if frames == 0 {
                                     av_log("reader: first frame sent");
                                 }
