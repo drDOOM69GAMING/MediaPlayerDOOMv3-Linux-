@@ -189,6 +189,19 @@ This app is built on the work of some incredible open-source projects, and it wo
 
 Full details, license texts, and donation links are in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). If you can, consider donating to FFmpeg, yt-dlp, and MKVToolNix - they give this all away for free.
 
+## v3.2.25 changelog
+
+- **Metadata repair from the filename/folder**
+  - Missing or placeholder title/artist/album tags are repaired from the filename and folder layout when the library loads and whenever tags arrive
+  - A tag that is only a track number (“01”, “Track 1”) is replaced with the real song name from the filename
+  - Valid embedded tags are left alone; this changes the player’s labels and online art/rating lookups, not the files’ embedded tags
+- **More complete cover/rating attempts**
+  - Meta All still retries every missing cover (the remembered “no art” list is cleared at the start)
+  - When a track has no usable album tag, the cover lookup now falls back to an **artist + song-title** search on iTunes/Deezer instead of immediately giving up
+  - Completion status now reports how many tracks have **no MusicBrainz rating/match** and how many have no cover available, so the unavailable ones are distinguishable from skipped ones
+  - Ratings still require MusicBrainz community data; albums/tracks with no rating remain unrated
+- Version bump to **v3.2.25**
+
 ## v3.2.24 changelog
 
 - **Disc-image dump speed**

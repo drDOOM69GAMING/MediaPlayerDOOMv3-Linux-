@@ -524,7 +524,24 @@ impl PlayerApp {
         // Built before the workers start so the download thread can consult the
         // local library to learn which album a single-song download belongs to.
         // This is a startup snapshot; albums discovered later aren't included.
-        let meta_cache_boot = Self::load_meta_cache();
+        let mut meta_cache_boot = Self::load_meta_cache();
+        // Repair old/empty tags from filenames and folder names once at load.
+        // This also gives art/rating lookups usable artist/album values.
+        let mut meta_cache_repaired = false;
+        for (path, entry) in meta_cache_boot.iter_mut() {
+            let (t, a, al) = crate::library::repaired_meta(
+                path,
+                &entry.title,
+                &entry.artist,
+                &entry.album,
+            );
+            if t != entry.title || a != entry.artist || al != entry.album {
+                entry.title = t;
+                entry.artist = a;
+                entry.album = al;
+                meta_cache_repaired = true;
+            }
+        }
         let yt_album_index = std::sync::Arc::new(build_album_index(&meta_cache_boot));
         let (msg_tx, msg_rx) = channel::<Msg>();
         {
@@ -635,7 +652,7 @@ impl PlayerApp {
             auto_tag_budget: 400,
             tags_pending: HashSet::new(),
             meta_cache: meta_cache_boot,
-            meta_cache_dirty: false,
+            meta_cache_dirty: meta_cache_repaired,
             meta_cache_last_save: Instant::now(),
             meta_all_pending: HashSet::new(),
             art_all_pending: HashSet::new(),
@@ -1448,14 +1465,15 @@ video_ended: false,
                 .iter()
                 .filter(|p| self.no_art.contains(*p) && !art_cache_path(p).is_file())
                 .count();
-            let tail = if no_art_cnt > 0 {
-                format!(" ({} found no art)", no_art_cnt)
+            let unrated = total.saturating_sub(rated);
+            let art_tail = if no_art_cnt > 0 {
+                format!(", {} have no cover available", no_art_cnt)
             } else {
                 String::new()
             };
             self.set_status(format!(
-                "Meta All complete: {} tracks, {} rated from MusicBrainz{}.",
-                total, rated, tail
+                "Meta All complete: {} tracks, {} rated ({} have no MusicBrainz rating/match){}.",
+                total, rated, unrated, art_tail
             ));
             self.save_settings_now();
             self.save_meta_cache();
@@ -1694,9 +1712,8 @@ video_ended: false,
             }
             Msg::Meta { path, title, artist, album, duration } => {
                 if self.state.current_song.as_deref() == Some(&path) {
-                    let mut artist = artist;
-                    let mut album = album;
-                    merge_folder_meta(&mut artist, &mut album, &path);
+                    let (title, artist, album) =
+                        crate::library::repaired_meta(&path, &title, &artist, &album);
                     self.meta = (title.clone(), artist.clone(), album.clone());
                     self.state.song_length = duration;
                     let d = duration.as_secs_f32();
@@ -1726,6 +1743,8 @@ video_ended: false,
                     if self.tag_names.contains_key(&path) {
                         continue;
                     }
+                    let (title, artist, _) =
+                        crate::library::repaired_meta(&path, &title, &artist, "");
                     self.tag_names.insert(path.clone(), playlist_display(&artist, &title, &path));
                     changed = true;
                 }
@@ -1740,6 +1759,8 @@ video_ended: false,
                     if self.meta_all_active {
                         self.meta_all_done += 1;
                     }
+                    let (title, artist, album) =
+                        crate::library::repaired_meta(&path, &title, &artist, &album);
                     self.meta_cache.insert(path.clone(), MetaCacheEntry { title, artist, album, secs });
                     self.meta_cache_dirty = true;
                     if !self.tag_names.contains_key(&path) {
@@ -1832,6 +1853,7 @@ video_ended: false,
                     }
                 }
                 let mut groups: HashMap<String, (String, String, Vec<String>)> = HashMap::new();
+                let mut song_groups: HashMap<(String, String), Vec<String>> = HashMap::new();
                 for p in missing {
                     self.art_all_pending.remove(&p);
                     if art_cache_ok(&p) {
@@ -1858,20 +1880,48 @@ video_ended: false,
                             .or_insert_with(|| (artist, album, Vec::new()))
                             .2
                             .push(p);
-                    } else {
-                        if self.no_art.insert(p.clone()) {
-                            self.no_art_dirty = true;
+                    } else if !self.web_all_pending.contains(&p) {
+                        // No usable album: fall back to a track-title lookup.
+                        // Many singles/live rips have no album tag but do have
+                        // a title, and iTunes/Deezer can still find the art.
+                        let mut title = self
+                            .meta_cache
+                            .get(&p)
+                            .map(|e| e.title.clone())
+                            .unwrap_or_default();
+                        if title.trim().is_empty() || is_placeholder_meta(&title) {
+                            title = crate::library::filename_title(&p, &artist);
                         }
-                        self.cover_path_done(&p);
+                        if !is_placeholder_meta(&title) {
+                            song_groups
+                                .entry((artist, title))
+                                .or_default()
+                                .push(p);
+                        } else {
+                            if self.no_art.insert(p.clone()) {
+                                self.no_art_dirty = true;
+                            }
+                            self.cover_path_done(&p);
+                        }
+                    } else {
+                        // Already queued by an earlier chunk; leave it pending.
+                        continue;
                     }
                 }
-                // One web lookup per album, written to every track at once.
+                // One web lookup per album, then title fallbacks for tracks
+                // whose album metadata is missing.
                 let gen = self.meta_gen;
                 for (_, (artist, album, paths)) in groups {
                     for p in &paths {
                         self.web_all_pending.insert(p.clone());
                     }
                     let _ = self.web_tx.send(NetCmd::WebArtGroup { gen, paths, artist, album });
+                }
+                for ((artist, title), paths) in song_groups {
+                    for p in &paths {
+                        self.web_all_pending.insert(p.clone());
+                    }
+                    let _ = self.web_tx.send(NetCmd::WebArtSong { gen, paths, artist, title });
                 }
                 self.meta_all_tick(format!("Meta All: {} covers, {} web left", self.art_all_pending.len(), self.web_all_pending.len()));
             }

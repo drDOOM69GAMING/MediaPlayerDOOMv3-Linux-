@@ -319,6 +319,61 @@ pub fn merge_folder_meta(artist: &mut String, album: &mut String, path: &str) {
     }
 }
 
+fn looks_like_track_number(s: &str) -> bool {
+    let t = s.trim().to_ascii_lowercase();
+    let t = t.strip_prefix("track").unwrap_or(&t).trim();
+    !t.is_empty()
+        && t.chars()
+            .all(|c| c.is_ascii_digit() || c == '.' || c == '-' || c == '_' || c == ' ')
+}
+
+/// Title derived from the filename when the file has no usable title tag.
+pub fn filename_title(path: &str, artist: &str) -> String {
+    let raw = stem(path).replace('_', " ");
+    let stripped = strip_track_no(&raw).unwrap_or(raw);
+    let cleaned = beautify_name(&stripped);
+    if !artist.trim().is_empty() {
+        if let Some((left, right)) = cleaned.split_once(" - ") {
+            if left.trim().eq_ignore_ascii_case(artist.trim()) {
+                let r = right.trim();
+                if !r.is_empty() {
+                    return r.to_string();
+                }
+            }
+        }
+    }
+    cleaned.trim().to_string()
+}
+
+/// Fill missing/placeholder title, artist and album from the filename and the
+/// folder layout. Valid tags are kept; a tag that is only a track number is
+/// replaced. This keeps the library labels and the online art/rating lookups
+/// consistent with the actual file instead of showing "Unknown".
+pub fn repaired_meta(path: &str, title: &str, artist: &str, album: &str) -> (String, String, String) {
+    let mut a = artist.trim().to_string();
+    let mut al = album.trim().to_string();
+    merge_folder_meta(&mut a, &mut al, path);
+    let mut t = title.trim().to_string();
+    if let Some(stripped) = strip_track_no(&t) {
+        if !stripped.is_empty() {
+            t = stripped;
+        }
+    }
+    if t.is_empty() || is_placeholder_meta(&t) || looks_like_track_number(&t) {
+        t = filename_title(path, &a);
+    }
+    if t.trim().is_empty() {
+        t = beautify_name(&stem(path));
+    }
+    if a.is_empty() || is_placeholder_meta(&a) {
+        a = "Unknown".to_string();
+    }
+    if al.is_empty() || is_placeholder_meta(&al) {
+        al = "Unknown".to_string();
+    }
+    (t, a, al)
+}
+
 pub fn strip_track_no(title: &str) -> Option<String> {
     if let Some(sep) = title.find(" - ") {
         let head = title[..sep].trim();
@@ -354,6 +409,24 @@ mod folder_tests {
             b.push(part);
         }
         b.to_string_lossy().to_string()
+    }
+
+    #[test]
+    fn repairs_metadata_from_filename_and_folder() {
+        let path = p(&["Music", "Queen", "A Night at the Opera", "02 Queen - Doing All Right.mp3"]);
+        let (t, a, al) = repaired_meta(&path, "", "", "");
+        assert_eq!(t, "Doing All Right");
+        assert_eq!(a, "Queen");
+        assert_eq!(al, "A Night at the Opera");
+    }
+
+    #[test]
+    fn keeps_valid_metadata_tags() {
+        let path = p(&["Music", "Queen", "A Night at the Opera", "11 - Bohemian Rhapsody.mp3"]);
+        let (t, a, al) = repaired_meta(&path, "Bohemian Rhapsody", "Queen", "A Night at the Opera");
+        assert_eq!(t, "Bohemian Rhapsody");
+        assert_eq!(a, "Queen");
+        assert_eq!(al, "A Night at the Opera");
     }
 
     #[test]

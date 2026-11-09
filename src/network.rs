@@ -27,6 +27,9 @@ pub fn net_loop(rx: Receiver<NetCmd>, tx: Sender<Msg>) {
                 NetCmd::WebArtGroup { .. } => {
                     // Album-group lookups also run in the parallel pool.
                 }
+                NetCmd::WebArtSong { .. } => {
+                    // Song fallback lookups also run in the parallel pool.
+                }
                 NetCmd::Lyrics(artist, title) => {
                     let text = fetch_lyrics(&artist, &title);
                     let _ = tx.send(Msg::Lyrics { artist, title, text });
@@ -60,6 +63,14 @@ pub fn web_art_loop(
                 NetCmd::WebArtGroup { gen, paths, artist, album } => {
                     if gen == generation.load(Ordering::Relaxed) {
                         let bytes = fetch_web_art(&artist, &album).and_then(|b| normalize_art(&b));
+                        if gen == generation.load(Ordering::Relaxed) {
+                            let _ = tx.send(Msg::ArtWebGroup { paths, bytes });
+                        }
+                    }
+                }
+                NetCmd::WebArtSong { gen, paths, artist, title } => {
+                    if gen == generation.load(Ordering::Relaxed) {
+                        let bytes = fetch_song_art(&artist, &title).and_then(|b| normalize_art(&b));
                         if gen == generation.load(Ordering::Relaxed) {
                             let _ = tx.send(Msg::ArtWebGroup { paths, bytes });
                         }
@@ -196,6 +207,104 @@ fn download_art(client: &reqwest::blocking::Client, url: &str) -> Option<Vec<u8>
     } else {
         None
     }
+}
+
+/// Last-resort cover lookup for a single song whose album metadata is
+/// missing. It searches by artist + track title instead of album.
+pub fn fetch_song_art(artist: &str, title: &str) -> Option<Vec<u8>> {
+    let artist = artist.trim();
+    let title = title.trim();
+    if is_placeholder_meta(title) {
+        return None;
+    }
+    let client = http_client()?;
+    let mut urls: Vec<String> = Vec::new();
+    if let Some(u) = itunes_song_art_url(&client, artist, title) {
+        urls.push(u);
+    }
+    if let Some(u) = deezer_song_art_url(&client, artist, title) {
+        urls.push(u);
+    }
+    for url in urls {
+        if let Some(bytes) = download_art(&client, &url) {
+            return Some(bytes);
+        }
+    }
+    None
+}
+
+fn itunes_song_art_url(client: &reqwest::blocking::Client, artist: &str, title: &str) -> Option<String> {
+    let term = if is_placeholder_meta(artist) {
+        title.to_string()
+    } else {
+        format!("{} {}", artist, title)
+    };
+    let res = client
+        .get("https://itunes.apple.com/search")
+        .query(&[("term", term), ("entity", "song".to_string()), ("limit", "8".to_string())])
+        .send()
+        .ok()?;
+    let json: serde_json::Value = res.json().ok()?;
+    parse_itunes_song_art(&json, artist, title)
+}
+
+pub fn parse_itunes_song_art(json: &serde_json::Value, artist: &str, title: &str) -> Option<String> {
+    let results = json.get("results")?.as_array()?;
+    let mut best: Option<(i32, String)> = None;
+    for r in results {
+        let ca = r.get("artistName").and_then(|v| v.as_str()).unwrap_or("");
+        let tr = r.get("trackName").and_then(|v| v.as_str()).unwrap_or("");
+        let score = match_score(artist, title, ca, tr);
+        if score < 3 {
+            continue;
+        }
+        if let Some(url) = r.get("artworkUrl100").and_then(|v| v.as_str()) {
+            let url = url.replace("100x100bb", "600x600bb");
+            if best.as_ref().map_or(true, |(s, _)| score > *s) {
+                best = Some((score, url));
+            }
+        }
+    }
+    best.map(|(_, u)| u)
+}
+
+fn deezer_song_art_url(client: &reqwest::blocking::Client, artist: &str, title: &str) -> Option<String> {
+    let q = if is_placeholder_meta(artist) {
+        title.to_string()
+    } else {
+        format!("{} {}", artist, title)
+    };
+    let res = client
+        .get("https://api.deezer.com/search")
+        .query(&[("q", q), ("limit", "8".to_string())])
+        .send()
+        .ok()?;
+    let json: serde_json::Value = res.json().ok()?;
+    parse_deezer_song_art(&json, artist, title)
+}
+
+pub fn parse_deezer_song_art(json: &serde_json::Value, artist: &str, title: &str) -> Option<String> {
+    let results = json.get("data")?.as_array()?;
+    let mut best: Option<(i32, String)> = None;
+    for r in results {
+        let ca = r.get("artist").and_then(|a| a.get("name")).and_then(|v| v.as_str()).unwrap_or("");
+        let tr = r.get("title").and_then(|v| v.as_str()).unwrap_or("");
+        let score = match_score(artist, title, ca, tr);
+        if score < 3 {
+            continue;
+        }
+        let url = r
+            .get("album")
+            .and_then(|a| a.get("cover_xl"))
+            .and_then(|v| v.as_str())
+            .or_else(|| r.get("album").and_then(|a| a.get("cover_big")).and_then(|v| v.as_str()));
+        if let Some(url) = url {
+            if best.as_ref().map_or(true, |(s, _)| score > *s) {
+                best = Some((score, url.to_string()));
+            }
+        }
+    }
+    best.map(|(_, u)| u)
 }
 
 fn itunes_search(client: &reqwest::blocking::Client, term: &str) -> Option<serde_json::Value> {
@@ -666,6 +775,34 @@ mod art_tests {
             eprintln!("  result: {}", bytes.as_ref().map(|b| b.len()).unwrap_or(0));
             assert!(bytes.is_some(), "no art found for {artist} / {album}");
         }
+    }
+
+    #[test]
+    fn itunes_song_art_uses_the_matching_track() {
+        let json: serde_json::Value = serde_json::from_str(r#"{
+          "results": [
+            {"trackName":"Wrong Song","artistName":"Other","artworkUrl100":"https://example/wrong.jpg"},
+            {"trackName":"Bedrock Anthem","artistName":"Weird Al Yankovic",
+             "artworkUrl100":"https://example/right/100x100bb.jpg"}
+          ]}"#).unwrap();
+        assert_eq!(
+            parse_itunes_song_art(&json, "Weird Al Yankovic", "Bedrock Anthem").unwrap(),
+            "https://example/right/600x600bb.jpg"
+        );
+    }
+
+    #[test]
+    fn deezer_song_art_uses_the_matching_track() {
+        let json: serde_json::Value = serde_json::from_str(r#"{
+          "data": [
+            {"title":"Wrong Song","artist":{"name":"Other"},"album":{"cover_xl":"https://example/wrong.jpg"}},
+            {"title":"Bedrock Anthem","artist":{"name":"Weird Al Yankovic"},
+             "album":{"cover_xl":"https://example/right.jpg"}}
+          ]}"#).unwrap();
+        assert_eq!(
+            parse_deezer_song_art(&json, "Weird Al Yankovic", "Bedrock Anthem").unwrap(),
+            "https://example/right.jpg"
+        );
     }
 
     #[test]

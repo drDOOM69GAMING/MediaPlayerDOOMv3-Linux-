@@ -149,6 +149,8 @@ pub enum NetCmd {
     /// One lookup shared by every track on an album; the image is written to
     /// all `paths` so a 12-track album needs one request, not twelve.
     WebArtGroup { gen: u64, paths: Vec<String>, artist: String, album: String },
+    /// Fallback for a track with no usable album: search by song title.
+    WebArtSong { gen: u64, paths: Vec<String>, artist: String, title: String },
     Lyrics(String, String),
 }
 
