@@ -43,8 +43,19 @@ thread_local! {
 
 pub fn open_decoder(path: &str) -> Option<Decoder<BufReader<File>>> {
     let f = File::open(path).ok()?;
+    // Tell the kernel this is a forward, streaming read. On spinning disks it
+    // noticeably reduces seek stalls while decoding long tracks.
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::io::AsRawFd;
+        unsafe {
+            libc::posix_fadvise(f.as_raw_fd(), 0, 0, libc::POSIX_FADV_SEQUENTIAL);
+        }
+    }
+    // 8 KiB (BufReader's default) is tiny for FLAC/MP3 on a HDD.
+    let reader = BufReader::with_capacity(256 * 1024, f);
     EXPECTING_DECODE_PANIC.with(|fl| fl.set(true));
-    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Decoder::new(BufReader::new(f))));
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Decoder::new(reader)));
     EXPECTING_DECODE_PANIC.with(|fl| fl.set(false));
     match res {
         Ok(Ok(d)) => Some(d),

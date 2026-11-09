@@ -140,6 +140,7 @@ impl PlayerApp {
         }
         let st = self.radio_presets[idx].clone();
         self.set_winding(None);
+        self.kill_audio_pipe();
         if let Some(mut c) = self.radio_proc.take() {
             let _ = c.kill();
             let _ = c.wait();
@@ -349,9 +350,9 @@ impl PlayerApp {
     }
 
     pub(crate) fn sort_bands_library(&mut self) {
-        self.full_library.sort_by_key(|p| song_sort_key(p));
+        self.full_library.sort_by_cached_key(|p| song_sort_key(p));
         for list in self.band_map.values_mut() {
-            list.sort_by_key(|p| song_sort_key(p));
+            list.sort_by_cached_key(|p| song_sort_key(p));
         }
     }
 
@@ -499,7 +500,7 @@ impl PlayerApp {
         for b in band_names {
             if let Some(v) = self.band_map.get(&b) {
                 let mut songs = v.clone();
-                songs.sort_by_key(|p| song_sort_key(p));
+                songs.sort_by_cached_key(|p| song_sort_key(p));
                 for s in songs {
                     if seen.insert(s.clone()) {
                         ordered.push((b.clone(), s));
@@ -523,7 +524,7 @@ impl PlayerApp {
             self.all_songs_ordered()
         } else if let Some(v) = self.band_map.get(&band) {
             let mut songs = v.clone();
-            songs.sort_by_key(|p| song_sort_key(p));
+            songs.sort_by_cached_key(|p| song_sort_key(p));
             songs
         } else {
             Vec::new()

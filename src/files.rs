@@ -1,6 +1,7 @@
 ﻿#![allow(unused_imports)]
 #![allow(dead_code)]
 // Audio file collection, tagging, transcoding, recording, art discovery.
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
@@ -11,43 +12,85 @@ use crate::consts::NO_WINDOW;
 use crate::tools::*;
 use crate::types::*;
 use crate::util::*;
-pub fn collect_audio(dir: &str) -> Vec<String> {
-    fn walk(d: &Path, out: &mut Vec<String>) {
-        let rd = match std::fs::read_dir(d) { Ok(rd) => rd, Err(_) => return };
-        for e in rd.flatten() {
-            let p = e.path();
-            if p.is_dir() {
-                walk(&p, out);
-            } else if is_audio(&p.to_string_lossy()) {
-                out.push(p.to_string_lossy().to_string());
+/// Directories that never contain music and can be huge (or recursive symlink
+/// traps). Matching is case-insensitive.
+fn skip_scan_dir(name: &str) -> bool {
+    let n = name.trim().to_ascii_lowercase();
+    matches!(
+        n.as_str(),
+        "system volume information"
+            | "$recycle.bin"
+            | "recycler"
+            | "lost+found"
+            | "node_modules"
+            | "__macosx"
+            | ".git"
+            | ".cache"
+            | ".trash"
+    ) || n.starts_with(".trash-")
+}
+
+fn walk_audio<F: FnMut(usize)>(
+    dir: &Path,
+    out: &mut Vec<String>,
+    progress: &mut F,
+    visited: &mut HashSet<PathBuf>,
+) {
+    // Symlinked music folders are common on Linux. Follow them, but canonical
+    // paths are tracked so a link back to a parent cannot make this recurse.
+    let canon = dir.canonicalize().ok();
+    if let Some(c) = &canon {
+        if !visited.insert(c.clone()) {
+            return;
+        }
+    }
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    for e in rd.flatten() {
+        let Ok(ft) = e.file_type() else { continue };
+        let p = e.path();
+        if ft.is_dir() {
+            if let Some(name) = p.file_name().map(|n| n.to_string_lossy().to_string()) {
+                if skip_scan_dir(&name) {
+                    continue;
+                }
+            }
+            walk_audio(&p, out, progress, visited);
+        } else if ft.is_symlink() && p.is_dir() {
+            if let Some(name) = p.file_name().map(|n| n.to_string_lossy().to_string()) {
+                if !skip_scan_dir(&name) {
+                    walk_audio(&p, out, progress, visited);
+                }
+            }
+        } else if ft.is_file() || (ft.is_symlink() && p.is_file()) {
+            let s = p.to_string_lossy().to_string();
+            if is_audio(&s) {
+                out.push(s);
+                progress(out.len());
             }
         }
     }
+}
+
+pub fn collect_audio(dir: &str) -> Vec<String> {
     let mut out = Vec::new();
-    walk(Path::new(dir), &mut out);
+    let mut visited = HashSet::new();
+    walk_audio(Path::new(dir), &mut out, &mut |_| {}, &mut visited);
     out.sort();
     out
 }
 
 pub fn collect_audio_report(dir: &str, tx: &Sender<Msg>) -> Vec<String> {
-    fn walk(d: &Path, out: &mut Vec<String>, last: &mut std::time::Instant, tx: &Sender<Msg>) {
-        let rd = match std::fs::read_dir(d) { Ok(rd) => rd, Err(_) => return };
-        for e in rd.flatten() {
-            let p = e.path();
-            if p.is_dir() {
-                walk(&p, out, last, tx);
-            } else if is_audio(&p.to_string_lossy()) {
-                out.push(p.to_string_lossy().to_string());
-            }
-            if last.elapsed().as_millis() >= 300 {
-                let _ = tx.send(Msg::ScanProgress { found: out.len() });
-                *last = std::time::Instant::now();
-            }
-        }
-    }
     let mut out = Vec::new();
     let mut last = std::time::Instant::now();
-    walk(Path::new(dir), &mut out, &mut last, tx);
+    let mut progress = |found: usize| {
+        if last.elapsed().as_millis() >= 300 {
+            let _ = tx.send(Msg::ScanProgress { found });
+            last = std::time::Instant::now();
+        }
+    };
+    let mut visited = HashSet::new();
+    walk_audio(Path::new(dir), &mut out, &mut progress, &mut visited);
+    out.sort();
     out
 }
 
@@ -305,6 +348,32 @@ mod file_pipeline_tests {
         assert_eq!(found.len(), 2, "found: {found:?}");
         assert!(found.iter().any(|p| p.ends_with("tone.mp3")));
         assert!(found.iter().any(|p| p.ends_with("copy.flac")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn scan_skips_junk_and_symlink_loops() {
+        let dir = scratch();
+        let a = make_audio(&dir);
+        let junk = dir.join("System Volume Information");
+        std::fs::create_dir_all(&junk).unwrap();
+        std::fs::copy(&a, junk.join("fake.mp3")).unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&dir, dir.join("loop")).unwrap();
+        }
+        let extra = dir.join("linked-album");
+        std::fs::create_dir_all(&extra).unwrap();
+        std::fs::copy(&a, extra.join("linked.mp3")).unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&extra, dir.join("music-link")).unwrap();
+        }
+        let found = collect_audio(&dir.to_string_lossy());
+        // The real folder and a symlink to it are the same physical directory,
+        // so its tracks are included exactly once.
+        assert_eq!(found.len(), 2, "found: {found:?}");
+        assert!(found.iter().any(|p| p.ends_with("tone.mp3")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

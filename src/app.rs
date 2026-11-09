@@ -79,9 +79,17 @@ pub(crate) struct PlayerApp {
     pub(crate) _stream: OutputStream,
     pub(crate) _stream_handle: OutputStreamHandle,
     pub(crate) sink: Sink,
+    /// ffmpeg child used for fast seek/streaming playback (not normal decodes).
+    pub(crate) audio_pipe_proc: Option<Child>,
     pub(crate) state: PlayerState,
     pub(crate) settings_path: PathBuf,
     pub(crate) history_path: PathBuf,
+    /// Debounced persistence: settings are a few MB once a library is loaded,
+    /// so writing them on every track change caused noticeable disk churn.
+    pub(crate) settings_dirty: std::cell::Cell<bool>,
+    pub(crate) settings_saved_at: std::cell::Cell<Instant>,
+    pub(crate) history_dirty: std::cell::Cell<bool>,
+    pub(crate) history_saved_at: std::cell::Cell<Instant>,
     pub(crate) lib_tx: Sender<LibCmd>,
     pub(crate) net_tx: Sender<NetCmd>,
     pub(crate) web_tx: Sender<NetCmd>,
@@ -350,7 +358,7 @@ impl PlayerApp {
                 state.volume = s.volume.clamp(0, 100);
                 state.current_song = s.last_played.filter(|p| Path::new(p).is_file());
                 state.playlist = s.playlist;
-                state.playlist.sort_by_key(|p| song_sort_key(p));
+                state.playlist.sort_by_cached_key(|p| song_sort_key(p));
                 if !s.theme.is_empty() { state.theme = s.theme; }
                 video_aspects = s.video_aspects;
                 video_aspect_default = s.video_aspect_default;
@@ -512,9 +520,14 @@ impl PlayerApp {
             _stream: stream,
             _stream_handle: handle,
             sink,
+            audio_pipe_proc: None,
             state,
             settings_path,
             history_path,
+            settings_dirty: std::cell::Cell::new(false),
+            settings_saved_at: std::cell::Cell::new(Instant::now() - Duration::from_secs(10)),
+            history_dirty: std::cell::Cell::new(false),
+            history_saved_at: std::cell::Cell::new(Instant::now() - Duration::from_secs(10)),
             lib_tx,
             net_tx,
             web_tx,
@@ -736,6 +749,23 @@ video_ended: false,
     }
 
     pub(crate) fn save_settings(&self) {
+        self.settings_dirty.set(true);
+        if self.settings_saved_at.get().elapsed() < Duration::from_secs(2) {
+            return;
+        }
+        self.write_settings();
+        self.settings_dirty.set(false);
+        self.settings_saved_at.set(Instant::now());
+    }
+
+    /// Unconditional write, used on exit and by the periodic flusher.
+    pub(crate) fn save_settings_now(&self) {
+        self.write_settings();
+        self.settings_dirty.set(false);
+        self.settings_saved_at.set(Instant::now());
+    }
+
+    fn write_settings(&self) {
         let s = Settings {
             settings_version: SETTINGS_VERSION,
             volume: self.state.volume,
@@ -761,13 +791,31 @@ video_ended: false,
             ratings: self.ratings.clone(),
             rating_filter: self.rating_filter,
         };
-        if let Ok(text) = serde_json::to_string_pretty(&s) {
+        // Compact JSON: pretty-printing a 18k-track playlist on every save was
+        // both slower and several times larger.
+        if let Ok(text) = serde_json::to_string(&s) {
             let _ = std::fs::write(&self.settings_path, text);
         }
     }
 
     pub(crate) fn save_history(&self) {
-        if let Ok(text) = serde_json::to_string_pretty(&self.state.play_history) {
+        self.history_dirty.set(true);
+        if self.history_saved_at.get().elapsed() < Duration::from_secs(2) {
+            return;
+        }
+        self.write_history();
+        self.history_dirty.set(false);
+        self.history_saved_at.set(Instant::now());
+    }
+
+    pub(crate) fn save_history_now(&self) {
+        self.write_history();
+        self.history_dirty.set(false);
+        self.history_saved_at.set(Instant::now());
+    }
+
+    fn write_history(&self) {
+        if let Ok(text) = serde_json::to_string(&self.state.play_history) {
             let _ = std::fs::write(&self.history_path, text);
         }
     }
@@ -1074,9 +1122,28 @@ video_ended: false,
             Msg::DirScanned { dir, files } => {
                 self.scanning = false;
                 self.state.current_dir = Some(dir.clone());
+                // A refresh that finds exactly the same files should not rebuild
+                // the bands, re-sort 18k paths, rewrite a multi-MB settings file,
+                // or restart the song that is already playing.
+                if !files.is_empty() && self.state.playlist == files {
+                    self.full_library = files;
+                    self.set_status(format!(
+                        "Library ready: {} songs (cached, no changes)",
+                        self.full_library.len()
+                    ));
+                    if !self.state.is_paused
+                        && !self.video_on
+                        && self.deck_mode == DeckMode::Tape
+                        && self.play_started.is_none()
+                        && !self.full_library.is_empty()
+                    {
+                        self.skip_song();
+                    }
+                    return;
+                }
                 self.ingest_dir(&dir, &files);
                 self.state.playlist = files;
-                self.state.playlist.sort_by_key(|p| song_sort_key(p));
+                self.state.playlist.sort_by_cached_key(|p| song_sort_key(p));
                 self.state.song_count = 0;
                 self.state.skip_count = 0;
                 self.state.start_time = Some(Instant::now());
@@ -1100,7 +1167,7 @@ video_ended: false,
             Msg::PlaylistLoaded { files } => {
                 self.ingest_bands(&files, None);
                 self.state.playlist = files;
-                self.state.playlist.sort_by_key(|p| song_sort_key(p));
+                self.state.playlist.sort_by_cached_key(|p| song_sort_key(p));
                 self.rebuild_display_cache();
                 self.set_status("Playlist loaded");
                 self.save_settings();
@@ -1115,7 +1182,7 @@ video_ended: false,
                         n += 1;
                     }
                 }
-                self.state.playlist.sort_by_key(|p| song_sort_key(p));
+                self.state.playlist.sort_by_cached_key(|p| song_sort_key(p));
                 self.rebuild_display_cache();
                 self.set_status(format!("Added {} files", n));
                 self.save_settings();
@@ -1340,7 +1407,7 @@ video_ended: false,
                 let s = path.to_string_lossy().to_string();
                 if !self.state.playlist.contains(&s) {
                     self.state.playlist.push(s.clone());
-                    self.state.playlist.sort_by_key(|p| song_sort_key(p));
+                    self.state.playlist.sort_by_cached_key(|p| song_sort_key(p));
                     self.rebuild_display_cache();
                     self.save_settings();
                     self.ingest_bands(&[s.clone()], None);
@@ -1623,8 +1690,13 @@ impl std::ops::Drop for PlayerApp {
         self.stop_radio();
         self.save_meta_cache();
         self.save_no_art();
-        self.save_settings();
-        self.save_history();
+        if self.settings_dirty.get() {
+            self.save_settings_now();
+        }
+        if self.history_dirty.get() {
+            self.save_history_now();
+        }
+        self.kill_audio_pipe();
         self.sink.stop();
     }
 }
@@ -1633,8 +1705,9 @@ impl eframe::App for PlayerApp {
     fn on_exit(&mut self) {
         self.close_video();
         self.stop_radio();
-        self.save_settings();
-        self.save_history();
+        self.kill_audio_pipe();
+        self.save_settings_now();
+        self.save_history_now();
         if let Ok(rd) = std::fs::read_dir(work_dir().join("cuts")) {
             for e in rd.flatten() {
                 let _ = std::fs::remove_file(e.path());

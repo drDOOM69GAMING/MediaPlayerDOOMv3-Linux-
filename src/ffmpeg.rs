@@ -544,6 +544,37 @@ mod media_pipeline_tests {
     }
 
     #[test]
+    fn flac_audio_pipes_decoded_samples_for_fast_seek() {
+        let dir = scratch();
+        let wav = dir.join("tone.wav");
+        let flac = dir.join("tone.flac");
+        let st = Command::new(ffmpeg_path())
+            .args(["-hide_banner", "-loglevel", "error", "-y",
+                "-f", "lavfi", "-i", "sine=frequency=440:duration=2"])
+            .arg(&wav)
+            .status().expect("ffmpeg");
+        assert!(st.success());
+        let st = Command::new(ffmpeg_path())
+            .args(["-hide_banner", "-loglevel", "error", "-y", "-i"]).arg(&wav)
+            .args(["-c:a", "flac"]).arg(&flac)
+            .status().expect("ffmpeg");
+        assert!(st.success());
+        let (mut child, mut pipe) = spawn_video_audio(&flac.to_string_lossy(), &ffmpeg_path(), 1.0)
+            .expect("audio pipe should start");
+        let mut got = 0usize;
+        for _ in 0..(44100 / 10 * 2) {
+            match pipe.next() {
+                Some(_) => got += 1,
+                None => break,
+            }
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(got > 100, "only got {got} samples");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn video_audio_pipes_decoded_samples() {
         let dir = scratch();
         let v = make_video(&dir);

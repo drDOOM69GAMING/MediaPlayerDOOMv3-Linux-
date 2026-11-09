@@ -207,6 +207,7 @@ impl PlayerApp {
         if new_track && self.tape_out {
             self.tape_out = false;
         }
+        self.kill_audio_pipe();
         self.sink.stop();
         self.sink.set_volume(self.state.volume as f32 / 100.0);
         let dur = src.total_duration().unwrap_or_default().as_secs_f32();
@@ -336,7 +337,13 @@ impl PlayerApp {
             (random_next(self.state.current_song.as_deref(), &slot_paths, &weights), None)
         } else if self.state.dir_sequential {
             if let Some(dir) = self.state.current_dir.clone() {
-                let files = collect_audio(&dir);
+                // Use the already-loaded playlist instead of re-walking the
+            // folder on every skip (a large HDD folder made each skip slow).
+                let files: Vec<String> = pl
+                    .iter()
+                    .filter(|f| Path::new(f).parent() == Some(Path::new(&dir)))
+                    .cloned()
+                    .collect();
                 let rated: Vec<String> = files.iter().filter(|f| min == 0 || self.song_rating(f) >= min).cloned().collect();
                 if !rated.is_empty() {
                     let picked = rated[self.state.song_count as usize % rated.len()].clone();
@@ -446,6 +453,7 @@ impl PlayerApp {
     }
 
     pub(crate) fn stop_music(&mut self) {
+        self.kill_audio_pipe();
         self.sink.stop();
         self.sink.set_speed(1.0);
         self.play_started = None;
@@ -524,6 +532,47 @@ impl PlayerApp {
         self.reopen_at(secs);
     }
 
+    pub(crate) fn kill_audio_pipe(&mut self) {
+        if let Some(mut c) = self.audio_pipe_proc.take() {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+    }
+
+    /// Fast seek for formats whose built-in decoder is unseekable (notably
+    /// FLAC). Asking ffmpeg to start at the target avoids decoding every
+    /// sample from the file's beginning, which on a spinning HDD could take
+    /// longer than the track itself.
+    fn seek_via_pipe(&mut self, secs: f32) -> bool {
+        let Some(path) = self.state.current_song.clone() else { return false };
+        if !Path::new(&path).is_file() {
+            return false;
+        }
+        let src = self.transcodes.get(&path).cloned().unwrap_or(path);
+        let ff = ffmpeg_path();
+        if !ff.is_file() {
+            return false;
+        }
+        let (child, pipe) = match spawn_video_audio(&src, &ff, secs) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
+        self.kill_audio_pipe();
+        self.sink.stop();
+        self.sink.set_volume(self.state.volume as f32 / 100.0);
+        self.sink.append(self.tap_viz(EqSource::new(pipe, self.eq_shared.clone())));
+        if self.state.is_paused {
+            self.sink.pause();
+        } else {
+            self.sink.play();
+        }
+        self.audio_pipe_proc = Some(child);
+        self.seek_base = secs;
+        self.pos = secs;
+        self.play_started = Some(Instant::now());
+        true
+    }
+
     pub(crate) fn seek_skip(&mut self, d: f32) {
         if self.state.current_song.is_none() {
             return;
@@ -546,6 +595,11 @@ impl PlayerApp {
             self.set_error(format!("Seek failed: cannot reopen {}", stem(&path)));
             return;
         };
+        // For a real seek, let ffmpeg jump to the position instead of decoding
+        // and throwing away every sample before it.
+        if secs >= 2.0 && self.seek_via_pipe(secs) {
+            return;
+        }
         let was_paused = self.state.is_paused;
         self.sink.stop();
         self.sink.set_volume(self.state.volume as f32 / 100.0);

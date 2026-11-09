@@ -179,6 +179,20 @@ This app is built on the work of some incredible open-source projects, and it wo
 
 Full details, license texts, and donation links are in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). If you can, consider donating to FFmpeg, yt-dlp, and MKVToolNix - they give this all away for free.
 
+## v3.2.6 changelog
+
+- **Hard-drive performance**
+  - Settings and history writes are now debounced (2 s) and stored as compact JSON. Previously every track change rewrote the full multi-MB library settings file, which caused constant disk writes and stalls - especially on HDDs
+  - Library sorting uses cached sort keys, so loading/shuffling 18k+ paths no longer recomputes artist/title parsing for every comparison
+  - Folder scanning skips `System Volume Information`, `$RECYCLE.BIN`, `lost+found`, `.Trash-*`, `node_modules` and similar trees. Symlinked music folders are still followed, with a canonical-path visited set so loops cannot recurse
+  - A refresh that finds the same playlist no longer re-ingests, re-sorts, rewrites settings, or restarts the playing song
+  - In sequential/directory playback, skipping uses the already-loaded playlist instead of re-walking the folder from disk every time
+- **Playback performance**
+  - Audio files are read through a 256 KiB buffer instead of the 8 KiB default, and Linux is asked for sequential read-ahead (`POSIX_FADV_SEQUENTIAL`) - noticeably fewer HDD stalls on long FLAC/MP3 files
+  - Seeks in formats whose decoder cannot seek (notably FLAC) now ask ffmpeg to start at the target position, instead of decoding and discarding everything from the beginning of the track
+- 88 tests pass
+- Version bump to **v3.2.6**
+
 ## v3.2.5 changelog
 
 - **Audio CD detection and lossless ripping**
