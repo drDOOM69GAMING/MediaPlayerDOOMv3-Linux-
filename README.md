@@ -189,6 +189,16 @@ This app is built on the work of some incredible open-source projects, and it wo
 
 Full details, license texts, and donation links are in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). If you can, consider donating to FFmpeg, yt-dlp, and MKVToolNix - they give this all away for free.
 
+## v3.2.18 changelog
+
+- **Faster cover downloading**
+  - The web-art pool is now 20 workers instead of 6, across iTunes, Deezer, Cover Art Archive and TheAudioDB
+  - Every explicit Meta All retries previously art-less tracks too (the remembered “no art” list is cleared at the start), so all missing songs get another attempt with the current source set
+- **Why ratings are slower than covers**
+  - MusicBrainz permits roughly one request per second per client; each album needs a search plus a release lookup. Ratings therefore run sequentially by design — running 20 rating workers would only trigger 429/503 throttling and lose albums
+  - Covers come from independent services and are downloaded in parallel; rating progress and ETA are shown separately
+- Version bump to **v3.2.18**
+
 ## v3.2.17 changelog
 
 - **Ratings appear on the song you are looking at**

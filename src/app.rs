@@ -521,7 +521,10 @@ impl PlayerApp {
             thread::spawn(move || net_loop(net_rx, tx));
         }
         let web_rx = std::sync::Arc::new(std::sync::Mutex::new(web_rx));
-        for _ in 0..6 {
+        // Cover lookups are network-bound across several independent services
+        // (iTunes, Deezer, Cover Art Archive, TheAudioDB), so run a wide pool.
+        // MusicBrainz/CAA requests still serialize on mb_throttle.
+        for _ in 0..20 {
             let rx = std::sync::Arc::clone(&web_rx);
             let tx = msg_tx.clone();
             let gen = std::sync::Arc::clone(&rating_gen);
@@ -1085,6 +1088,10 @@ video_ended: false,
         self.meta_all_pending.clear();
         self.art_all_pending.clear();
         self.web_all_pending.clear();
+        // An explicit Meta All is a request to try every missing cover again,
+        // including tracks written off by earlier source sets.
+        self.no_art.clear();
+        self.no_art_dirty = true;
         // Group unrated songs by album folder. One MusicBrainz lookup covers
         // the whole album, and the result is a real community rating (1-5).
         let groups = {
