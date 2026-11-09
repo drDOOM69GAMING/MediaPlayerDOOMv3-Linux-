@@ -144,6 +144,10 @@ pub(crate) struct PlayerApp {
     /// Bumped whenever Meta All starts or is cancelled; stale rating results
     /// from an older run are ignored by the worker and the UI.
     pub(crate) rating_gen: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Album key currently being looked up for the now-playing track, and
+    /// albums already tried on demand (so skipping tracks does not re-request).
+    pub(crate) rating_single_inflight: Option<String>,
+    pub(crate) rating_single_tried: HashSet<String>,
     /// Ratings the user set by clicking stars; Meta All must not overwrite them.
     pub(crate) manual_ratings: HashSet<String>,
     /// Playlist labels need rebuilding (coalesced to once per message drain).
@@ -633,6 +637,8 @@ impl PlayerApp {
             cover_group_remaining: HashMap::new(),
             rating_cancel,
             rating_gen,
+            rating_single_inflight: None,
+            rating_single_tried: HashSet::new(),
             manual_ratings,
             display_dirty: false,
             no_art: no_art_boot,
@@ -844,6 +850,14 @@ video_ended: false,
             }
         }
         app.rebuild_display_cache();
+        // Dev/automation hook: start a specific song so rating/art paths can be
+        // exercised without navigating the 18k-row playlist.
+        if let Some(p) = std::env::var_os("MPDOOM_PLAY_SONG") {
+            let p = p.to_string_lossy().to_string();
+            if Path::new(&p).is_file() {
+                app.play_song(&p);
+            }
+        }
         // Dev/automation hook used to verify the Meta All pipeline without a
         // mouse click. Undocumented; normal launches never set this.
         if std::env::var_os("MPDOOM_META_ALL").is_some() {
@@ -1131,8 +1145,13 @@ video_ended: false,
 
     /// Group unrated playlist entries by album folder. Ratings are applied per
     /// song, but one MusicBrainz request per album is enough to rate them all.
+    /// Groups follow playlist order, with the currently playing album first so
+    /// the stars on screen fill in immediately.
     fn rating_groups(&self) -> Vec<(String, String, String, Vec<String>)> {
-        let mut map: HashMap<String, (String, String, Vec<String>)> = HashMap::new();
+        let mut groups: Vec<(String, String, String, Vec<String>)> = Vec::new();
+        let mut index: HashMap<String, usize> = HashMap::new();
+        let mut current_group: Option<usize> = None;
+        let current = self.state.current_song.as_deref();
         for p in &self.state.playlist {
             if self.ratings.contains_key(p) || self.manual_ratings.contains(p) {
                 continue;
@@ -1145,12 +1164,24 @@ video_ended: false,
             let mut album = self.meta_cache.get(p).map(|e| e.album.clone()).unwrap_or_default();
             merge_folder_meta(&mut artist, &mut album, p);
             let key = format!("{}|{}", parent, crate::network::rating_title_key(&album));
-            let e = map.entry(key).or_insert_with(|| (artist, album, Vec::new()));
-            e.2.push(p.clone());
+            let i = if let Some(&i) = index.get(&key) {
+                i
+            } else {
+                let i = groups.len();
+                index.insert(key.clone(), i);
+                groups.push((key, artist, album, Vec::new()));
+                i
+            };
+            groups[i].3.push(p.clone());
+            if current == Some(p.as_str()) {
+                current_group = Some(i);
+            }
         }
-        map.into_iter()
-            .map(|(k, (a, al, paths))| (k, a, al, paths))
-            .collect()
+        if let Some(i) = current_group {
+            let g = groups.remove(i);
+            groups.insert(0, g);
+        }
+        groups
     }
 
     /// Folder + normalized album identity, shared by the local-art, web-art and
@@ -1183,6 +1214,78 @@ video_ended: false,
             if self.meta_all_active {
                 self.meta_all_done += 1;
             }
+        }
+    }
+
+    /// Fetch just the current album's rating when the user is playing songs and
+    /// Meta All is not running. This makes the RATE stars appear on screen in a
+    /// few seconds instead of waiting for the whole library batch.
+    pub(crate) fn request_current_rating(&mut self) {
+        let Some(p) = self.state.current_song.clone() else { return };
+        if self.ratings.contains_key(&p) || self.manual_ratings.contains(&p) {
+            return;
+        }
+        if self.rating_single_inflight.is_some() {
+            return;
+        }
+        let key = self.cover_group_key(&p);
+        if self.rating_single_tried.contains(&key) {
+            return;
+        }
+        let mut artist = self.meta_cache.get(&p).map(|e| e.artist.clone()).unwrap_or_default();
+        let mut album = self.meta_cache.get(&p).map(|e| e.album.clone()).unwrap_or_default();
+        merge_folder_meta(&mut artist, &mut album, &p);
+        if is_placeholder_meta(&album) {
+            // Tags may arrive shortly via LibCmd::Meta; try again then.
+            return;
+        }
+        av_log(&format!(
+            "rating on demand: start path={} artist={:?} album={:?}",
+            p, artist, album
+        ));
+        self.rating_single_inflight = Some(key.clone());
+        self.rating_single_tried.insert(key);
+        let tx = self.msg_tx.clone();
+        std::thread::spawn(move || {
+            let (album_stars, tracks) =
+                crate::network::fetch_album_ratings(&artist, &album).unwrap_or((0, Vec::new()));
+            let _ = tx.send(Msg::CurrentRating { path: p, album_stars, tracks });
+        });
+    }
+
+    fn apply_rating_to_path(&mut self, p: &str, album_stars: u8, tracks: &[(String, u8)]) -> bool {
+        if self.manual_ratings.contains(p) || self.ratings.contains_key(p) {
+            return false;
+        }
+        let title = self
+            .meta_cache
+            .get(p)
+            .map(|e| e.title.clone())
+            .unwrap_or_else(|| crate::util::stem(p));
+        let title = crate::library::strip_track_no(&title).unwrap_or(title);
+        let tkey = crate::network::rating_title_key(&title);
+        let mut stars = 0u8;
+        if !tkey.is_empty() {
+            if let Some((_, s)) = tracks.iter().find(|(t, _)| *t == tkey) {
+                stars = *s;
+            } else if let Some((_, s)) = tracks.iter().find(|(t, _)| {
+                (!t.is_empty() && tkey.contains(t.as_str()))
+                    || (!tkey.is_empty() && t.contains(&tkey))
+            }) {
+                stars = *s;
+            }
+        }
+        if stars == 0 {
+            stars = album_stars;
+        }
+        if stars > 0 {
+            self.ratings.insert(p.to_string(), stars);
+            self.save_settings();
+            av_log(&format!("rating applied: {} -> {} stars", p, stars));
+            true
+        } else {
+            av_log(&format!("rating not found: {}", p));
+            false
         }
     }
 
@@ -1247,12 +1350,14 @@ video_ended: false,
             return "validating cached covers...".into();
         }
         format!(
-            "tags {} | covers {}/{} | ratings {}/{}",
+            "tags {} | covers {}/{} | ratings {}/{} | rated {}/{} songs",
             self.meta_all_pending.len(),
             self.cover_groups_done,
             self.cover_groups_total,
             self.rating_done,
-            self.rating_total
+            self.rating_total,
+            self.ratings.len(),
+            self.state.playlist.len()
         )
     }
 
@@ -1542,6 +1647,7 @@ video_ended: false,
                     self.ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!("♪ {} - {}", artist, title)));
                     self.meta_cache.insert(path.clone(), MetaCacheEntry { title, artist, album, secs: duration.as_secs_f32() });
                     self.meta_cache_dirty = true;
+                    self.request_current_rating();
                 }
             }
             Msg::Tags { entries } => {
@@ -1741,34 +1847,8 @@ video_ended: false,
                 if gen == self.rating_gen.load(std::sync::atomic::Ordering::Relaxed)
                     && self.rating_pending.remove(&key)
                 {
-                    for p in paths {
-                        if self.manual_ratings.contains(&p) {
-                            continue;
-                        }
-                        let title = self
-                            .meta_cache
-                            .get(&p)
-                            .map(|e| e.title.clone())
-                            .unwrap_or_else(|| crate::util::stem(&p));
-                        let title = crate::library::strip_track_no(&title).unwrap_or(title);
-                        let tkey = crate::network::rating_title_key(&title);
-                        let mut stars = 0u8;
-                        if !tkey.is_empty() {
-                            if let Some((_, s)) = tracks.iter().find(|(t, _)| *t == tkey) {
-                                stars = *s;
-                            } else if let Some((_, s)) = tracks.iter().find(|(t, _)| {
-                                (!t.is_empty() && tkey.contains(t.as_str()))
-                                    || (!tkey.is_empty() && t.contains(&tkey))
-                            }) {
-                                stars = *s;
-                            }
-                        }
-                        if stars == 0 {
-                            stars = album_stars;
-                        }
-                        if stars > 0 {
-                            self.ratings.insert(p, stars);
-                        }
+                    for p in &paths {
+                        self.apply_rating_to_path(p, album_stars, &tracks);
                     }
                     self.rating_done += 1;
                     if self.meta_all_active {
@@ -1776,6 +1856,37 @@ video_ended: false,
                     }
                     self.meta_all_phase = "ratings".to_string();
                     self.meta_all_tick(format!("Meta All: {} ratings left", self.rating_pending.len()));
+                }
+            }
+            Msg::CurrentRating { path, album_stars, tracks } => {
+                self.rating_single_inflight = None;
+                av_log(&format!(
+                    "rating on demand result: path={} album_stars={} tracks={}",
+                    path,
+                    album_stars,
+                    tracks.len()
+                ));
+                // Fill the whole current album, not just the one track. The
+                // user is looking at the playlist rows for this album.
+                let key = self.cover_group_key(&path);
+                let group: Vec<String> = self
+                    .state
+                    .playlist
+                    .iter()
+                    .filter(|p| self.cover_group_key(p) == key)
+                    .cloned()
+                    .collect();
+                if group.is_empty() {
+                    self.apply_rating_to_path(&path, album_stars, &tracks);
+                } else {
+                    for p in &group {
+                        self.apply_rating_to_path(p, album_stars, &tracks);
+                    }
+                }
+                // If the user changed tracks while this lookup was running,
+                // start the lookup for the new current album.
+                if self.state.current_song.as_deref() != Some(path.as_str()) {
+                    self.request_current_rating();
                 }
             }
             Msg::Lyrics { artist, title, text } => {

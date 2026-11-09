@@ -78,6 +78,8 @@ pub enum Msg {
     /// MusicBrainz community ratings for one album. `tracks` are
     /// (normalized title, stars) and `album_stars` is the release-group fallback.
     RatingsAlbum { gen: u64, key: String, paths: Vec<String>, album_stars: u8, tracks: Vec<(String, u8)> },
+    /// On-demand rating for the currently playing album (no Meta All run).
+    CurrentRating { path: String, album_stars: u8, tracks: Vec<(String, u8)> },
     Lyrics { artist: String, title: String, text: Option<String> },
     YtStatus(String),
     YtLog(String),

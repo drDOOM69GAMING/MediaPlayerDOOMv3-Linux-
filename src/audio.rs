@@ -251,6 +251,7 @@ impl PlayerApp {
         self.playing = Self::playing_display(display);
         self.set_status(format!("Playing: {}", stem(display)));
         self.send_meta_art(display.to_string());
+        self.request_current_rating();
     }
 
     /// Star rating (1-5) for a path, 0 when unrated.

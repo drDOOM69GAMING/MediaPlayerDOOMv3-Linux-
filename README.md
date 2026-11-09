@@ -189,6 +189,18 @@ This app is built on the work of some incredible open-source projects, and it wo
 
 Full details, license texts, and donation links are in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). If you can, consider donating to FFmpeg, yt-dlp, and MKVToolNix - they give this all away for free.
 
+## v3.2.17 changelog
+
+- **Ratings appear on the song you are looking at**
+  - Starting a track now looks up that **album’s** MusicBrainz rating automatically, so the RATE stars and every playlist row in that album fill in within a few seconds — even before Meta All reaches it
+  - The bulk Meta All rating queue now starts with the currently playing album, then follows playlist order, instead of arbitrary album order
+  - Meta All now shows `rated X / Y songs` alongside the progress bar and ETA, so you can see the total library rating progress
+- **Better cover matching**
+  - Album-only fallback for compilations, “Various Artists” folders and untagged tracks with a known album name
+- **Cancel really cancels**
+  - Queued cover and rating lookups for a cancelled Meta All run are dropped (generation-tagged), while completed tags/covers/ratings are kept
+- Version bump to **v3.2.17**
+
 ## v3.2.16 changelog
 
 - **Meta All now fetches real star ratings**
