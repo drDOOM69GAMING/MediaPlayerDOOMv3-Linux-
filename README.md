@@ -189,6 +189,14 @@ This app is built on the work of some incredible open-source projects, and it wo
 
 Full details, license texts, and donation links are in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). If you can, consider donating to FFmpeg, yt-dlp, and MKVToolNix - they give this all away for free.
 
+## v3.2.19 changelog
+
+- **Fix DVD seeking (green frames / stutter)**
+  - DVD (MPEG-2, 720x480) now decodes in software and uses the stable CPU scale/RGBA path. It is far too small to need VAAPI, and VAAPI’s filter/format reinitialisation after a DVD seek was producing green frames and stutter on some drives
+  - Blu-ray keeps the VAAPI hardware decode + GPU scale/pad/RGBA path
+  - The DVD demuxer, audio, English-track selection, subtitles-off and seek behaviour are unchanged
+- Version bump to **v3.2.19**
+
 ## v3.2.18 changelog
 
 - **Faster cover downloading**

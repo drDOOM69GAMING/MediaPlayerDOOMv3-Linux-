@@ -367,20 +367,25 @@ LibCmd::Scan(dir) => {
                 // Pick the GPU backend explicitly instead of letting ffmpeg
                 // probe CUDA first on an AMD machine. Users can disable it with
                 // MPDOOM_NO_HWACCEL=1 if a driver misbehaves.
-                let hw: Vec<&'static str> = if std::env::var_os("MPDOOM_NO_HWACCEL").is_some() {
-                    Vec::new()
-                } else {
-                    hwaccel_args()
-                };
+                // DVD uses software MPEG-2 decode: it is only 720x480 and
+                // software is completely reliable across seeks. VAAPI's DVD
+                // seek/format reinitialisation is what produced green frames.
+                let hw: Vec<&'static str> =
+                    if dvd || std::env::var_os("MPDOOM_NO_HWACCEL").is_some() {
+                        Vec::new()
+                    } else {
+                        hwaccel_args()
+                    };
                 if !hw.is_empty() {
                     av_log(&format!("video hwaccel: {:?}", hw));
                     cmd.args(&hw);
                 }
-                // For optical discs we know the codec is VAAPI-compatible.
-                // Keep frames on the GPU for scaling/padding and the RGBA
-                // conversion too; otherwise ffmpeg downloads NV12 and does
-                // those passes on the CPU (roughly 2-3x the CPU load).
-                let vaapi_filters = hw.get(1) == Some(&"vaapi") && (dvd || bd);
+                // Blu-ray gets the full GPU filter chain (scale/pad/RGBA).
+                // DVD deliberately stays on the known-good CPU filter path:
+                // MPEG-2 is only 720x480 (cheap), and reinitialising the VAAPI
+                // filter graph after a DVD seek produced green/stuttering
+                // frames on some drives. Decoding still uses VAAPI.
+                let vaapi_filters = hw.get(1) == Some(&"vaapi") && bd;
                 if vaapi_filters {
                     cmd.args(["-hwaccel_output_format", "vaapi"]);
                 }
