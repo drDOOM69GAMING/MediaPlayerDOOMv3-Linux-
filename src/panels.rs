@@ -131,9 +131,17 @@ impl PlayerApp {
             engrave(&p, rect, th.btn_bg);
             p.rect_filled(rect.shrink(2.0), 2.0, th.art_bg);
             if let Some(tex) = &self.art_tex {
+                let ts = tex.size();
+                let (tw, th) = (ts[0].max(1) as f32, ts[1].max(1) as f32);
+                let avail = rect.shrink(4.0);
+                let scale = (avail.width() / tw).min(avail.height() / th);
+                let dst = egui::Rect::from_center_size(
+                    avail.center(),
+                    egui::vec2(tw * scale, th * scale),
+                );
                 p.image(
                     tex.id(),
-                    egui::Rect::from_min_size(rect.min + egui::vec2(4.0, 4.0), egui::vec2(w - 8.0, h - 8.0)),
+                    dst,
                     egui::Rect::from_min_max(egui::Pos2::ZERO, egui::Pos2::new(1.0, 1.0)),
                     Color32::WHITE,
                 );

@@ -10,9 +10,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use lofty::prelude::*;
 use crate::consts::NO_WINDOW;
-use crate::ffmpeg::{cut_video_file, detect_credit_start, detect_intro_end, fit_video_dims, probe_video_duration, probe_video_info, video_audio_levels};
+use crate::ffmpeg::{bounds_from_chapters, cut_video_file, detect_credit_start, detect_intro_end, fit_video_dims, probe_chapters, probe_video_duration, probe_video_info, video_audio_levels};
 use crate::files::*;
-use crate::library::{art_cache_path, write_art_cache};
+use crate::library::{art_cache_ok, art_cache_path, write_art_cache};
 use crate::log::av_log;
 use crate::pipe::spawn_video_audio;
 use crate::tools::*;
@@ -94,7 +94,7 @@ pub fn lib_loop(rx: Receiver<LibCmd>, tx: Sender<Msg>, clock: std::sync::Arc<std
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let mut missing: Vec<String> = Vec::new();
                 for p in paths {
-                    if art_cache_path(&p).is_file() {
+                    if art_cache_ok(&p) {
                         continue;
                     }
                     if let Some(b) = find_local_art(&p) {
@@ -398,7 +398,7 @@ LibCmd::Scan(dir) => {
                                     let cpos = c & ((1u64 << 48) - 1);
                                     if cpos != 0 {
                                         let apos = (cpos - 1) as f32 / 1000.0;
-                                        if apos + 0.030 >= target {
+                                        if apos + 0.005 >= target {
                                             break;
                                         }
                                         if wait_start.elapsed() > std::time::Duration::from_millis(250) {
@@ -469,22 +469,29 @@ LibCmd::Scan(dir) => {
                 let tx2 = tx.clone();
                 std::thread::spawn(move || {
                     let dur = probe_video_duration(&path);
-                    if dur <= 0.0 {
-                        let _ = tx2.send(Msg::VideoBounds { gen, path, intro_end: 0.0, credits_start: 0.0 });
-                        return;
-                    }
-                    let ff = ffmpeg_path();
-                    let front_len = dur.min(420.0);
-                    let front = video_audio_levels(&path, &ff, 0.0, front_len);
-                    let mut intro = detect_intro_end(&front, 0.5);
-                    let mut credits = 0.0f32;
-                    if dur > 240.0 {
-                        let back_len = dur.min(420.0);
-                        let back_start = (dur - back_len).max(0.0);
-                        let back = video_audio_levels(&path, &ff, back_start, back_len);
-                        let rel = detect_credit_start(&back, 0.5);
-                        if rel > 0.0 {
-                            credits = back_start + rel;
+                    // Named chapters are the most trustworthy source. A file
+                    // with "Opening"/"Ending" chapters needs no guessing (and
+                    // no audio extraction at all).
+                    let (chapter_intro, chapter_credits) = bounds_from_chapters(&probe_chapters(&path));
+                    let mut intro = chapter_intro;
+                    let mut credits = chapter_credits;
+                    // Audio fallback only for episodic-length videos; short
+                    // clips and feature films are too easy to misdetect.
+                    if (intro <= 0.0 || credits <= 0.0) && (600.0..=3600.0).contains(&dur) {
+                        let ff = ffmpeg_path();
+                        if intro <= 0.0 {
+                            let front_len = dur.min(420.0);
+                            let front = video_audio_levels(&path, &ff, 0.0, front_len);
+                            intro = detect_intro_end(&front, 0.5);
+                        }
+                        if credits <= 0.0 && dur > 240.0 {
+                            let back_len = dur.min(420.0);
+                            let back_start = (dur - back_len).max(0.0);
+                            let back = video_audio_levels(&path, &ff, back_start, back_len);
+                            let rel = detect_credit_start(&back, 0.5);
+                            if rel > 0.0 {
+                                credits = back_start + rel;
+                            }
                         }
                     }
                     if intro >= dur - 5.0 {

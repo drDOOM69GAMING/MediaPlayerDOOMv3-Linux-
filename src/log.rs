@@ -6,8 +6,12 @@ use std::io::Write;
 use crate::util::data_dir;
 pub const AV_DEBUG_LOG: bool = false;
 
+fn av_log_enabled() -> bool {
+    AV_DEBUG_LOG || std::env::var_os("MPDOOM_AV_LOG").is_some()
+}
+
 pub fn av_log(msg: &str) {
-    if !AV_DEBUG_LOG {
+    if !av_log_enabled() {
         return;
     }
     use std::io::Write as _;

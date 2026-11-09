@@ -196,6 +196,16 @@ impl PlayerApp {
         }
         self.attach_video_audio(&path, saved_pos);
         self.video_cur_secs = saved_pos;
+        self.auto_bounds.remove(&path);
+        if self.intro_skip_enabled && !path.ends_with("_cut.mkv") {
+            // No manual and no learned markers? Analyse this episode's audio
+            // in the worker thread while it plays. Analysis is advisory: it
+            // only seek-skips, never cuts and never writes settings.
+            let (ie, cs) = self.video_bound_secs();
+            if ie <= 0.0 && cs <= 0.0 {
+                let _ = self.lib_tx.send(LibCmd::VideoAnalyze { path: path.clone(), gen });
+            }
+        }
         self.set_status(format!("MOVIE {}/{}: {}", self.video_queue_idx + 1, self.video_queue.len(), stem(&path)));
         self.video_deferred_open = true;
     }
@@ -261,7 +271,22 @@ impl PlayerApp {
     ///
     /// Manual markers only - see `resolve_bounds`.
     pub(crate) fn video_bound_secs(&self) -> (f32, f32) {
-        resolve_bounds(&self.video_bounds, &self.show_bounds, self.video_current.as_deref())
+        let path = self.video_current.as_deref();
+        let (intro, credits) = resolve_bounds(&self.video_bounds, &self.show_bounds, path);
+        if intro > 0.0 || credits > 0.0 {
+            return (intro, credits);
+        }
+        // Second layer: learn from other episodes in the same folder. Marking
+        // one episode therefore makes every other episode skip automatically.
+        if let Some(p) = path {
+            if let Some(b) = learned_folder_bounds(&self.video_bounds, p) {
+                return b;
+            }
+            if let Some(&b) = self.auto_bounds.get(p) {
+                return b;
+            }
+        }
+        (0.0, 0.0)
     }
 
     /// Shift-clicking INTRO / CREDS clears that marker, for this file and for
@@ -293,6 +318,7 @@ impl PlayerApp {
             let _ = std::fs::remove_file(&c);
         }
         self.video_positions.remove(&p);
+        self.auto_bounds.remove(&p);
         self.save_settings();
         let what = match (intro, credits) {
             (true, true) => "INTRO+CREDS",
@@ -502,14 +528,15 @@ impl PlayerApp {
                             if shift {
                                 clear_intro = true;
                             } else if let Some(p) = self.video_current.clone() {
-                                let (_, ccs) = self.video_bounds.get(&p).copied().unwrap_or((0.0, bcs));
+                                // Keep the other auto-detected marker instead of
+                                // dropping it just because it was not manual yet.
+                                let (_, ccs) = self.video_bound_secs();
                                 self.video_bounds.insert(p.clone(), (self.video_cur_secs, ccs));
                                 if let Some(dir) = Path::new(&p).parent().map(|x| x.to_string_lossy().to_string()) {
-                                    let (_, pc) = self.show_bounds.get(&dir).copied().unwrap_or((0.0, 0.0));
-                                    self.show_bounds.insert(dir, (self.video_cur_secs, pc));
+                                    self.show_bounds.insert(dir, (self.video_cur_secs, ccs));
                                 }
                                 self.save_settings();
-                                self.set_status(format!("Intro END set at {} (preset)", fmt_time(self.video_cur_secs)));
+                                self.set_status(format!("Intro END set at {} - applies to this whole folder", fmt_time(self.video_cur_secs)));
                                 self.try_cut_current_video(p);
                             }
                         }
@@ -527,14 +554,13 @@ impl PlayerApp {
                             if shift {
                                 clear_creds = true;
                             } else if let Some(p) = self.video_current.clone() {
-                                let (iie, _) = self.video_bounds.get(&p).copied().unwrap_or((0.0, 0.0));
+                                let (iie, _) = self.video_bound_secs();
                                 self.video_bounds.insert(p.clone(), (iie, self.video_cur_secs));
                                 if let Some(dir) = Path::new(&p).parent().map(|x| x.to_string_lossy().to_string()) {
-                                    let (pi, _) = self.show_bounds.get(&dir).copied().unwrap_or((0.0, 0.0));
-                                    self.show_bounds.insert(dir, (pi, self.video_cur_secs));
+                                    self.show_bounds.insert(dir, (iie, self.video_cur_secs));
                                 }
                                 self.save_settings();
-                                self.set_status(format!("Credits START set at {} (preset)", fmt_time(self.video_cur_secs)));
+                                self.set_status(format!("Credits START set at {} - applies to this whole folder", fmt_time(self.video_cur_secs)));
                                 self.try_cut_current_video(p);
                             }
                         }
@@ -767,6 +793,42 @@ impl PlayerApp {
     }
 }
 
+/// Median intro/credits markers already set on other files in the same folder.
+///
+/// This is the safe "mark one episode, skip the whole series" path: it only
+/// uses timestamps the user actually set, never guesses, so it cannot cut
+/// content on its own.
+pub fn learned_folder_bounds(
+    bounds: &HashMap<String, (f32, f32)>,
+    path: &str,
+) -> Option<(f32, f32)> {
+    let dir = Path::new(path).parent()?;
+    let mut intros: Vec<f32> = Vec::new();
+    let mut credits: Vec<f32> = Vec::new();
+    for (other, &(i, c)) in bounds {
+        if other == path {
+            continue;
+        }
+        if Path::new(other).parent() != Some(dir) {
+            continue;
+        }
+        if i > 1.0 {
+            intros.push(i);
+        }
+        if c > 1.0 {
+            credits.push(c);
+        }
+    }
+    if intros.is_empty() && credits.is_empty() {
+        return None;
+    }
+    let median = |v: &mut Vec<f32>| -> f32 {
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        v[v.len() / 2]
+    };
+    Some((median(&mut intros), median(&mut credits)))
+}
+
 /// Resolve the manual intro/credits markers that apply to `path`.
 ///
 /// Markers are only ever written by the user pressing INTRO / CREDS, which
@@ -872,6 +934,26 @@ mod video_tests {
         let file = p(&["SHOW", "ep02.mkv"]);
         v.insert(file.clone(), (12.0, 0.0));
         assert_eq!(resolve_bounds(&v, &s, Some(&file)), (12.0, 0.0));
+    }
+
+    #[test]
+    fn learns_markers_from_other_episodes_in_the_folder() {
+        let mut v = HashMap::new();
+        v.insert(p(&["SHOW", "ep01.mkv"]), (82.0, 1340.0));
+        v.insert(p(&["SHOW", "ep02.mkv"]), (84.0, 1344.0));
+        v.insert(p(&["SHOW", "ep03.mkv"]), (83.0, 1342.0));
+        v.insert(p(&["OTHER", "ep01.mkv"]), (5.0, 50.0));
+        let learned = learned_folder_bounds(&v, &p(&["SHOW", "ep99.mkv"])).unwrap();
+        assert_eq!(learned, (83.0, 1342.0));
+    }
+
+    #[test]
+    fn learning_ignores_the_current_file_and_empty_folders() {
+        let mut v = HashMap::new();
+        v.insert(p(&["SHOW", "ep01.mkv"]), (82.0, 1340.0));
+        assert_eq!(learned_folder_bounds(&v, &p(&["SHOW", "ep01.mkv"])), None);
+        assert_eq!(learned_folder_bounds(&v, &p(&["EMPTY", "ep01.mkv"])), None);
+        assert_eq!(learned_folder_bounds(&HashMap::new(), &p(&["SHOW", "ep02.mkv"])), None);
     }
 
     #[test]

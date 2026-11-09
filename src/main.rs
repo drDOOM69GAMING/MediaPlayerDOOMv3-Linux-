@@ -35,5 +35,23 @@ pub(crate) mod windows;
 pub(crate) mod ytdlp;
 
 fn main() -> eframe::Result {
-    app::run()
+    // Optional startup video: `mediaplayerofdoom --video /path/episode.mkv`
+    // (a bare path also works). Handy for testing and for opening an episode
+    // straight from a file manager.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut video: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--video" {
+            if let Some(p) = args.get(i + 1) {
+                video = Some(p.clone());
+                i += 2;
+                continue;
+            }
+        } else if !args[i].starts_with('-') && video.is_none() {
+            video = Some(args[i].clone());
+        }
+        i += 1;
+    }
+    app::run(video)
 }

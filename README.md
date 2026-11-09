@@ -19,8 +19,9 @@ A retro DOOM-styled media player rendered in egui. Tape, CD, and Radio faces on 
   - True fullscreen playback with letterboxing
   - Auto-hiding top bar (mouse to the top of the screen to reveal) with PLAY/PAUSE, prev/next, **+ ADD** (multi-file picker), and show/hide queue
   - Right-side queue panel with per-item play, remove, and CLEAR; auto-advances when a video ends
-  - **Automatic intro/credits detection**: when **SKIP: ON**, the app analyzes each video's audio and finds where the intro ends and the credits/outro begins, then auto-skips the intro and jumps to the next video at the credits. Detected times are remembered per file and per folder
-  - **Manual markers**: use the top bar **INTRO** / **CREDS** buttons to set the intro-end and credits-start for the current video at the current playback position; values persist per file/folder across runs
+  - **Automatic intro/credits detection**: when **SKIP: ON**, the app first uses named **chapter metadata** (`Opening`/`Ending`, including Japanese titles) - exact and instant. Files without usable chapters fall back to audio analysis of sustained music blocks near the start and end. Auto-skipping is conservative and advisory: it never cuts or persists guesses, and manual markers always override it
+  - **Series learning**: mark INTRO/CREDS once on any episode, and every other episode in that folder reuses those exact times (median of marked files), so Dragon Ball-style runs skip automatically without re-marking each episode
+  - **Manual markers**: use the top bar **INTRO** / **CREDS** buttons to set the intro-end and credits-start at the current playback position; values persist per file and per folder across runs. With **SKIP: ON** these real markers are also fed to `mkvmerge` for a lossless cut
   - The top bar and queue stay visible while your mouse is over the queue panel, so you can scroll it and press CLEAR without the bar disappearing
 - **Album art**: local `cover/folder` art always wins; online lookup only as a fallback when no local art exists (so pictures never get replaced by wrong web matches)
 - **Lyrics**: Artist/Track auto-detected from the filename when tags are unknown
@@ -67,6 +68,12 @@ It finds your music automatically (the XDG Music folder on Linux, and the
 `Music` folder with the most files on Windows), or pick any folder with
 **ADD DIR**.
 
+Open a video directly (handy for episodes or testing) with:
+
+```bash
+./target/release/mediaplayerofdoom --video "/path/episode.mkv"
+```
+
 ### Where files live on Linux
 
 - Data/tools/cache: `~/.local/share/mediaplayerofdoom/`
@@ -108,6 +115,41 @@ This app is built on the work of some incredible open-source projects, and it wo
 - The **Rust** language and its crate ecosystem.
 
 Full details, license texts, and donation links are in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). If you can, consider donating to FFmpeg, yt-dlp, and MKVToolNix - they give this all away for free.
+
+## v3.2.0 changelog
+
+- **Automatic intro/credits detection is back, safely**
+  - **Named chapters are checked first** (`Opening`, `Ending`, `OP`/`ED`, plus Japanese `オープニング`/`エンディング`). When present they are exact and require no analysis - verified on a real *Dragon Ball* episode whose chapters marked the opening at 0:00-1:48 and the ending at 22:31
+  - For files without usable chapters, audio is analysed at 0.5 s resolution; the app looks for long, loud, continuous music blocks near the start and end instead of trusting a fixed 90 s guess
+  - The opening is the first qualifying block (40-180 s), so an action scene or the ending theme cannot be mistaken for it
+  - The ending is the latest qualifying block that reaches the final three minutes, so the opening is never chosen as the credits
+  - Noisy dialogue and silence are rejected; ambiguous episodes produce no markers and simply play normally
+  - Guess-based skipping only ever seeks - it never writes settings and never auto-cuts, so a wrong guess can't damage a file
+- **Series learning from your timestamps**: mark one episode's INTRO/CREDS and every other episode in the folder reuses the median of those exact times automatically. This is the most reliable mode for long anime runs
+- **A/V sync verified on a real episode**: after an auto intro skip, measured audio/video drift stayed within about ±40 ms (typically under 25 ms) (the old Windows sync issue came from restarting only one stream)
+- **Credits now actually stop playback**: reaching the credits marker pauses both the video reader and the ffmpeg audio pipe; previously the audio kept playing under the "PLAY to replay" message
+- **Manual markers preserve auto-detected values**: setting just INTRO or just CREDS keeps the other automatically detected time instead of resetting it to zero
+- **Open a video from the command line** with `--video /path/episode.mkv`
+- ffmpeg helper output is quiet now (`-loglevel error`, stderr piped away), so the terminal/session log stays clean
+- 83 tests pass, including chapter and real-audio detection tests; verified on a real *Dragon Ball* episode (chapter-based intro 1:48.65, credits 22:31.6)
+- Version bump to **v3.2.0**
+
+## v3.1.1 changelog
+
+- **Album art overhaul - three sources instead of one**
+  - iTunes (mainstream), **Deezer** (indie/electronic/European), and **MusicBrainz + Cover Art Archive** (obscure, classical, metal, punk) are tried in order; the first usable image wins
+  - Album/artist matching scores every result instead of blindly taking result #1, and rejects unrelated albums with the same title
+  - A looser album-only search is the final fallback for compilations and Various Artists releases
+- **Bad artwork is detected and repaired**
+  - Cached covers are decoded and validated before use; truncated/corrupt/blank placeholder images are deleted and re-fetched automatically
+  - Cache writes are now atomic (temp file + rename), so an interrupted write can never leave a half-written cover
+  - Tracks that previously had "no art" are given another chance after upgrading; click **Meta All** once to re-check and repair the library
+  - Local art scanning now accepts `webp`/`gif`/`bmp`, ranks `cover`/`folder`/`front` correctly regardless of case, and skips back/disc/booklet scans and non-images
+  - Embedded pictures are validated too, and the NOW panel no longer stays on "Loading art..." forever when there is no art anywhere
+  - Album art is drawn aspect-correct instead of stretched to fill the square
+- **Better metadata fallback for untagged libraries**: `Artist/Album/track` and multi-disc (`CD 1`, `Disc 2`) folder layouts are understood, and old cache entries that stored the album name as the artist are repaired
+- 74 tests pass (plus an ignored live network test for the three art sources)
+- Version bump to **v3.1.1**
 
 ## v3.1.0 changelog
 

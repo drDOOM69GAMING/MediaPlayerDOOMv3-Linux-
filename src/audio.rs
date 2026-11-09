@@ -116,8 +116,12 @@ impl PlayerApp {
             if e.secs > 0.0 {
                 self.len_secs = e.secs;
             }
-            self.want_web = e.artist != "Unknown" && e.album != "Unknown";
         }
+        // Fill gaps from the folder name immediately, before the async tag
+        // probe answers, so the artwork lookup still has something to search
+        // with on a track whose tags are missing.
+        merge_folder_meta(&mut self.meta.1, &mut self.meta.2, &path);
+        self.want_web = !is_placeholder_meta(&self.meta.1) && !is_placeholder_meta(&self.meta.2);
         if let Some(b) = read_art_cache(&path) {
             self.art_local_valid = true;
             self.load_art_texture(b);

@@ -77,12 +77,47 @@ pub fn art_cache_path(path: &str) -> PathBuf {
 }
 
 pub fn read_art_cache(path: &str) -> Option<Vec<u8>> {
-    std::fs::read(art_cache_path(path)).ok()
+    let cache = art_cache_path(path);
+    let bytes = std::fs::read(&cache).ok()?;
+    if art_bytes_ok(&bytes, 32) {
+        Some(bytes)
+    } else {
+        // Interrupted writes and old bad downloads used to stay forever, so a
+        // track showed a blank/black square and never looked for art again.
+        // Drop the bad file and report it as missing so it gets re-fetched.
+        let _ = std::fs::remove_file(&cache);
+        None
+    }
+}
+
+/// True when a usable cached cover exists. Invalid files are removed so the
+/// caller can treat the track as needing art again.
+pub fn art_cache_ok(path: &str) -> bool {
+    read_art_cache(path).is_some()
 }
 
 pub fn write_art_cache(path: &str, bytes: &[u8]) -> bool {
     let _ = std::fs::create_dir_all(artcache_dir());
-    std::fs::write(art_cache_path(path), bytes).is_ok()
+    if !art_bytes_ok(bytes, 32) {
+        return false;
+    }
+    let dst = art_cache_path(path);
+    // Write beside the destination and rename, so a crash or a second worker
+    // can never leave a half-written `.art` file behind.
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp = dst.with_extension(format!("tmp-{}-{}", std::process::id(), stamp));
+    if std::fs::write(&tmp, bytes).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        return false;
+    }
+    let ok = crate::util::move_file(&tmp, &dst).is_ok();
+    if !ok {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    ok
 }
 
 pub fn make_display(path: &str) -> String {
@@ -191,13 +226,18 @@ pub fn band_of_file(path: &str) -> String {
 }
 
 pub fn folder_artist_album(path: &str) -> Option<(String, String)> {
-    let parent = Path::new(path)
-        .parent()
-        .and_then(|p| p.file_name())
-        .map(|f| f.to_string_lossy().to_string())?;
-    let mut name = parent.trim().to_string();
+    let mut dir = Path::new(path).parent()?;
+    let mut name = dir.file_name()?.to_string_lossy().trim().to_string();
     if name.is_empty() {
         return None;
+    }
+    // Multi-disc rips put tracks in "CD 1"/"Disc 2"; the album is one level up.
+    if is_disc_dir(&name) {
+        dir = dir.parent()?;
+        name = dir.file_name()?.to_string_lossy().trim().to_string();
+        if name.is_empty() {
+            return None;
+        }
     }
     if let Some(open) = name.rfind('(') {
         if name.ends_with(')') {
@@ -211,7 +251,61 @@ pub fn folder_artist_album(path: &str) -> Option<(String, String)> {
             return Some((artist, album));
         }
     }
+    // Standard Artist/Album/track layout: use the grandparent as the artist.
+    // This is what lets untagged libraries still get artwork and lyrics.
+    if let Some(artist) = dir.parent().and_then(|p| p.file_name()) {
+        let artist = artist.to_string_lossy().trim().to_string();
+        if !artist.is_empty() && !is_generic_music_dir(&artist) {
+            return Some((artist, name));
+        }
+    }
     Some((name, String::new()))
+}
+
+fn is_disc_dir(name: &str) -> bool {
+    let n = name.trim().to_ascii_lowercase();
+    let rest = n
+        .strip_prefix("cd")
+        .or_else(|| n.strip_prefix("disc"))
+        .or_else(|| n.strip_prefix("disk"));
+    match rest {
+        Some(r) => {
+            let r = r.trim();
+            !r.is_empty() && r.chars().all(|c| c.is_ascii_digit())
+        }
+        None => false,
+    }
+}
+
+fn is_generic_music_dir(name: &str) -> bool {
+    matches!(
+        name.trim().to_ascii_lowercase().as_str(),
+        "music" | "music library" | "downloads" | "audio" | "media" | "songs" | "youtube" | "recordings"
+    )
+}
+
+/// Fill missing/Unknown artist and album values from the folder layout.
+///
+/// When the folder gives a complete pair, it replaces both values: old cache
+/// entries sometimes stored the album name as the artist (from a simpler
+/// fallback), and keeping that would send artwork lookups to the wrong name.
+pub fn merge_folder_meta(artist: &mut String, album: &mut String, path: &str) {
+    let missing = crate::util::is_placeholder_meta;
+    if !missing(artist) && !missing(album) {
+        return;
+    }
+    let Some((a, al)) = folder_artist_album(path) else { return };
+    if !a.is_empty() && !al.is_empty() {
+        *artist = a;
+        *album = al;
+    } else {
+        if missing(artist) && !a.is_empty() {
+            *artist = a;
+        }
+        if missing(album) && !al.is_empty() {
+            *album = al;
+        }
+    }
 }
 
 pub fn strip_track_no(title: &str) -> Option<String> {
@@ -238,3 +332,132 @@ pub fn load_bands(path: &std::path::Path) -> HashMap<String, Vec<String>> {
 // When true, every av_log() call appends a line to %APPDATA%\MediaPlayerOFDOOM\avsync.log.
 // Useful for tracking intro/credits skip, seek, and audio-clock behavior.
 // Set to true to re-enable diagnostics; keep false for release builds (av_log is a no-op).
+
+#[cfg(test)]
+mod folder_tests {
+    use super::*;
+
+    fn p(parts: &[&str]) -> String {
+        let mut b = std::path::PathBuf::new();
+        for part in parts {
+            b.push(part);
+        }
+        b.to_string_lossy().to_string()
+    }
+
+    #[test]
+    fn recognises_artist_album_layout() {
+        assert_eq!(
+            folder_artist_album(&p(&["Music", "Tool", "Lateralus", "01.flac"])),
+            Some(("Tool".into(), "Lateralus".into()))
+        );
+    }
+
+    #[test]
+    fn recognises_artist_dash_album_folder() {
+        assert_eq!(
+            folder_artist_album(&p(&["Music", "Type O Negative - Bloody Kisses (1993)", "x.flac"])),
+            Some(("Type O Negative".into(), "Bloody Kisses".into()))
+        );
+    }
+
+    #[test]
+    fn skips_disc_folders() {
+        assert_eq!(
+            folder_artist_album(&p(&["Music", "Tool", "Lateralus", "CD 2", "x.flac"])),
+            Some(("Tool".into(), "Lateralus".into()))
+        );
+    }
+
+    #[test]
+    fn merge_replaces_old_wrong_artist_when_album_missing() {
+        let mut artist = "Lateralus".to_string();
+        let mut album = "Unknown".to_string();
+        merge_folder_meta(&mut artist, &mut album, &p(&["Music", "Tool", "Lateralus", "x.flac"]));
+        assert_eq!((artist.as_str(), album.as_str()), ("Tool", "Lateralus"));
+    }
+
+    #[test]
+    fn merge_keeps_good_tags() {
+        let mut artist = "Tool".to_string();
+        let mut album = "Lateralus".to_string();
+        merge_folder_meta(&mut artist, &mut album, &p(&["Downloads", "x.flac"]));
+        assert_eq!((artist.as_str(), album.as_str()), ("Tool", "Lateralus"));
+    }
+
+    #[test]
+    fn does_not_use_music_root_as_artist() {
+        assert_eq!(
+            folder_artist_album(&p(&["Music", "Lateralus", "x.flac"])),
+            Some(("Lateralus".into(), String::new()))
+        );
+    }
+}
+
+#[cfg(test)]
+mod art_cache_tests {
+    use super::*;
+
+    fn fake_song(name: &str) -> String {
+        let n = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        format!("/nonexistent/mpdoom-art-test/{}-{}-{}.flac", std::process::id(), n, name)
+    }
+
+    fn jpeg(color: [u8; 4]) -> Vec<u8> {
+        let img = image::RgbaImage::from_pixel(200, 200, image::Rgba(color));
+        // Add a contrasting square so the image is not a solid placeholder.
+        let mut img = img;
+        for x in 80..120 {
+            for y in 80..120 {
+                img.put_pixel(x, y, image::Rgba([0, 0, 0, 255]));
+            }
+        }
+        let mut out = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut out, image::ImageFormat::Jpeg)
+            .unwrap();
+        out.into_inner()
+    }
+
+    #[test]
+    fn write_then_read_round_trips() {
+        let song = fake_song("good");
+        let bytes = jpeg([30, 90, 180, 255]);
+        assert!(write_art_cache(&song, &bytes));
+        let got = read_art_cache(&song).expect("cached art should read back");
+        assert!(art_bytes_ok(&got, 32));
+        assert!(art_cache_ok(&song));
+        let _ = std::fs::remove_file(art_cache_path(&song));
+    }
+
+    #[test]
+    fn corrupt_cache_is_deleted_and_reported_missing() {
+        let song = fake_song("bad");
+        assert!(write_art_cache(&song, &jpeg([200, 30, 30, 255])));
+        let cache = art_cache_path(&song);
+        std::fs::write(&cache, b"this is not a JPEG").unwrap();
+        assert!(read_art_cache(&song).is_none(), "corrupt art must not load");
+        assert!(!cache.exists(), "corrupt cache file must be removed");
+    }
+
+    #[test]
+    fn invalid_bytes_are_never_cached() {
+        let song = fake_song("invalid");
+        assert!(!write_art_cache(&song, b"junk"));
+        assert!(!art_cache_path(&song).exists());
+    }
+
+    #[test]
+    fn solid_placeholder_is_not_cached() {
+        let song = fake_song("solid");
+        let img = image::RgbaImage::from_pixel(300, 300, image::Rgba([255, 255, 255, 255]));
+        let mut out = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut out, image::ImageFormat::Jpeg)
+            .unwrap();
+        assert!(!write_art_cache(&song, &out.into_inner()));
+    }
+}

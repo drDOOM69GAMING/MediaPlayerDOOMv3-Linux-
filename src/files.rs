@@ -65,7 +65,7 @@ pub fn transcode_with_ffmpeg(audio: &str, ffmpeg: &Path) -> Result<PathBuf, Stri
     let ff = ffmpeg.to_string_lossy().to_string();
     let po = out.to_string_lossy().to_string();
     let st = std::process::Command::new(ff)
-        .args(["-y", "-i", audio, "-vn", "-ac", "2", "-ar", "44100", "-f", "wav", &po])
+        .args(["-hide_banner", "-loglevel", "error", "-y", "-i", audio, "-vn", "-ac", "2", "-ar", "44100", "-f", "wav", &po])
         .no_window()
         .status()
         .map_err(|e| format!("ffmpeg failed to start: {}", e))?;
@@ -83,7 +83,7 @@ pub fn record_with_ffmpeg(audio: &str, ffmpeg: &Path, dest: &Path) -> Result<Pat
     let po = dest.to_string_lossy().to_string();
     let _ = std::fs::remove_file(dest);
     let st = std::process::Command::new(ffmpeg.to_string_lossy().to_string())
-        .args(["-y", "-i", audio, "-vn", "-ac", "2", "-ar", "44100", "-f", "wav", &po])
+        .args(["-hide_banner", "-loglevel", "error", "-y", "-i", audio, "-vn", "-ac", "2", "-ar", "44100", "-f", "wav", &po])
         .no_window()
         .status()
         .map_err(|e| format!("ffmpeg failed to start: {}", e))?;
@@ -185,32 +185,55 @@ pub fn existing_drive_roots() -> Vec<PathBuf> {
 pub fn find_local_art(song_path: &str) -> Option<Vec<u8>> {
     let p = Path::new(song_path);
     if let Some(dir) = p.parent() {
-        for name in ["cover.jpg", "cover.png", "folder.jpg", "album.jpg", "front.jpg", "default.jpg"] {
-            let p2 = dir.join(name);
-            if p2.is_file() {
-                if let Ok(b) = std::fs::read(&p2) { return Some(b); }
-            }
-        }
-        let mut imgs: Vec<PathBuf> = Vec::new();
-        if let Ok(rd) = std::fs::read_dir(dir) {
-            for e in rd.flatten() {
-                let ep = e.path();
-                if let Some(ext) = ep.extension().and_then(|x| x.to_str()) {
-                    if ["jpg", "jpeg", "png"].contains(&ext.to_lowercase().as_str()) {
-                        imgs.push(ep);
-                    }
-                }
-            }
-        }
-        imgs.sort();
-        for ip in imgs {
-            if let Ok(b) = std::fs::read(&ip) { return Some(b); }
+        if let Some(b) = find_dir_art(dir) {
+            return Some(b);
         }
     }
     if let Some(probed) = load_tagged(song_path) {
         if let Some(tag) = probed.primary_tag().or_else(|| probed.first_tag()) {
-            if let Some(pic) = tag.pictures().first() {
-                return Some(pic.data().to_vec());
+            for pic in tag.pictures() {
+                let data = pic.data();
+                if art_bytes_ok(data, 16) {
+                    return Some(data.to_vec());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Rank image files inside one folder. Cover-ish names win over arbitrary
+/// scans, and back/disc/booklet images come last so they never get chosen as
+/// the album cover just because they sort first.
+fn find_dir_art(dir: &Path) -> Option<Vec<u8>> {
+    const EXTS: [&str; 7] = ["jpg", "jpeg", "png", "webp", "gif", "bmp", "jfif"];
+    let mut candidates: Vec<(u8, String, PathBuf)> = Vec::new();
+    let Ok(rd) = std::fs::read_dir(dir) else { return None };
+    for e in rd.flatten() {
+        let ep = e.path();
+        if !ep.is_file() {
+            continue;
+        }
+        let Some(ext) = ep.extension().and_then(|x| x.to_str()).map(|x| x.to_ascii_lowercase()) else { continue };
+        if !EXTS.contains(&ext.as_str()) {
+            continue;
+        }
+        let name = e.file_name().to_string_lossy().to_ascii_lowercase();
+        let base = name.split('.').next().unwrap_or("").trim().to_string();
+        let prio = match base.as_str() {
+            "cover" | "folder" | "front" => 0,
+            "album" | "albumart" | "albumartlarge" | "albumartsmall" => 1,
+            "artwork" | "default" | "art" => 2,
+            "back" | "backcover" | "cd" | "disc" | "inside" | "booklet" | "scan" => 40,
+            _ => 20,
+        };
+        candidates.push((prio, name, ep));
+    }
+    candidates.sort();
+    for (_, _, path) in candidates {
+        if let Ok(b) = std::fs::read(&path) {
+            if art_bytes_ok(&b, 16) {
+                return Some(b);
             }
         }
     }

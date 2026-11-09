@@ -60,8 +60,9 @@ impl rodio::Source for PipeSource {
 
 pub fn spawn_radio_stream(url: &str, ffmpeg: &Path) -> Result<(Child, PipeSource), String> {
     let mut child = Command::new(ffmpeg.to_string_lossy().to_string())
-        .args(["-i", url, "-vn", "-ac", "2", "-ar", "44100", "-f", "s16le", "-"])
+        .args(["-hide_banner", "-loglevel", "error", "-i", url, "-vn", "-ac", "2", "-ar", "44100", "-f", "s16le", "-"])
         .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
         .no_window()
         .spawn()
         .map_err(|e| format!("ffmpeg failed to start: {}", e))?;
@@ -73,7 +74,7 @@ pub fn spawn_radio_stream(url: &str, ffmpeg: &Path) -> Result<(Child, PipeSource
 }
 
 pub fn spawn_video_audio(path: &str, ffmpeg: &Path, seek: f32) -> Result<(Child, PipeSource), String> {
-    let mut args: Vec<String> = vec!["-re".to_string()];
+    let mut args: Vec<String> = vec!["-hide_banner".to_string(), "-loglevel".to_string(), "error".to_string(), "-re".to_string()];
     if seek > 0.0 {
         args.push("-ss".to_string());
         args.push(format!("{:.3}", seek));
@@ -82,6 +83,7 @@ pub fn spawn_video_audio(path: &str, ffmpeg: &Path, seek: f32) -> Result<(Child,
     let mut child = Command::new(ffmpeg.to_string_lossy().to_string())
         .args(&args)
         .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
         .no_window()
         .spawn()
         .map_err(|e| format!("ffmpeg video audio failed to start: {}", e))?;

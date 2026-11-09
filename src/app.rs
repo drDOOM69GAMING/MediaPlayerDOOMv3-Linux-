@@ -266,6 +266,9 @@ pub(crate) struct PlayerApp {
     pub(crate) video_volume: u32,
     pub(crate) deck_resume: Option<(String, f32)>,
     pub(crate) video_positions: HashMap<String, f32>,
+    /// Auto-detected (not persisted) intro/credits times for the current file.
+    /// Manual markers always win; this only fills folders with no markers.
+    pub(crate) auto_bounds: HashMap<String, (f32, f32)>,
     pub(crate) intro_skip_enabled: bool,
     pub(crate) intro_skip_secs: f32,
     pub(crate) credits_skip_secs: f32,
@@ -299,7 +302,7 @@ impl PlayerApp {
             .unwrap_or_default()
     }
 
-    pub(crate) fn new(cc: &eframe::CreationContext<'_>) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    pub(crate) fn new(cc: &eframe::CreationContext<'_>, startup_video: Option<String>) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         #[cfg(target_os = "windows")]
         apply_taskbar_icon(cc);
         let ctx = cc.egui_ctx.clone();
@@ -458,6 +461,16 @@ impl PlayerApp {
         }
         let bands_path = data_dir().join("bands3.json");
         let band_map = load_bands(&bands_path);
+        // Artwork now has three sources (iTunes, Deezer, Cover Art Archive)
+        // and no longer caches blank images. Clear the old "no art" list once
+        // so tracks written off by the single-source lookup get another try.
+        let art_sources_marker = data_dir().join("art_sources_v2");
+        let mut no_art_boot = Self::load_no_art();
+        if !art_sources_marker.exists() {
+            no_art_boot.clear();
+            let _ = std::fs::remove_file(missing_art_path());
+            let _ = std::fs::write(&art_sources_marker, "2");
+        }
         let full_library: Vec<String> = state.playlist.clone();
 
         // tray-icon dynamically loads libappindicator on Linux. If the distro
@@ -505,7 +518,7 @@ impl PlayerApp {
             art_all_pending: HashSet::new(),
             web_all_pending: HashSet::new(),
             meta_all_active: false,
-            no_art: Self::load_no_art(),
+            no_art: no_art_boot,
             no_art_dirty: false,
             pl_view_h: 300.0,
             playing_pl_idx: None,
@@ -613,6 +626,7 @@ video_ended: false,
         video_volume,
         deck_resume: None,
         video_positions: video_positions,
+        auto_bounds: HashMap::new(),
         intro_skip_enabled: intro_skip_enabled,
         intro_skip_secs: intro_skip_secs,
         credits_skip_secs: credits_skip_secs,
@@ -663,6 +677,15 @@ video_ended: false,
             muted_volume: 50,
         };
         app.apply_eq_live();
+        if let Some(v) = startup_video {
+            if Path::new(&v).is_file() {
+                app.enqueue_videos(vec![v]);
+                // Command-line playback is for actually watching something.
+                app.set_video_fs(true);
+            } else {
+                app.set_error(format!("Video not found: {}", v));
+            }
+        }
         // Reuse the remembered library root when it still exists. The full
         // search walks `Music` recursively on *every* logical drive, so paying
         // for that on each launch is what made startup take minutes before any
@@ -839,7 +862,7 @@ video_ended: false,
         let have_meta = pl.len() - need_meta.len();
         let need_art: Vec<String> = pl
             .iter()
-            .filter(|p| !art_cache_path(p).is_file() && !self.no_art.contains(*p) && !self.art_all_pending.contains(*p))
+            .filter(|p| !art_cache_ok(p) && !self.no_art.contains(*p) && !self.art_all_pending.contains(*p))
             .cloned()
             .collect();
         let have_art = pl.len() - need_art.len();
@@ -1034,7 +1057,7 @@ video_ended: false,
                     self.set_status(format!("Loaded {} songs", self.state.playlist.len()));
                 }
                 self.save_settings();
-                if !self.state.playlist.is_empty() && !self.state.is_paused {
+                if !self.state.playlist.is_empty() && !self.state.is_paused && !self.video_on {
                     self.skip_song();
                 }
             }
@@ -1086,23 +1109,23 @@ video_ended: false,
                 if self.state.current_song.as_deref() == Some(&path) {
                     let mut artist = artist;
                     let mut album = album;
-                    if artist == "Unknown" || album == "Unknown" {
-                        if let Some((a, al)) = folder_artist_album(&path) {
-                            if artist == "Unknown" {
-                                artist = a;
-                            }
-                            if album == "Unknown" {
-                                album = al;
-                            }
-                        }
-                    }
+                    merge_folder_meta(&mut artist, &mut album, &path);
                     self.meta = (title.clone(), artist.clone(), album.clone());
                     self.state.song_length = duration;
                     let d = duration.as_secs_f32();
                     if d > 0.0 {
                         self.len_secs = d;
                     }
-                    self.want_web = artist != "Unknown" && album != "Unknown";
+                    self.want_web = !is_placeholder_meta(&artist) && !is_placeholder_meta(&album);
+                    // ArtLocal may have finished before this tag probe did. If
+                    // it found nothing and there was no web fallback yet, start
+                    // one now instead of leaving a permanently blank cover.
+                    if self.art_tex.is_none() && !self.art_local_valid
+                        && self.want_web && self.web_art_for.is_none()
+                    {
+                        self.web_art_for = Some(path.clone());
+                        let _ = self.net_tx.send(NetCmd::WebArt(artist.clone(), album.clone()));
+                    }
                     self.ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!("♪ {} - {}", artist, title)));
                     self.meta_cache.insert(path.clone(), MetaCacheEntry { title, artist, album, secs: duration.as_secs_f32() });
                     self.meta_cache_dirty = true;
@@ -1156,6 +1179,10 @@ video_ended: false,
                     let (a, al) = (self.meta.1.clone(), self.meta.2.clone());
                     self.web_art_for = self.state.current_song.clone();
                     let _ = self.net_tx.send(NetCmd::WebArt(a, al));
+                } else {
+                    // No local art and no tags to search with: stop saying
+                    // "Loading art..." forever and show "No Art".
+                    self.art_state = 0;
                 }
             }
             Msg::ArtWeb { bytes } => {
@@ -1164,11 +1191,15 @@ video_ended: false,
                         if self.want_web && !self.art_local_valid {
                             self.load_art_texture(b.clone());
                         }
-                        if let Some(cur) = self.state.current_song.clone() {
-                            if let Some(nb) = normalize_art(&b) {
-                                let _ = write_art_cache(&cur, &nb);
+                        if !self.art_local_valid {
+                            if let Some(cur) = self.state.current_song.clone() {
+                                if let Some(nb) = normalize_art(&b) {
+                                    let _ = write_art_cache(&cur, &nb);
+                                }
                             }
                         }
+                    } else if self.art_tex.is_none() {
+                        self.art_state = 0;
                     }
                 }
             }
@@ -1176,23 +1207,14 @@ video_ended: false,
                 let mut web: Vec<(String, String, String)> = Vec::new();
                 for p in missing {
                     self.art_all_pending.remove(&p);
-                    if art_cache_path(&p).is_file() {
+                    if art_cache_ok(&p) {
                         continue;
                     }
                     if let Some(e) = self.meta_cache.get(&p) {
                         let mut artist = e.artist.clone();
                         let mut album = e.album.clone();
-                        if artist == "Unknown" || album == "Unknown" {
-                            if let Some((a, al)) = folder_artist_album(&p) {
-                                if artist == "Unknown" {
-                                    artist = a;
-                                }
-                                if album == "Unknown" {
-                                    album = al;
-                                }
-                            }
-                        }
-                        if artist != "Unknown" && album != "Unknown" && !self.web_all_pending.contains(&p) {
+                        merge_folder_meta(&mut artist, &mut album, &p);
+                        if !is_placeholder_meta(&artist) && !is_placeholder_meta(&album) && !self.web_all_pending.contains(&p) {
                             self.web_all_pending.insert(p.clone());
                             web.push((p, artist, album));
                         } else if artist == "Unknown" || album == "Unknown" {
@@ -1438,8 +1460,16 @@ video_ended: false,
                                     // queue): stop instead of replaying the
                                     // same file over and over.
                                     av_log(&format!("SKIP credits at {:.3}s (cs={:.3}) -> end", secs, cs));
+                                    // Actually stop both streams at the marker. Setting
+                                    // `video_paused` alone left the ffmpeg audio pipe and
+                                    // the frame reader running, so the episode kept playing
+                                    // under the "PLAY to replay" message.
                                     self.video_paused = true;
                                     self.video_ended = true;
+                                    let _ = self.lib_tx.send(LibCmd::VideoPause(true));
+                                    if let Some(s) = &self.video_sink {
+                                        s.pause();
+                                    }
                                     self.set_status("Credits reached → PLAY to replay");
                                 }
                             }
@@ -1453,12 +1483,21 @@ video_ended: false,
                 }
             }
             Msg::VideoBounds { gen, path, intro_end, credits_start } => {
-                // Intentionally ignored. Intro/credits markers are manual
-                // only: nothing may auto-detect them, persist them, or
-                // auto-cut a video because they happen to look plausible.
-                if gen == self.video_gen {
+                if gen == self.video_gen && self.video_current.as_deref() == Some(path.as_str()) {
+                    // Detection is advisory: keep it in memory only, never write
+                    // it to settings and never auto-cut from it. The INTRO/CREDS
+                    // buttons still override it with real, persisted markers.
+                    let (mi, mc) = crate::video::resolve_bounds(&self.video_bounds, &self.show_bounds, Some(&path));
+                    if mi <= 0.0 && mc <= 0.0 && (intro_end > 0.0 || credits_start > 0.0) {
+                        self.auto_bounds.insert(path.clone(), (intro_end, credits_start));
+                        self.set_status(format!(
+                            "AUTO intro {} / credits {} (click INTRO or CREDS to override)",
+                            if intro_end > 0.0 { fmt_time(intro_end) } else { "--".into() },
+                            if credits_start > 0.0 { fmt_time(credits_start) } else { "--".into() },
+                        ));
+                    }
                     av_log(&format!(
-                        "ignoring auto-detected bounds {} intro={:.1} credits={:.1}",
+                        "auto-detected bounds {} intro={:.1} credits={:.1}",
                         stem(&path), intro_end, credits_start
                     ));
                 }
@@ -1616,7 +1655,7 @@ impl eframe::App for PlayerApp {
     }
 }
 
-pub fn run() -> eframe::Result {
+pub fn run(startup_video: Option<String>) -> eframe::Result {
 std::panic::set_hook(Box::new(|info| {
         // Expected, caught decode panics (rodio symphonia init-seek bug) are
         // muted here; open_decoder logs a clean decode-skip line instead.
@@ -1649,7 +1688,7 @@ std::panic::set_hook(Box::new(|info| {
         APP_NAME,
         options,
         Box::new(|cc| {
-            let app = PlayerApp::new(cc)?;
+            let app = PlayerApp::new(cc, startup_video.clone())?;
             Ok(Box::new(app) as Box<dyn eframe::App>)
         }),
     )

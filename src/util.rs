@@ -209,6 +209,49 @@ pub fn move_file(from: &Path, to: &Path) -> std::io::Result<()> {
     }
 }
 
+/// True for tag values that mean "we don't actually know".
+///
+/// Searching an online service for "Unknown Artist / Unknown Album" returns a
+/// random album whose cover then gets cached as if it belonged to the track.
+pub fn is_placeholder_meta(s: &str) -> bool {
+    let n = s.trim().to_ascii_lowercase();
+    matches!(
+        n.as_str(),
+        "" | "unknown" | "unknown artist" | "unknown album" | "unknown title"
+            | "artist" | "album" | "title" | "untitled" | "n/a" | "na" | "none"
+    )
+}
+
+/// Validate image bytes before caching or displaying them.
+///
+/// `min_side` rejects thumbnails/placeholders that are too small to be album
+/// art. A near-solid image (all sampled pixels within a few levels of each
+/// other) is also rejected: several online sources return a blank white/black
+/// square for "no cover", which used to get cached and shown as an empty box.
+pub fn art_bytes_ok(bytes: &[u8], min_side: u32) -> bool {
+    if bytes.len() < 512 {
+        return false;
+    }
+    let Ok(img) = image::load_from_memory(bytes) else { return false };
+    if img.width() < min_side || img.height() < min_side {
+        return false;
+    }
+    let rgba = img.to_rgba8();
+    let small = image::imageops::thumbnail(&rgba, 16, 16);
+    let mut visible = 0u32;
+    let (mut lo, mut hi) = (255u8, 0u8);
+    for px in small.pixels() {
+        if px[3] > 8 {
+            visible += 1;
+            for c in &px.0[..3] {
+                lo = lo.min(*c);
+                hi = hi.max(*c);
+            }
+        }
+    }
+    visible > 0 && hi.saturating_sub(lo) >= 2
+}
+
 pub fn next_track_num(dir: &Path) -> u32 {
     let mut max = 0u32;
     if let Ok(rd) = std::fs::read_dir(dir) {
@@ -234,6 +277,16 @@ mod portability_tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!("mpdoom-move-{}-{}-{}", std::process::id(), n, name))
+    }
+
+    #[test]
+    fn placeholder_metadata_is_rejected() {
+        for s in ["", "Unknown", "Unknown Artist", "unknown album", "Untitled", "N/A", "none"] {
+            assert!(is_placeholder_meta(s), "{s:?} should be treated as unknown");
+        }
+        for s in ["Tool", "Lateralus", "Various Artists", "Type O Negative"] {
+            assert!(!is_placeholder_meta(s), "{s:?} is real metadata");
+        }
     }
 
     #[test]

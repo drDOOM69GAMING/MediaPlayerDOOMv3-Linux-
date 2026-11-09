@@ -1,6 +1,6 @@
 [package]
 name = "mediaplayerofdoom"
-version = "3.1.0"
+version = "3.2.0"
 edition = "2021"
 
 [dependencies]
@@ -11,7 +11,7 @@ lofty = "0.22"
 symphonia = "0.5"
 hound = "3"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "native-tls"] }
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 regex = "1"
