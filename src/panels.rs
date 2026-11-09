@@ -96,6 +96,22 @@ impl PlayerApp {
         }
     }
 
+    /// Blu-ray dump pair: clean MKV, or a full decrypted disc ISO.
+    pub(crate) fn draw_bluray_dump_buttons(&mut self, ui: &mut egui::Ui, th: &ThemePalette) {
+        self.draw_disc_dump(ui, "BLU-RAY", th);
+        if !self.disc_dumping {
+            if retro_btn(ui, "DUMP TO ISO", th.fg, th.btn_bg)
+                .on_hover_text(
+                    "Full decrypted Blu-ray ISO with menus and extras. MakeMKV backup \
+                     handles AACS and BD+, then the BDMV tree is written as a UDF ISO.",
+                )
+                .clicked()
+            {
+                self.start_bluray_decrypted_dump();
+            }
+        }
+    }
+
     pub(crate) fn draw_sleep_timer(&mut self, ctx: &egui::Context) {
         if self.fading {
             let t = (Instant::now() - self.fade_start).as_secs_f32();
@@ -775,6 +791,17 @@ impl PlayerApp {
                     let drive = crate::bluray::first_drive();
                     let keydb = crate::bluray::keydb_path();
                     let current = self.video_current.clone().filter(|p| crate::bluray::is_bluray(p));
+                    let prot_source = current
+                        .as_deref()
+                        .map(crate::bluray::source)
+                        .map(|s| s.to_string())
+                        .or_else(|| drive.clone());
+                    if let Some(src) = &prot_source {
+                        self.request_bluray_protection(src, false);
+                    }
+                    let prot = self.bluray_prot.clone();
+                    let prot_pending = self.bluray_prot_pending;
+                    let mut check_aacs = false;
                     ui.horizontal(|ui| {
                         ui.vertical(|ui| {
                             ui.label(RichText::new("BLU-RAY VIDEO").color(th.accent).monospace().strong().size(16.0));
@@ -802,8 +829,73 @@ impl PlayerApp {
                                     .monospace()
                                     .size(9.0),
                             );
+                            if prot_pending {
+                                ui.label(
+                                    RichText::new("CHECKING AACS / BD+ / KEYDB ...")
+                                        .color(Color32::from_gray(150))
+                                        .monospace()
+                                        .size(9.0),
+                                );
+                            } else if let Some(p) = &prot {
+                                let color = if !p.bluray {
+                                    Color32::from_gray(130)
+                                } else if p.needs_makemkv() {
+                                    Color32::from_rgb(255, 190, 120)
+                                } else {
+                                    Color32::from_rgb(120, 255, 150)
+                                };
+                                ui.label(
+                                    RichText::new(p.summary())
+                                        .color(color)
+                                        .monospace()
+                                        .size(9.0)
+                                        .strong(),
+                                );
+                                if let Some(id) = &p.disc_id {
+                                    ui.label(
+                                        RichText::new(format!("DISC ID  {}", id))
+                                            .color(Color32::from_gray(140))
+                                            .monospace()
+                                            .size(8.0),
+                                    );
+                                }
+                                if p.needs_makemkv() {
+                                    ui.label(
+                                        RichText::new(
+                                            "BD+ / missing key: full-disc ISO dump uses MakeMKV backup --decrypt",
+                                        )
+                                        .color(Color32::from_rgb(255, 190, 120))
+                                        .monospace()
+                                        .size(8.0),
+                                    );
+                                }
+                                if p.keydb_match && p.keydb_entries > 0 {
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "KEYDB  {} entries • this disc is present",
+                                            p.keydb_entries
+                                        ))
+                                        .color(Color32::from_gray(120))
+                                        .monospace()
+                                        .size(8.0),
+                                    );
+                                }
+                                if retro_btn(ui, "↻ CHECK AACS", th.fg, th.btn_bg)
+                                    .on_hover_text(
+                                        "Re-read AACS/BD+ and check this disc's ID against your KEYDB",
+                                    )
+                                    .clicked()
+                                {
+                                    check_aacs = true;
+                                }
+                            }
                         });
                     });
+                    if check_aacs {
+                        if let Some(src) = &prot_source {
+                            self.request_bluray_protection(src, true);
+                        }
+                    }
                     ui.add_space(8.0);
                     if let Some(src) = &current {
                         ui.label(
@@ -821,7 +913,7 @@ impl PlayerApp {
                                     self.eject_bluray();
                                 }
                             }
-                            self.draw_disc_dump(ui, "BLU-RAY", &th);
+                            self.draw_bluray_dump_buttons(ui, &th);
                         });
                     } else {
                         ui.label(
@@ -837,7 +929,7 @@ impl PlayerApp {
                             if retro_btn(ui, "OPEN BLU-RAY ISO...", th.fg, th.btn_bg).clicked() {
                                 self.open_bluray_iso();
                             }
-                            self.draw_disc_dump(ui, "BLU-RAY", &th);
+                            self.draw_bluray_dump_buttons(ui, &th);
                         });
                     }
                 }
@@ -1840,12 +1932,14 @@ impl PlayerApp {
                 ui.label(RichText::new("Play ................ Drive or ISO; English audio preferred; subtitles off; fullscreen player with seek bar and STOP").color(dim).monospace());
                 ui.label(RichText::new("DVD seeking ......... Software MPEG-2 decode + CPU filters; metadata probed once so seeks do not thrash the drive").color(dim).monospace());
                 ui.label(RichText::new("Blu-ray ............. VAAPI hardware decode + GPU scale/pad/RGBA; libbluray streamer gives real time seeking").color(dim).monospace());
+                ui.label(RichText::new("AACS / BD+ .......... Deck shows Disc ID, AACS key/KEYDB match and BD+ status; CHECK AACS re-reads the disc").color(dim).monospace());
                 ui.label(RichText::new("DVD tools ........... libdvdread + libdvdnav + libdvdcss; CachyOS/Arch: sudo pacman -S libdvdread libdvdnav libdvdcss").color(dim).monospace());
                 ui.label(RichText::new("DVD tools (Debian) .. libdvdread4 + libdvdnav4 + libdvdcss2; sudo apt install libdvdread4 libdvdnav4 libdvdcss2").color(dim).monospace());
                 ui.label(RichText::new("Dump tools .......... dvdbackup (bundled CachyOS build) + genisoimage; MakeMKV is used for MKV and as ISO fallback").color(dim).monospace());
                 ui.label(RichText::new("DUMP TO MKV ........ Decrypt and remux every title to clean MKV files (MakeMKV); works from the open image or the physical disc").color(dim).monospace());
-                ui.label(RichText::new("DUMP TO ISO ........ DVD only: dvdbackup + genisoimage (or MakeMKV backup --decrypt) to a clean, playable ISO").color(dim).monospace());
-                ui.label(RichText::new("Dump space .......... DUMP TO ISO temporarily needs about twice the disc size; the VIDEO_TS copy is removed after the ISO is built").color(dim).monospace());
+                ui.label(RichText::new("DUMP TO ISO (DVD) ... dvdbackup + genisoimage (or MakeMKV backup --decrypt) to a clean, playable ISO").color(dim).monospace());
+                ui.label(RichText::new("DUMP TO ISO (BD) .... Full disc with menus/extras: MakeMKV backup --decrypt removes AACS/BD+, then a UDF ISO is built").color(dim).monospace());
+                ui.label(RichText::new("Dump space .......... ISO dumps temporarily need about 2.3x the disc size (decrypted tree + ISO); it is removed after building").color(dim).monospace());
                 ui.label(RichText::new("No encryption ....... Every video output is decrypted; raw encrypted images are never produced or offered").color(dim).monospace());
                 ui.add_space(6.0);
 
@@ -1862,6 +1956,8 @@ impl PlayerApp {
 
                 ui.label(RichText::new("TROUBLESHOOTING").color(acc).monospace().strong());
                 ui.label(RichText::new("DVD blocks .......... Encrypted image? Use DUMP TO MKV from the image or DUMP TO ISO; raw encrypted images are unsupported").color(dim).monospace());
+                ui.label(RichText::new("Blu-ray BD+ ......... MakeMKV handles BD+ and AACS; DUMP TO ISO is the fallback when libaacs has no matching key").color(dim).monospace());
+                ui.label(RichText::new("Blu-ray BD+ ......... MakeMKV handles BD+ and AACS; DUMP TO ISO is the fallback for discs where libaacs has no key").color(dim).monospace());
                 ui.label(RichText::new("Check DVD tools ..... Run `mediaplayerofdoom --check-dvd` to list dvdbackup, genisoimage and the DVD libraries").color(dim).monospace());
                 ui.label(RichText::new("Ratings missing ..... MusicBrainz has no community rating for that track/album; no public star feed covers everything").color(dim).monospace());
                 ui.label(RichText::new("Covers missing ...... No local/web match; Meta All retries every run and reports the count without art").color(dim).monospace());

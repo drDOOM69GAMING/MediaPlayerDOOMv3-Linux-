@@ -790,6 +790,93 @@ impl PlayerApp {
         }));
     }
 
+    /// Ask a worker to read AACS/BD+ facts and check the user's KEYDB. The
+    /// Blu-ray deck calls this when it opens and when playback starts.
+    pub(crate) fn request_bluray_protection(&mut self, source: &str, force: bool) {
+        let source = source.trim();
+        if source.is_empty() {
+            return;
+        }
+        if !force
+            && self.bluray_prot_source.as_deref() == Some(source)
+            && (self.bluray_prot.is_some() || self.bluray_prot_pending)
+        {
+            return;
+        }
+        self.bluray_prot_source = Some(source.to_string());
+        self.bluray_prot_pending = true;
+        if force {
+            self.bluray_prot = None;
+        }
+        let tx = self.msg_tx.clone();
+        let src = source.to_string();
+        std::thread::spawn(move || {
+            let info = crate::bluray::protection_info(&src);
+            let _ = tx.send(Msg::BlurayProtection { source: src, info });
+        });
+    }
+
+    /// Dump a full Blu-ray disc to a clean ISO. MakeMKV's backup handles AACS
+    /// and BD+; genisoimage then wraps the decrypted BDMV tree in a UDF ISO.
+    pub(crate) fn start_bluray_decrypted_dump(&mut self) {
+        if self.disc_dumping {
+            return;
+        }
+        let Some(device) = crate::bluray::first_drive() else {
+            self.set_error("No Blu-ray drive found");
+            return;
+        };
+        let playing_optical = self
+            .video_current
+            .as_deref()
+            .map(|p| crate::dvd::is_dvd(p) || crate::bluray::is_bluray(p))
+            .unwrap_or(false);
+        if playing_optical {
+            self.close_video();
+        }
+        let start_dir = crate::disc::videos_dir();
+        let Some(dir) = rfd::FileDialog::new()
+            .set_title("Choose where to save the decrypted Blu-ray ISO")
+            .set_directory(&start_dir)
+            .pick_folder()
+        else {
+            self.set_status("Blu-ray ISO dump cancelled");
+            return;
+        };
+        if let Some(h) = self.disc_dump_thread.take() {
+            let _ = h.join();
+        }
+        self.disc_dump_cancel.store(false, Ordering::Relaxed);
+        self.disc_dumping = true;
+        self.disc_dump_done = 0;
+        self.disc_dump_total = 0;
+        self.disc_dump_speed = 0.0;
+        self.disc_dump_last_done = 0;
+        self.disc_dump_last_at = Instant::now();
+        let text = format!(
+            "Decrypting Blu-ray from {} to {} with MakeMKV (AACS/BD+)...",
+            device,
+            dir.display()
+        );
+        self.disc_dump_text = text.clone();
+        self.set_status(text);
+        let tx = self.msg_tx.clone();
+        let cancel = self.disc_dump_cancel.clone();
+        self.disc_dump_thread = Some(std::thread::spawn(move || {
+            match crate::disc::dump_bluray_iso(&device, &dir, &tx, &cancel) {
+                Ok(path) => {
+                    let _ = tx.send(Msg::DiscDumpDone(path.to_string_lossy().to_string()));
+                }
+                Err(_) if cancel.load(Ordering::Relaxed) => {
+                    let _ = tx.send(Msg::DiscDumpCancelled);
+                }
+                Err(e) => {
+                    let _ = tx.send(Msg::DiscDumpFail(e));
+                }
+            }
+        }));
+    }
+
     /// Dump a DVD/Blu-ray to clean MKV files with MakeMKV. If a disc image is
     /// already open, that image is the source; otherwise the physical disc is
     /// read. MakeMKV's `mkv` mode always decrypts, so the output never keeps

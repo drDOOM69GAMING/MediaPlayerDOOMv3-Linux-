@@ -116,6 +116,7 @@ pub enum Msg {
     DiscDumpDone(String),
     DiscDumpFail(String),
     DiscDumpCancelled,
+    BlurayProtection { source: String, info: Option<crate::bluray::DiscProtection> },
     ConvertProgress { done: usize, total: usize, text: String },
     ConvertDone { folder: String, converted: usize, failed: usize },
     ConvertFail(String),

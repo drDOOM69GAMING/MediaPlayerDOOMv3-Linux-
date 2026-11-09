@@ -269,8 +269,177 @@ pub fn configure_command(cmd: &mut std::process::Command) {
     }
 }
 
-pub fn eject(path: &str) -> bool {
-    if !is_bluray(path) {
+/// Protection facts read from libbluray's `bd_info`. This is what the Blu-ray
+/// deck shows so the user can see whether their KEYDB supplied the AACS key
+/// and whether the disc also carries BD+.
+#[derive(Clone, Debug, Default)]
+pub struct DiscProtection {
+    pub bluray: bool,
+    pub bd_j: bool,
+    pub aacs: bool,
+    pub aacs_handled: bool,
+    pub bd_plus: bool,
+    pub aacs_mkb: Option<u32>,
+    pub disc_id: Option<String>,
+    pub keydb_present: bool,
+    pub keydb_match: bool,
+    pub keydb_entries: u64,
+}
+
+impl DiscProtection {
+    pub fn summary(&self) -> String {
+        if !self.bluray {
+            return "NO BLU-RAY DISC DETECTED".to_string();
+        }
+        let aacs = if self.aacs {
+            if self.aacs_handled {
+                "AACS KEY OK"
+            } else {
+                "AACS KEY MISSING"
+            }
+        } else {
+            "NO AACS"
+        };
+        let bd = if self.bd_plus { "BD+ YES" } else { "BD+ NO" };
+        let key = if self.keydb_match {
+            "KEYDB MATCH"
+        } else if self.aacs {
+            "KEYDB NO MATCH"
+        } else {
+            "KEYDB N/A"
+        };
+        format!("{}  •  {}  •  {}", aacs, bd, key)
+    }
+
+    pub fn needs_makemkv(&self) -> bool {
+        self.bd_plus || (self.aacs && !self.aacs_handled)
+    }
+}
+
+fn parse_yes(v: &str) -> bool {
+    matches!(
+        v.trim().to_ascii_lowercase().as_str(),
+        "yes" | "true" | "1" | "detected"
+    )
+}
+
+/// Parse the stable text output of `bd_info`.
+pub fn parse_bd_info(text: &str) -> DiscProtection {
+    let mut d = DiscProtection::default();
+    for line in text.lines() {
+        let Some((key, val)) = line.split_once(':') else {
+            continue;
+        };
+        let key = key.trim();
+        let val = val.trim();
+        match key {
+            "BluRay detected" => d.bluray = parse_yes(val),
+            "BD-J detected" => d.bd_j = parse_yes(val),
+            "AACS detected" => d.aacs = parse_yes(val),
+            "AACS handled" => d.aacs_handled = parse_yes(val),
+            "AACS MKB version" => d.aacs_mkb = val.parse().ok(),
+            "Disc ID" => {
+                if !val.is_empty() && val != "???" {
+                    d.disc_id = Some(val.to_string());
+                }
+            }
+            "BD+ detected" => d.bd_plus = parse_yes(val),
+            _ => {}
+        }
+    }
+    d
+}
+
+/// Look for a disc ID in a KEYDB.cfg. Returns (found, entry count).
+fn keydb_lookup_in(path: &std::path::Path, disc_id: &str) -> (bool, u64) {
+    use std::io::BufRead;
+    let Ok(file) = std::fs::File::open(path) else {
+        return (false, 0);
+    };
+    let mut found = false;
+    let mut count = 0u64;
+    for line in std::io::BufReader::new(file).lines().flatten() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with(';') || line.starts_with('#') {
+            continue;
+        }
+        let id = line.split('|').next().unwrap_or("").trim();
+        let id = if let Some(rest) = id.strip_prefix("0x").or_else(|| id.strip_prefix("0X")) {
+            // AACS 2.1 KEYDB format: "0xDISCID = Name | ..."
+            rest.chars()
+                .take_while(|c| c.is_ascii_hexdigit())
+                .collect::<String>()
+        } else {
+            // Classic format: "DISCID | KEY | ..."
+            id.split_whitespace().next().unwrap_or("").to_string()
+        };
+        if id.is_empty() {
+            continue;
+        }
+        count += 1;
+        if id.eq_ignore_ascii_case(disc_id) {
+            found = true;
+        }
+    }
+    (found, count)
+}
+
+/// Run `bd_info` with a timeout so a busy/absent drive cannot leave the deck
+/// stuck on "CHECKING..." forever.
+fn run_bd_info(source: &str) -> Option<String> {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+    let mut child = Command::new("bd_info")
+        .arg(source)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut stdout = child.stdout.take()?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut s = String::new();
+        let _ = stdout.read_to_string(&mut s);
+        let _ = tx.send(s);
+    });
+    let start = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                return rx.recv_timeout(Duration::from_secs(2)).ok();
+            }
+            Ok(None) => {}
+            Err(_) => return None,
+        }
+        if start.elapsed() > Duration::from_secs(15) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Probe the current disc with `bd_info` and check the user's KEYDB for the
+/// disc's AACS ID. This can take a moment on a large KEYDB, so callers should
+/// run it on a worker thread.
+pub fn protection_info(source: &str) -> Option<DiscProtection> {
+    let text = run_bd_info(source)?;
+    let mut info = parse_bd_info(&text);
+    if !info.bluray && info.disc_id.is_none() && !info.aacs && !info.bd_plus {
+        return None;
+    }
+    info.keydb_present = keydb_path().is_some();
+    if let (Some(id), Some(path)) = (info.disc_id.clone(), keydb_path()) {
+        let (found, entries) = keydb_lookup_in(&path, &id);
+        info.keydb_match = found;
+        info.keydb_entries = entries;
+    }
+    Some(info)
+}
+
+pub fn eject(path: &str) -> bool {    if !is_bluray(path) {
         return false;
     }
     let src = source(path);
@@ -301,6 +470,60 @@ pub fn eject(path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn protection_parses_aacs_key_and_bdplus() {
+        let text = "Using libbluray version 1.5.1\nVolume Identifier   : JUMANJI\nBluRay detected     : yes\nBD-J detected       : yes\nAACS detected       : yes\nlibaacs detected    : yes\nDisc ID             : 6146196C7EC14BCA70544B2D08DD5885A26D7224\nAACS MKB version    : 64\nAACS handled        : yes\n\nBD+ detected        : no\n";
+        let p = parse_bd_info(text);
+        assert!(p.bluray && p.bd_j && p.aacs && p.aacs_handled);
+        assert!(!p.bd_plus);
+        assert_eq!(p.aacs_mkb, Some(64));
+        assert_eq!(
+            p.disc_id.as_deref(),
+            Some("6146196C7EC14BCA70544B2D08DD5885A26D7224")
+        );
+        assert!(!p.needs_makemkv());
+        let bdplus = parse_bd_info("BluRay detected: yes\nAACS detected: yes\nAACS handled: no\nBD+ detected: yes\n");
+        assert!(bdplus.needs_makemkv());
+        assert!(bdplus.bd_plus);
+    }
+
+    #[test]
+    fn keydb_lookup_finds_disc_id_case_insensitively() {
+        let dir = std::env::temp_dir().join(format!("mpdoom-keydb-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("KEYDB.cfg");
+        std::fs::write(
+            &db,
+            "; comment\n6146196C7EC14BCA70544B2D08DD5885A26D7224 | 0x00112233445566778899AABBCCDDEEFF | MKBv64\n0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA = Other Disc | 0x00 |\n",
+        )
+        .unwrap();
+        let (found, entries) = keydb_lookup_in(
+            &db,
+            "6146196c7ec14bca70544b2d08dd5885a26d7224",
+        );
+        assert!(found);
+        assert_eq!(entries, 2);
+        let (found21, _) =
+            keydb_lookup_in(&db, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+        assert!(found21, "AACS 2.1 0xDISCID entries must match");
+        let (missing, _) = keydb_lookup_in(&db, "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB");
+        assert!(!missing);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[ignore]
+    fn inspect_real_bluray_from_env() {
+        let Some(src) = std::env::var_os("MPDOOM_TEST_BD") else {
+            return;
+        };
+        let info = protection_info(&src.to_string_lossy()).unwrap_or_default();
+        println!("{:?}", info);
+        println!("{}", info.summary());
+        println!("needs_makemkv={}", info.needs_makemkv());
+    }
 
     #[test]
     fn prefix_parsing() {

@@ -12,7 +12,7 @@ A retro DOOM-styled media player rendered in egui. Tape, CD, and Radio faces on 
   - **RADIO**: FM/AM dial with click-and-drag tuning, presets, SCAN, live web streams, and an **ADD STATION** dialog to save your own FM/AM stream presets
   - **DVD**: play a DVD movie directly from the optical drive or from an `.iso`/`.img` image using ffmpeg's `dvdvideo` demuxer; encrypted discs are decrypted with libdvdcss when installed
   - **BLU-RAY**: play a Blu-ray movie from the optical drive or an `.iso`/`.img` using ffmpeg's `bluray` protocol. AACS keys are read from the user's own `~/.config/aacs/KEYDB.cfg` (or `$XDG_CONFIG_HOME/aacs/KEYDB.cfg`); no keys are shipped with the app. English audio is preferred and subtitles are disabled by default for DVD/Blu-ray
-  - **Disc dumping**: both the DVD and Blu-ray decks have **DUMP TO MKV**, which decrypts and remuxes every title to clean MKV files with MakeMKV (from the open image or the physical disc). The DVD deck also has **DUMP TO ISO**, a decrypted, directly playable image built with the bundled `dvdbackup` + `genisoimage` (MakeMKV is the fallback). No encrypted video output is ever produced
+  - **Disc dumping**: both the DVD and Blu-ray decks have **DUMP TO MKV**, which decrypts and remuxes every title to clean MKV files with MakeMKV (from the open image or the physical disc). Both decks also have **DUMP TO ISO**: DVD uses the bundled `dvdbackup` + `genisoimage` (MakeMKV fallback), while Blu-ray uses `makemkvcon backup --decrypt` to handle AACS/BD+ and then builds a full-disc UDF ISO with menus and extras. The Blu-ray deck shows AACS key status, Disc ID, KEYDB match and BD+ detection. No encrypted video output is ever produced
 - **Bands catalog**: songs grouped by artist folder (A-Z, scrollable), rebuilt from whatever folder you add
 - **Supported audio**: MP3, FLAC, WAV, M4A/AAC/ALAC, APE (Monkey's Audio), AIFF, OGG/Vorbis, Opus, WMA, WavPack, Musepack and WebM audio. Formats the built-in decoder cannot open (notably M4A and APE) are converted to a cached WAV with ffmpeg on first play, so they seek and play like any other track. Single-file albums described by a **CUE sheet** are expanded into individual tracks
 - **Play order switch**: flip the retro wall switch under BANDS. ON = random shuffle, OFF = normal in-order playback
@@ -202,6 +202,21 @@ This app is built on the work of some incredible open-source projects, and it wo
 - The **Rust** language and its crate ecosystem.
 
 Full details, license texts, and donation links are in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). If you can, consider donating to FFmpeg, yt-dlp, and MKVToolNix - they give this all away for free.
+
+## v3.2.32 changelog
+
+- **Full-disc Blu-ray ISO dumping**
+  - Added **DUMP TO ISO** to the Blu-ray deck
+  - `makemkvcon backup --decrypt` creates a decrypted BDMV tree, so AACS and **BD+** discs are handled (including discs without a matching libaacs key)
+  - `genisoimage -udf -iso-level 3` then builds a full-disc ISO with menus, extras and every title; the temporary decrypted tree is removed afterward
+  - Large files (>4 GB) are included in the ISO; progress, MB/s, ETA and CANCEL work like the other dump modes
+  - Free-space check: an ISO dump temporarily needs about 2.3× the disc size
+- **AACS / BD+ status in the Blu-ray deck**
+  - Shows `Disc ID`, `AACS KEY OK` / `AACS KEY MISSING`, `BD+ YES/NO`, and whether the disc ID is present in the user's `KEYDB.cfg`
+  - `CHECK AACS` re-reads the disc; the probe also refreshes when Blu-ray playback starts
+  - Supports both classic `DISCID | KEY` and AACS 2.1 `0xDISCID = ...` KEYDB formats
+  - The deck explains when a BD+ or keyless disc will use the MakeMKV full-disc fallback
+- Version bump to **v3.2.32**
 
 ## v3.2.31 changelog
 

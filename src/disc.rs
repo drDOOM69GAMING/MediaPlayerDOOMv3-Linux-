@@ -625,8 +625,9 @@ pub fn dump_dvd_with_backup(
             text: format!("Building decrypted ISO {}...", target.display()),
         });
         let mut cmd = Command::new(&mkiso);
+        let volume: String = label.chars().take(32).collect();
         cmd.args(["-dvd-video", "-udf", "-quiet", "-V"])
-            .arg(&label)
+            .arg(&volume)
             .arg("-o")
             .arg(&partial)
             .arg(&disc_root)
@@ -884,6 +885,280 @@ pub fn dump_decrypted_dvd_makemkv(
     }
 }
 
+/// Full Blu-ray disc to a clean ISO. MakeMKV's `backup --decrypt` handles
+/// both AACS and BD+ (including discs where libaacs has no matching key), then
+/// `genisoimage` wraps the decrypted BDMV tree in a UDF ISO. Menus, extras and
+/// every title are preserved; nothing encrypted is written.
+pub fn dump_bluray_iso(
+    device: &str,
+    dir: &Path,
+    tx: &Sender<Msg>,
+    cancel: &AtomicBool,
+) -> Result<PathBuf, String> {
+    #[cfg(windows)]
+    {
+        let _ = (device, dir, tx, cancel);
+        return Err("Blu-ray imaging is only supported on Linux".into());
+    }
+    #[cfg(not(windows))]
+    {
+        if !Path::new(device).exists() {
+            return Err(format!("{} not found", device));
+        }
+        std::fs::create_dir_all(dir)
+            .map_err(|e| format!("cannot create destination folder: {}", e))?;
+        let total = device_size(device).unwrap_or(0);
+        if total > 0 {
+            if let Some(free) = free_space(dir) {
+                let need = total.saturating_mul(23) / 10;
+                if free < need {
+                    return Err(format!(
+                        "not enough free space for the Blu-ray ISO: need about {:.1} GB (decrypted BDMV + ISO), only {:.1} GB available",
+                        need as f64 / 1e9,
+                        free as f64 / 1e9
+                    ));
+                }
+            }
+        }
+        let target = decrypted_iso_path(dir, device);
+        let partial = target.with_file_name(format!(
+            "{}.part",
+            target
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "bluray.iso".to_string())
+        ));
+        let _ = std::fs::remove_file(&partial);
+        let work = dir.join(format!(".mpdoom-bd-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&work);
+        std::fs::create_dir_all(&work)
+            .map_err(|e| format!("cannot create working folder: {}", e))?;
+        let label = disc_label(device)
+            .map(|l| sanitize_win(&l))
+            .filter(|l| !l.trim().is_empty())
+            .unwrap_or_else(|| "bluray".to_string());
+
+        // ---- stage 1: decrypted full-disc backup (AACS + BD+) ----
+        let _ = tx.send(Msg::DiscDumpProgress {
+            done: 0,
+            total,
+            text: format!(
+                "Decrypting Blu-ray with MakeMKV (AACS/BD+) to {}...",
+                target.display()
+            ),
+        });
+        let mut cmd = Command::new("makemkvcon");
+        cmd.args(["-r", "backup", "--decrypt", "disc:0"])
+            .arg(&work)
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::process::CommandExt;
+            unsafe {
+                cmd.pre_exec(|| {
+                    libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+                    Ok(())
+                });
+            }
+        }
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| format!("MakeMKV failed to start (is makemkvcon installed?): {}", e))?;
+        let err_handle = child.stderr.take().map(|mut e| {
+            std::thread::spawn(move || {
+                let mut s = String::new();
+                let _ = e.read_to_string(&mut s);
+                s
+            })
+        });
+        let mut last_sent = Instant::now() - Duration::from_secs(5);
+        loop {
+            if cancel.load(Ordering::Relaxed) {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = std::fs::remove_dir_all(&work);
+                return Err("cancelled".into());
+            }
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    let err = err_handle.and_then(|h| h.join().ok()).unwrap_or_default();
+                    if !status.success() {
+                        let _ = std::fs::remove_dir_all(&work);
+                        let tail = err.lines().rev().take(4).collect::<Vec<_>>().join(" | ");
+                        return Err(format!(
+                            "MakeMKV Blu-ray backup failed{}",
+                            if tail.is_empty() {
+                                String::new()
+                            } else {
+                                format!(": {}", tail)
+                            }
+                        ));
+                    }
+                    break;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = std::fs::remove_dir_all(&work);
+                    return Err(format!("MakeMKV error: {}", e));
+                }
+            }
+            let done = dir_size(&work);
+            if last_sent.elapsed() >= Duration::from_millis(500) {
+                last_sent = Instant::now();
+                let pct = if total > 0 {
+                    (done.saturating_mul(100) / total).min(100)
+                } else {
+                    0
+                };
+                let text = if total > 0 {
+                    format!(
+                        "Decrypting Blu-ray... {}%  ({:.1} / {:.1} GB)",
+                        pct,
+                        done as f64 / 1e9,
+                        total as f64 / 1e9
+                    )
+                } else {
+                    format!("Decrypting Blu-ray... {:.1} GB", done as f64 / 1e9)
+                };
+                let _ = tx.send(Msg::DiscDumpProgress { done, total, text });
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+
+        let Some(bdmv_root) = find_bdmv_root(&work) else {
+            let _ = std::fs::remove_dir_all(&work);
+            return Err("MakeMKV backup produced no BDMV folder".into());
+        };
+
+        // ---- stage 2: UDF ISO from the decrypted tree ----
+        let _ = tx.send(Msg::DiscDumpProgress {
+            done: 0,
+            total,
+            text: format!("Building Blu-ray UDF ISO {}...", target.display()),
+        });
+        let mut cmd = Command::new("genisoimage");
+        let volume: String = label.chars().take(32).collect();
+        cmd.args(["-udf", "-iso-level", "3", "-quiet", "-V"])
+            .arg(&volume)
+            .arg("-o")
+            .arg(&partial)
+            .arg(&bdmv_root)
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::process::CommandExt;
+            unsafe {
+                cmd.pre_exec(|| {
+                    libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+                    Ok(())
+                });
+            }
+        }
+        let mut child = cmd.spawn().map_err(|e| {
+            let _ = std::fs::remove_dir_all(&work);
+            let _ = std::fs::remove_file(&partial);
+            format!("genisoimage failed to start: {}", e)
+        })?;
+        let err_handle = child.stderr.take().map(|mut e| {
+            std::thread::spawn(move || {
+                let mut s = String::new();
+                let _ = e.read_to_string(&mut s);
+                s
+            })
+        });
+        let mut last_sent = Instant::now() - Duration::from_secs(5);
+        loop {
+            if cancel.load(Ordering::Relaxed) {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = std::fs::remove_dir_all(&work);
+                let _ = std::fs::remove_file(&partial);
+                return Err("cancelled".into());
+            }
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    let err = err_handle.and_then(|h| h.join().ok()).unwrap_or_default();
+                    if !status.success() {
+                        let _ = std::fs::remove_dir_all(&work);
+                        let _ = std::fs::remove_file(&partial);
+                        let tail = err.lines().rev().take(4).collect::<Vec<_>>().join(" | ");
+                        return Err(format!(
+                            "genisoimage failed{}",
+                            if tail.is_empty() {
+                                String::new()
+                            } else {
+                                format!(": {}", tail)
+                            }
+                        ));
+                    }
+                    break;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = std::fs::remove_dir_all(&work);
+                    let _ = std::fs::remove_file(&partial);
+                    return Err(format!("genisoimage error: {}", e));
+                }
+            }
+            let done = std::fs::metadata(&partial).map(|m| m.len()).unwrap_or(0);
+            if last_sent.elapsed() >= Duration::from_millis(500) {
+                last_sent = Instant::now();
+                let pct = if total > 0 {
+                    (done.saturating_mul(100) / total).min(100)
+                } else {
+                    0
+                };
+                let text = if total > 0 {
+                    format!(
+                        "Building Blu-ray ISO... {}%  ({:.1} / {:.1} GB)",
+                        pct,
+                        done as f64 / 1e9,
+                        total as f64 / 1e9
+                    )
+                } else {
+                    format!("Building Blu-ray ISO... {:.1} GB", done as f64 / 1e9)
+                };
+                let _ = tx.send(Msg::DiscDumpProgress { done, total, text });
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        let size = std::fs::metadata(&partial).map(|m| m.len()).unwrap_or(0);
+        if size == 0 {
+            let _ = std::fs::remove_dir_all(&work);
+            let _ = std::fs::remove_file(&partial);
+            return Err("genisoimage produced an empty Blu-ray image".into());
+        }
+        if let Err(e) = std::fs::rename(&partial, &target) {
+            let _ = std::fs::remove_dir_all(&work);
+            let _ = std::fs::remove_file(&partial);
+            return Err(format!("could not finalize Blu-ray image: {}", e));
+        }
+        let _ = std::fs::remove_dir_all(&work);
+        Ok(target)
+    }
+}
+
+/// Find the folder that directly contains `BDMV` under a MakeMKV backup tree.
+fn find_bdmv_root(root: &Path) -> Option<PathBuf> {
+    if root.join("BDMV").is_dir() {
+        return Some(root.to_path_buf());
+    }
+    let rd = std::fs::read_dir(root).ok()?;
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.is_dir() && p.join("BDMV").is_dir() {
+            return Some(p);
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -975,6 +1250,22 @@ mod tests {
     fn free_space_reports_a_positive_value() {
         let dir = std::env::temp_dir();
         assert!(free_space(&dir).unwrap_or(0) > 0);
+    }
+
+    #[test]
+    fn finds_bdmv_root_in_makemkv_backup() {
+        let dir = std::env::temp_dir().join(format!("mpdoom-bdmv-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let direct = dir.join("direct");
+        std::fs::create_dir_all(direct.join("BDMV")).unwrap();
+        assert_eq!(find_bdmv_root(&direct), Some(direct.clone()));
+        let nested = dir.join("nested");
+        std::fs::create_dir_all(nested.join("disc/BDMV")).unwrap();
+        assert_eq!(find_bdmv_root(&nested), Some(nested.join("disc")));
+        let empty = dir.join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        assert_eq!(find_bdmv_root(&empty), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

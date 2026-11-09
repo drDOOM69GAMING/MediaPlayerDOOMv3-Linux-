@@ -278,6 +278,10 @@ pub(crate) struct PlayerApp {
     pub(crate) disc_dump_speed: f32,
     pub(crate) disc_dump_last_done: u64,
     pub(crate) disc_dump_last_at: Instant,
+    /// Latest AACS/BD+ probe for the Blu-ray deck.
+    pub(crate) bluray_prot: Option<crate::bluray::DiscProtection>,
+    pub(crate) bluray_prot_source: Option<String>,
+    pub(crate) bluray_prot_pending: bool,
     pub(crate) convert_open: bool,
     pub(crate) convert_src: Option<String>,
     pub(crate) convert_format: crate::convert::ConvertFormat,
@@ -757,6 +761,9 @@ impl PlayerApp {
             disc_dump_speed: 0.0,
             disc_dump_last_done: 0,
             disc_dump_last_at: Instant::now(),
+            bluray_prot: None,
+            bluray_prot_source: None,
+            bluray_prot_pending: false,
             convert_open: false,
             convert_src: None,
             convert_format: crate::convert::ConvertFormat::Same,
@@ -2346,6 +2353,12 @@ video_ended: false,
             Msg::DiscDumpCancelled => {
                 self.finish_disc_dump();
                 self.set_status("Disc dump cancelled");
+            }
+            Msg::BlurayProtection { source, info } => {
+                self.bluray_prot_pending = false;
+                if self.bluray_prot_source.as_deref() == Some(source.as_str()) {
+                    self.bluray_prot = Some(info.unwrap_or_default());
+                }
             }
             Msg::ConvertProgress { done, total, text } => {
                 self.convert_active = true;

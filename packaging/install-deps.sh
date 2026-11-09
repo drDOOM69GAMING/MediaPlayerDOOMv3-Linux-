@@ -7,7 +7,7 @@ if command -v pacman >/dev/null 2>&1; then
     echo "Detected Arch/CachyOS (pacman)"
     sudo pacman -S --needed --noconfirm \
         base-devel rust ffmpeg mkvtoolnix-cli cdparanoia \
-        libdvdread libdvdnav libdvdcss dvdbackup cdrkit \
+        libdvdread libdvdnav libdvdcss dvdbackup cdrtools \
         libbluray libaacs \
         alsa-lib openssl libxkbcommon libxkbcommon-x11 wayland libx11 xdg-utils
 elif command -v apt >/dev/null 2>&1; then

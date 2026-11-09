@@ -50,6 +50,8 @@ impl PlayerApp {
             self.set_error("No Blu-ray source");
             return;
         }
+        let source_owned = source.to_string();
+        self.request_bluray_protection(&source_owned, true);
         let info = crate::bluray::main_title_info(source);
         let playlist = info.map(|i| i.playlist);
         let wrapped = crate::bluray::wrap_playlist(source, playlist);
