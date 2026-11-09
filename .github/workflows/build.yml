@@ -1,0 +1,41 @@
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  # Linux Mint is Ubuntu-based; test the Debian/Ubuntu dependency set.
+  ubuntu:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libasound2-dev libxkbcommon-dev \
+            libxkbcommon-x11-dev libwayland-dev libx11-dev libssl-dev \
+            ffmpeg mkvtoolnix xdg-utils
+      - name: Test
+        run: cargo test --all-targets
+      - name: Release build
+        run: cargo build --release
+
+  # CachyOS is Arch-based; test the Arch dependency set.
+  arch:
+    runs-on: ubuntu-24.04
+    container: archlinux:latest
+    steps:
+      - name: Install dependencies
+        run: |
+          pacman -Syu --noconfirm --needed git nodejs base-devel rust ffmpeg \
+            mkvtoolnix-cli alsa-lib openssl libxkbcommon libxkbcommon-x11 \
+            wayland libx11
+      - uses: actions/checkout@v4
+      - name: Test
+        run: cargo test --all-targets
+      - name: Release build
+        run: cargo build --release

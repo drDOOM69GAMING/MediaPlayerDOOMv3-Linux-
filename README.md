@@ -43,7 +43,14 @@ A retro DOOM-styled media player rendered in egui. Tape, CD, and Radio faces on 
 - `xdg-utils` for "show in folder" (the app falls back to `gio`, `kioclient`, `thunar`, `nautilus`)
 
 The app follows the XDG Base Directory spec and runs on any freedesktop desktop.
-Install the build dependencies for your distro:
+The two first-class targets are **CachyOS/Arch** and **Linux Mint/Debian**. You can
+install their dependencies in one command:
+
+```bash
+./packaging/install-deps.sh
+```
+
+Or install them manually:
 
 ```bash
 # Arch / CachyOS / Manjaro
@@ -170,6 +177,7 @@ Full details, license texts, and donation links are in [THIRD-PARTY-NOTICES.md](
 - Desktop shortcut behaviour is now exactly "make sure it's there": on launch the release build checks `Desktop/MediaPlayerDOOM.desktop` and creates it (with the artwork icon) only when missing. If it already exists, it does not rewrite it and creates no other launchers on that path
 - The application-menu entry and theme icon are installed by `install.sh`; after that the runtime only guards the desktop shortcut
 - **Cross-distro portability**: documented build dependencies for Arch/CachyOS, Debian/Ubuntu/Mint, Fedora, and openSUSE; XDG paths throughout; X11 and Wayland both tested; opener fallbacks (`gio`, `kioclient`, `thunar`, `nautilus`) when `xdg-open` is absent; Linux-only desktop code is compile-gated so Windows/macOS builds still work
+- **First-class CachyOS/Arch + Linux Mint/Debian support**: `packaging/install-deps.sh` installs the right toolchain/dependencies for the detected distro, and a CI matrix builds/tests on Ubuntu 24.04 (Mint's base) and Arch Linux (CachyOS's base)
 - Version bump to **v3.2.3**
 
 ## v3.2.2 changelog
