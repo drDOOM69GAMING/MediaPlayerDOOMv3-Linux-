@@ -46,12 +46,10 @@ impl PlayerApp {
         let info = crate::bluray::main_title_info(source);
         let playlist = info.map(|i| i.playlist);
         let wrapped = crate::bluray::wrap_playlist(source, playlist);
-        if playlist.is_none() {
-            // No reliable main-title playlist: do not resume from a saved
-            // timestamp, because time seeking in that auto-selected title is
-            // what used to hang.
-            self.video_positions.remove(&wrapped);
-        }
+        // Never resume a Blu-ray from a saved timestamp: the engine restarts
+        // at the playlist start, and old bad timestamps used to make launch
+        // look like it was stuck on the intro.
+        self.video_positions.remove(&wrapped);
         self.video_queue = vec![wrapped.clone()];
         self.video_queue_idx = 0;
         self.play_video_item(wrapped);
@@ -198,41 +196,7 @@ impl PlayerApp {
 
     pub(crate) fn seek_video(&mut self, tsecs: f32) {
         let Some(path) = self.video_current.clone() else { return };
-        if crate::bluray::is_bluray(&path) {
-            // Time seeking through libbluray is unreliable and could stop disc
-            // reads. Chapters are seekable, so jump to the nearest chapter.
-            let source = crate::bluray::source(&path).to_string();
-            let Some(info) = crate::bluray::main_title_info(&source) else {
-                self.set_status("Blu-ray chapter information unavailable");
-                return;
-            };
-            if info.chapters < 2 || info.secs <= 1.0 {
-                self.set_status("This Blu-ray title has no seekable chapters");
-                return;
-            }
-            let per = info.secs / info.chapters as f32;
-            let ch = ((tsecs.max(0.0) / per).floor() as u32 + 1).clamp(1, info.chapters);
-            let offset = (ch - 1) as f32 * per;
-            if let Some(mut c) = self.video_audio_proc.take() {
-                let _ = c.kill();
-                let _ = c.wait();
-            }
-            if let Some(s) = self.video_sink.take() {
-                s.stop();
-            }
-            let next = crate::bluray::wrap_chapter(&source, Some(info.playlist), ch);
-            self.play_video_item(next);
-            self.video_time_offset = offset;
-            self.video_cur_secs = offset;
-            self.video_dur_secs = info.secs;
-            self.set_status(format!(
-                "Blu-ray chapter {} / {} (~{})",
-                ch,
-                info.chapters,
-                fmt_time(offset)
-            ));
-            return;
-        }
+        av_log(&format!("seek_video target={:.3}s (dur={:.3}) path={}", tsecs, self.video_dur_secs, path));
         self.video_time_offset = 0.0;
         let was_paused = self.video_paused;
         let mut tsecs = tsecs.max(0.0);
@@ -297,6 +261,7 @@ impl PlayerApp {
         self.video_gen += 1;
         let gen = self.video_gen;
         let saved_pos = self.video_positions.get(&path).copied().unwrap_or(0.0);
+        av_log(&format!("play_video_item path={} saved_pos={:.3}", path, saved_pos));
         let _ = self.lib_tx.send(LibCmd::VideoOpen { path: path.clone(), gen, seek: saved_pos });
         self.video_aspect = self.video_aspects.get(&path).copied().unwrap_or(self.video_aspect_default);
         self.video_on = true;
@@ -819,6 +784,14 @@ impl PlayerApp {
                                 self.video_seek_t = Some(t.clamp(0.0, 1.0));
                             }
                             if slip.drag_stopped() {
+                                av_log(&format!(
+                                    "seek slider t={:.3} rect={:?} pointer={:?} viewport={:?} ppp={:.2}",
+                                    t,
+                                    slip.rect,
+                                    ctx.input(|i| i.pointer.latest_pos()),
+                                    ctx.viewport_rect(),
+                                    ctx.input(|i| i.pixels_per_point())
+                                ));
                                 self.video_seek_t = None;
                                 self.seek_video(t.clamp(0.0, 1.0) * self.video_dur_secs);
                             }

@@ -10,6 +10,7 @@ include!(concat!(env!("OUT_DIR"), "/embedded_tools.rs"));
 
 pub(crate) mod app;
 pub(crate) mod audio;
+pub(crate) mod bdstream;
 pub(crate) mod consts;
 pub(crate) mod bluray;
 pub(crate) mod disc;
@@ -65,6 +66,11 @@ fn main() -> eframe::Result {
     // (a bare path also works). Handy for testing and for opening an episode
     // straight from a file manager.
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // Internal helper: stream a Blu-ray title (decrypted) to stdout so ffmpeg
+    // can seek by restarting this process at a timestamp. Not user-facing.
+    if args.first().map(|a| a.as_str()) == Some("--bd-stream") {
+        std::process::exit(crate::bdstream::run_cli(&args[1..]));
+    }
     if args.iter().any(|a| a == "--version" || a == "-V") {
         println!("{} v{}", crate::consts::APP_NAME, crate::consts::APP_VERSION);
         return Ok(());

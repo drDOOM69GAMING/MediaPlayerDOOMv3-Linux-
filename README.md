@@ -189,19 +189,22 @@ This app is built on the work of some incredible open-source projects, and it wo
 
 Full details, license texts, and donation links are in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). If you can, consider donating to FFmpeg, yt-dlp, and MKVToolNix - they give this all away for free.
 
-## v3.2.12 changelog
+## v3.2.13 changelog
 
 - **Blu-ray playback fixes**
   - Resolve the disc's real main-title playlist via libbluray instead of letting ffmpeg auto-pick one that cannot seek (the Jumanji disc's main title is playlist `00001.mpls`)
   - Do not resume a Blu-ray from a saved timestamp; that was the change that made the disc "stop reading" and hang on launch
-  - Seeking on Blu-ray now jumps by **chapter** (ffmpeg/libbluray cannot time-seek these titles reliably); the UI reports the chapter instead of freezing the player
+  - **Seeking now works.** ffmpeg's own `bluray:` protocol ignores libbluray's seek API (`-ss` stalls and `-chapter` is ignored on this disc). The player now runs a tiny built-in libbluray streamer (`--bd-stream`, loaded with `dlopen`) and feeds the decrypted M2TS stream to ffmpeg. Clicking the seek bar restarts that streamer at the clicked timestamp, so it jumps to the requested scene instead of the intro
+  - The streamer is also used for normal Blu-ray playback, so video and audio both start from the same timestamp and stay in sync (measured drift within about ±50 ms after a seek)
   - Blu-ray audio language is taken from libbluray's own title/language list, preferring English; subtitles stay off
   - Blu-ray startup no longer runs extra ffprobe passes against the drive, so the first frame arrives sooner and the drive is not thrashed
   - STOP now actually closes optical playback and clears the DVD/Blu-ray NOW state; a STOP button is also present in the fullscreen movie bar
 - **GPU vendor detection**
   - AMD/Intel are detected from `/sys/class/drm/*/device/vendor` and use VAAPI directly (`-hwaccel vaapi`); NVIDIA with the proprietary driver uses CUDA. This removes the failed CUDA probe on your AMD RX 6800
+  - On VAAPI, scaling, letterbox padding and the NV12→RGBA conversion now stay on the GPU (`scale_vaapi`/`pad_vaapi`); ffmpeg's video process dropped from roughly 20% CPU to roughly 8% on the RX 6800
   - `MPDOOM_NO_HWACCEL=1` still forces software decoding
-- Version bump to **v3.2.12**
+- **Corrected seeking behaviour:** the seek bar now honours the clicked position on Blu-ray (no more intro restart); libbluray is loaded at runtime so builds/systems without it still play local media
+- Version bump to **v3.2.13**
 
 ## v3.2.11 changelog
 

@@ -77,8 +77,27 @@ pub fn spawn_video_audio(path: &str, ffmpeg: &Path, seek: f32) -> Result<(Child,
     let dvd = crate::dvd::is_dvd(path);
     let bd = crate::bluray::is_bluray(path);
     let bd_playlist = if bd { crate::bluray::playlist(path) } else { None };
+    // libbluray can seek instantly even though ffmpeg's bluray: protocol
+    // cannot. Use our streamer when the playlist is known.
+    let bd_stream = if bd {
+        bd_playlist.and_then(|pl| {
+            crate::bdstream::spawn_stream(crate::bluray::source(path), pl, seek)
+        })
+    } else {
+        None
+    };
+    let using_stream = bd_stream.is_some();
+    if using_stream {
+        crate::log::av_log(&format!(
+            "audio: libbluray stream playlist={} seek={:.1}s",
+            bd_playlist.unwrap_or(0),
+            seek
+        ));
+    }
     let bd_url;
-    let input = if dvd {
+    let input = if using_stream {
+        "pipe:0"
+    } else if dvd {
         crate::dvd::source(path)
     } else if bd {
         bd_url = format!("bluray:{}", crate::bluray::source(path));
@@ -91,18 +110,25 @@ pub fn spawn_video_audio(path: &str, ffmpeg: &Path, seek: f32) -> Result<(Child,
         args.push("-f".into());
         args.push("dvdvideo".into());
     }
-    if let Some(pl) = bd_playlist {
-        args.push("-playlist".into());
-        args.push(pl.to_string());
-    }
-    if bd {
-        if let Some(ch) = crate::bluray::chapter(path) {
-            args.push("-chapter".into());
-            args.push(ch.to_string());
+    if using_stream {
+        args.push("-f".into());
+        args.push("mpegts".into());
+    } else {
+        if let Some(pl) = bd_playlist {
+            args.push("-playlist".into());
+            args.push(pl.to_string());
+        }
+        if bd {
+            if let Some(ch) = crate::bluray::chapter(path) {
+                args.push("-chapter".into());
+                args.push(ch.to_string());
+            }
         }
     }
     args.push("-re".into());
-    if seek > 0.0 {
+    // The streamer already starts at the requested time; seeking a pipe is
+    // not possible, so only ffmpeg's own sources get -ss.
+    if seek > 0.0 && !using_stream {
         args.push("-ss".to_string());
         args.push(format!("{:.3}", seek));
     }
@@ -125,6 +151,9 @@ pub fn spawn_video_audio(path: &str, ffmpeg: &Path, seek: f32) -> Result<(Child,
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .no_window();
+    if let Some(out) = bd_stream {
+        cmd.stdin(std::process::Stdio::from(out));
+    }
     if bd {
         crate::bluray::configure_command(&mut cmd);
     }

@@ -327,7 +327,31 @@ LibCmd::Scan(dir) => {
                 av_log(&format!("open: probe_info {}x{} fps={} took {}ms", sw, sh, sfps, t_open.elapsed().as_millis()));
                 let (tw, th) = fit_video_dims(sw, sh, 1920, 1080);
                 let fps = if sfps > 0.0 { sfps } else { 24.0 };
-                let input = if dvd {
+                // libbluray's own time seek works even though ffmpeg's
+                // bluray: protocol cannot seek this disc. Stream the title
+                // from the requested timestamp into ffmpeg's stdin.
+                let bd_stream = if bd {
+                    crate::bluray::playlist(&path).and_then(|pl| {
+                        crate::bdstream::spawn_stream(
+                            crate::bluray::source(&path),
+                            pl,
+                            seek.max(0.0),
+                        )
+                    })
+                } else {
+                    None
+                };
+                let using_stream = bd_stream.is_some();
+                if using_stream {
+                    av_log(&format!(
+                        "video: libbluray stream playlist={} seek={:.1}s",
+                        crate::bluray::playlist(&path).unwrap_or(0),
+                        seek
+                    ));
+                }
+                let input = if using_stream {
+                    "pipe:0".to_string()
+                } else if dvd {
                     crate::dvd::source(&path).to_string()
                 } else if bd {
                     format!("bluray:{}", crate::bluray::source(&path))
@@ -339,28 +363,56 @@ LibCmd::Scan(dir) => {
                 // Pick the GPU backend explicitly instead of letting ffmpeg
                 // probe CUDA first on an AMD machine. Users can disable it with
                 // MPDOOM_NO_HWACCEL=1 if a driver misbehaves.
-                if std::env::var_os("MPDOOM_NO_HWACCEL").is_none() {
-                    let hw = hwaccel_args();
+                let hw: Vec<&'static str> = if std::env::var_os("MPDOOM_NO_HWACCEL").is_some() {
+                    Vec::new()
+                } else {
+                    hwaccel_args()
+                };
+                if !hw.is_empty() {
                     av_log(&format!("video hwaccel: {:?}", hw));
-                    cmd.args(hw);
+                    cmd.args(&hw);
+                }
+                // For optical discs we know the codec is VAAPI-compatible.
+                // Keep frames on the GPU for scaling/padding and the RGBA
+                // conversion too; otherwise ffmpeg downloads NV12 and does
+                // those passes on the CPU (roughly 2-3x the CPU load).
+                let vaapi_filters = hw.get(1) == Some(&"vaapi") && (dvd || bd);
+                if vaapi_filters {
+                    cmd.args(["-hwaccel_output_format", "vaapi"]);
                 }
                 if dvd {
                     cmd.args(["-f", "dvdvideo"]);
                 }
-                if bd {
+                if using_stream {
+                    cmd.args(["-f", "mpegts"]);
+                } else if bd {
                     if let Some(pl) = crate::bluray::playlist(&path) {
                         cmd.args(["-playlist"]).arg(pl.to_string());
                     }
                     if let Some(ch) = crate::bluray::chapter(&path) {
                         cmd.args(["-chapter"]).arg(ch.to_string());
                     }
-                    crate::bluray::configure_command(&mut cmd);
                 }
-                if seek > 0.0 {
+                if seek > 0.0 && !using_stream {
                     cmd.args(["-ss"]).arg(format!("{:.3}", seek));
                 }
+                if let Some(out) = bd_stream {
+                    cmd.stdin(std::process::Stdio::from(out));
+                }
+                if bd {
+                    crate::bluray::configure_command(&mut cmd);
+                }
+                let vf = if vaapi_filters {
+                    format!(
+                        "scale_vaapi=w={tw}:h={th}:force_original_aspect_ratio=decrease:format=rgba,pad_vaapi=w={tw}:h={th}:x=(ow-iw)/2:y=(oh-ih)/2,hwdownload,format=rgba"
+                    )
+                } else {
+                    format!(
+                        "scale={tw}:{th}:force_original_aspect_ratio=decrease,pad={tw}:{th}:(ow-iw)/2:(oh-ih)/2"
+                    )
+                };
                 cmd.arg("-i").arg(&input)
-                    .args(["-an", "-sn", "-vf", &format!("scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2", tw, th, tw, th), "-pix_fmt", "rgba", "-f", "rawvideo", "-"])
+                    .args(["-an", "-sn", "-vf", &vf, "-pix_fmt", "rgba", "-f", "rawvideo", "-"])
                     .stdout(std::process::Stdio::piped())
                     .stderr(std::process::Stdio::piped())
                     .no_window();

@@ -44,16 +44,20 @@ fn disc_label(device: &str) -> Option<String> {
 }
 
 fn target_path(kind: &str, device: &str) -> PathBuf {
+    target_path_in(&videos_dir(), kind, device)
+}
+
+fn target_path_in(dir: &Path, kind: &str, device: &str) -> PathBuf {
     let label = disc_label(device)
         .map(|l| sanitize_win(&l))
         .filter(|l| !l.trim().is_empty())
         .unwrap_or_else(|| kind.to_ascii_lowercase());
-    let base = videos_dir().join(format!("{}.iso", label));
+    let base = dir.join(format!("{}.iso", label));
     if !base.exists() {
         return base;
     }
     for n in 2..1000 {
-        let p = videos_dir().join(format!("{} ({}).iso", label, n));
+        let p = dir.join(format!("{} ({}).iso", label, n));
         if !p.exists() {
             return p;
         }
@@ -186,10 +190,20 @@ mod tests {
     #[test]
     fn target_names_are_unique_and_sanitized() {
         let kind = "DVD";
-        let a = target_path(kind, "/dev/does-not-exist");
-        let b = target_path(kind, "/dev/does-not-exist");
+        // Use an isolated folder: the real Videos directory is shared with
+        // other tests running in parallel, which made this check flaky.
+        let dir = std::env::temp_dir().join(format!("mpdoom-disc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let a = target_path_in(&dir, kind, "/dev/does-not-exist");
+        let b = target_path_in(&dir, kind, "/dev/does-not-exist");
         assert_eq!(a, b, "same missing device should choose the same free name");
-        assert!(a.to_string_lossy().ends_with(".iso"));
+        assert!(a.to_string_lossy().ends_with("dvd.iso"));
         assert!(!a.to_string_lossy().contains('\u{0}'));
+        std::fs::write(&a, b"x").expect("create collision");
+        let c = target_path_in(&dir, kind, "/dev/does-not-exist");
+        assert_ne!(a, c, "existing file must not be overwritten");
+        assert!(c.to_string_lossy().ends_with(" (2).iso"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
