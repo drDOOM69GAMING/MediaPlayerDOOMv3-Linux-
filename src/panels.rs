@@ -1893,6 +1893,10 @@ impl PlayerApp {
             .default_width(520.0)
             .show(ctx, |ui| {
                 let th = self.theme_colors();
+                egui::ScrollArea::vertical()
+                    .max_height(640.0)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
                 let g = Color32::from_rgb(0, 255, 0);
                 let dim = Color32::from_rgb(100, 200, 100);
                 let acc = th.accent;
@@ -2027,6 +2031,7 @@ impl PlayerApp {
                 if retro_btn(ui, "CLOSE", Color32::from_rgb(0, 255, 0), th.btn_bg).clicked() {
                     self.show_help = false;
                 }
+                    });
             });
     }
 
