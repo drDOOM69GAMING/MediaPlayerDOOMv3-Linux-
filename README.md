@@ -82,10 +82,17 @@ Open a video directly (handy for episodes or testing) with:
 
 This builds the release binary, installs it to `~/.local/bin/mediaplayerofdoom`,
 adds the app icon under `~/.local/share/icons/hicolor/.../apps`, and registers
-`~/.local/share/applications/mediaplayerofdoom.desktop`. The app window uses the
-`mediaplayerofdoom` app-id, so KDE/GNOME can match the launcher/taskbar icon.
-On Windows, the same artwork is embedded into the exe as a multi-resolution
-`.ico` at build time.
+`~/.local/share/applications/mediaplayerofdoom.desktop`. It also creates
+`MediaPlayerDOOM.desktop` in the project folder and on your desktop.
+
+**Linux note:** a bare ELF binary cannot carry a file-manager icon (that is a
+Windows `.exe` feature). The icon comes from a `.desktop` launcher. Use
+`MediaPlayerDOOM.desktop` or the application menu, not a direct click on
+`target/release/mediaplayerofdoom`, if you want to see the artwork.
+
+The app window uses the `mediaplayerofdoom` app-id, so KDE/GNOME can match the
+launcher/taskbar icon. On Windows, the same artwork is embedded into the exe as
+a multi-resolution `.ico` at build time.
 
 ### Where files live on Linux
 
@@ -140,6 +147,8 @@ Full details, license texts, and donation links are in [THIRD-PARTY-NOTICES.md](
   - Tray icons continue to use the same artwork at several sizes, and the artwork also appears beside the app name in the player's title bar
   - If KDE still shows the old generic taskbar icon after installing, log out/in once or run `systemctl --user restart plasma-plasmashell` - Plasma caches taskbar icons
   - New `--windowed` / `-w` flag for opening in a normal window instead of fullscreen
+  - `install.sh` also creates `MediaPlayerDOOM.desktop` in the project folder and on the desktop, so the artwork is visible in Dolphin/launchers (a bare Linux executable always gets a generic file-manager icon)
+  - The installer refreshes KDE's icon cache/sycoca and adds rustup's cargo path if needed
 - Version bump to **v3.2.1**
 
 ## v3.2.0 changelog
