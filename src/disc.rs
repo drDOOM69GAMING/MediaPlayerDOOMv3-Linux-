@@ -304,7 +304,9 @@ pub fn dump_decrypted_dvd(
         ),
     });
     let mut cmd = Command::new("makemkvcon");
-    cmd.args(["-r", "backup", "disc:0"])
+    // MakeMKV does NOT decrypt backups unless --decrypt is passed; without it
+    // the resulting ISO is still encrypted and plays as chunky blocks.
+    cmd.args(["-r", "backup", "--decrypt", "disc:0"])
         .arg(&staging)
         .stdout(Stdio::null())
         .stderr(Stdio::piped());

@@ -189,6 +189,14 @@ This app is built on the work of some incredible open-source projects, and it wo
 
 Full details, license texts, and donation links are in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). If you can, consider donating to FFmpeg, yt-dlp, and MKVToolNix - they give this all away for free.
 
+## v3.2.27 changelog
+
+- **Decrypted ISO fix**
+  - MakeMKV’s `backup` mode does **not** decrypt by default; the v3.2.26 command omitted `--decrypt`, so it could produce another encrypted image
+  - The DECRYPT → ISO path now passes `--decrypt`, producing the clean playable ISO as intended
+  - MakeMKV still has to re-read the physical disc, so this mode is drive-speed-limited; the existing clean MKV created from the raw ISO is already available at `~/Videos/ID4-decrypted.mkv`
+- Version bump to **v3.2.27**
+
 ## v3.2.26 changelog
 
 - **Decrypted DVD → ISO**
