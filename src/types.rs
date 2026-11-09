@@ -106,9 +106,10 @@ pub enum Msg {
     CdProgress { track: usize, total: usize, text: String },
     CdDone { folder: String, files: Vec<String>, label: String },
     CdFail(String),
-    DiscDumpProgress(String),
+    DiscDumpProgress { done: u64, total: u64, text: String },
     DiscDumpDone(String),
     DiscDumpFail(String),
+    DiscDumpCancelled,
 }
 
 pub enum LibCmd {

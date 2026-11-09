@@ -24,6 +24,37 @@ use crate::{
 // Main UI panels: title bar, status bar, side panel, central deck panel and auxiliary windows (radio, help, add-radio, lyrics).
 
 impl PlayerApp {
+    /// Dump button + live progress + cancel, shared by the DVD/Blu-ray decks.
+    pub(crate) fn draw_disc_dump(&mut self, ui: &mut egui::Ui, kind: &str, th: &ThemePalette) {
+        if self.disc_dumping {
+            let frac = if self.disc_dump_total > 0 {
+                (self.disc_dump_done as f32 / self.disc_dump_total as f32).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let text = if self.disc_dump_total > 0 {
+                format!(
+                    "{:.0}%  {:.1}/{:.1} GB",
+                    frac * 100.0,
+                    self.disc_dump_done as f64 / 1e9,
+                    self.disc_dump_total as f64 / 1e9
+                )
+            } else {
+                format!("{} dumping...", kind)
+            };
+            ui.add(
+                egui::ProgressBar::new(frac)
+                    .desired_width(240.0)
+                    .text(text),
+            );
+            if retro_btn(ui, "CANCEL DUMP", Color32::from_rgb(255, 120, 120), th.btn_bg).clicked() {
+                self.cancel_disc_dump();
+            }
+        } else if retro_btn(ui, "DUMP DISC → ISO", th.fg, th.btn_bg).clicked() {
+            self.start_disc_dump(kind);
+        }
+    }
+
     pub(crate) fn draw_sleep_timer(&mut self, ctx: &egui::Context) {
         if self.fading {
             let t = (Instant::now() - self.fade_start).as_secs_f32();
@@ -670,10 +701,7 @@ impl PlayerApp {
                                     self.eject_dvd();
                                 }
                             }
-                            let dump_lbl = if self.disc_dumping { "DUMPING..." } else { "DUMP DISC → ISO" };
-                            if retro_btn(ui, dump_lbl, th.fg, th.btn_bg).clicked() && !self.disc_dumping {
-                                self.start_disc_dump("DVD");
-                            }
+                            self.draw_disc_dump(ui, "DVD", &th);
                         });
                     } else {
                         ui.label(
@@ -689,10 +717,7 @@ impl PlayerApp {
                             if retro_btn(ui, "OPEN DVD ISO...", th.fg, th.btn_bg).clicked() {
                                 self.open_dvd_iso();
                             }
-                            let dump_lbl = if self.disc_dumping { "DUMPING..." } else { "DUMP DISC → ISO" };
-                            if retro_btn(ui, dump_lbl, th.fg, th.btn_bg).clicked() && !self.disc_dumping {
-                                self.start_disc_dump("DVD");
-                            }
+                            self.draw_disc_dump(ui, "DVD", &th);
                         });
                     }
                 }
@@ -746,10 +771,7 @@ impl PlayerApp {
                                     self.eject_bluray();
                                 }
                             }
-                            let dump_lbl = if self.disc_dumping { "DUMPING..." } else { "DUMP DISC → ISO" };
-                            if retro_btn(ui, dump_lbl, th.fg, th.btn_bg).clicked() && !self.disc_dumping {
-                                self.start_disc_dump("BLU-RAY");
-                            }
+                            self.draw_disc_dump(ui, "BLU-RAY", &th);
                         });
                     } else {
                         ui.label(
@@ -765,10 +787,7 @@ impl PlayerApp {
                             if retro_btn(ui, "OPEN BLU-RAY ISO...", th.fg, th.btn_bg).clicked() {
                                 self.open_bluray_iso();
                             }
-                            let dump_lbl = if self.disc_dumping { "DUMPING..." } else { "DUMP DISC → ISO" };
-                            if retro_btn(ui, dump_lbl, th.fg, th.btn_bg).clicked() && !self.disc_dumping {
-                                self.start_disc_dump("BLU-RAY");
-                            }
+                            self.draw_disc_dump(ui, "BLU-RAY", &th);
                         });
                     }
                 }

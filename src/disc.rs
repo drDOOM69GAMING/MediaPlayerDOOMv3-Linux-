@@ -4,8 +4,9 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[cfg(not(windows))]
 use crate::tools::xdg_user_dir;
@@ -66,22 +67,48 @@ fn target_path_in(dir: &Path, kind: &str, device: &str) -> PathBuf {
 }
 
 fn device_size(device: &str) -> Option<u64> {
-    let out = Command::new("blockdev")
+    if let Ok(out) = Command::new("blockdev")
         .args(["--getsize64", device])
         .output()
-        .ok()?;
-    if out.status.success() {
-        return String::from_utf8_lossy(&out.stdout).trim().parse::<u64>().ok().filter(|s| *s > 0);
+    {
+        if out.status.success() {
+            if let Ok(n) = String::from_utf8_lossy(&out.stdout).trim().parse::<u64>() {
+                if n > 0 {
+                    return Some(n);
+                }
+            }
+        }
+    }
+    // Some optical devices/older util-linux builds do not answer
+    // blockdev --getsize64; lsblk reads the same size from sysfs.
+    if let Ok(out) = Command::new("lsblk")
+        .args(["-b", "-d", "-n", "-o", "SIZE", device])
+        .output()
+    {
+        if out.status.success() {
+            if let Ok(n) = String::from_utf8_lossy(&out.stdout).trim().parse::<u64>() {
+                if n > 0 {
+                    return Some(n);
+                }
+            }
+        }
     }
     None
 }
 
-/// Copy all sectors of `device` to `target` using dd. This preserves the whole
-/// disc, including menus and extras.
-pub fn dump(device: &str, kind: &str, tx: &Sender<Msg>) -> Result<PathBuf, String> {
+/// Copy all sectors of `device` to an ISO in `dir`. This preserves the whole
+/// disc, including menus and extras. `cancel` is checked while dd runs so the
+/// user (or app shutdown) can stop the copy and remove the partial image.
+pub fn dump(
+    device: &str,
+    kind: &str,
+    dir: &Path,
+    tx: &Sender<Msg>,
+    cancel: &AtomicBool,
+) -> Result<PathBuf, String> {
     #[cfg(windows)]
     {
-        let _ = (device, kind, tx);
+        let _ = (device, kind, dir, tx, cancel);
         return Err("disc imaging is only supported on Linux".into());
     }
     #[cfg(not(windows))]
@@ -89,19 +116,43 @@ pub fn dump(device: &str, kind: &str, tx: &Sender<Msg>) -> Result<PathBuf, Strin
     if !Path::new(device).exists() {
         return Err(format!("{} not found", device));
     }
-    let target = target_path(kind, device);
+    std::fs::create_dir_all(dir).map_err(|e| format!("cannot create destination folder: {}", e))?;
+    let target = target_path_in(dir, kind, device);
+    // Write to a clearly-partial name, then rename only after dd succeeds. A
+    // crash/kill can then never leave something that looks like a complete ISO.
+    let partial = target.with_file_name(format!(
+        "{}.{}.part",
+        target
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "disc.iso".to_string()),
+        std::process::id()
+    ));
     let total = device_size(device);
-    let _ = tx.send(Msg::DiscDumpProgress(format!(
-        "Dumping {} to {}...",
-        device,
-        target.display()
-    )));
-    let mut child = Command::new("dd")
-        .arg(format!("if={}", device))
-        .arg(format!("of={}", target.to_string_lossy()))
+    let _ = tx.send(Msg::DiscDumpProgress {
+        done: 0,
+        total: total.unwrap_or(0),
+        text: format!("Dumping {} to {}...", device, target.display()),
+    });
+    let mut cmd = Command::new("dd");
+    cmd.arg(format!("if={}", device))
+        .arg(format!("of={}", partial.to_string_lossy()))
         .args(["bs=1M", "conv=noerror,sync"])
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    // If the player dies (even with SIGKILL), make the kernel terminate dd so
+    // it cannot keep reading the disc after the window is gone.
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+                Ok(())
+            });
+        }
+    }
+    let mut child = cmd
         .spawn()
         .map_err(|e| format!("dd failed to start: {}", e))?;
 
@@ -116,14 +167,21 @@ pub fn dump(device: &str, kind: &str, tx: &Sender<Msg>) -> Result<PathBuf, Strin
     });
 
     let mut last_pct = u64::MAX;
+    let mut last_sent = Instant::now() - Duration::from_secs(5);
     loop {
+        if cancel.load(Ordering::Relaxed) {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = std::fs::remove_file(&partial);
+            return Err("cancelled".into());
+        }
         match child.try_wait() {
             Ok(Some(status)) => {
                 let err = err_handle
                     .and_then(|h| h.join().ok())
                     .unwrap_or_default();
                 if !status.success() {
-                    let _ = std::fs::remove_file(&target);
+                    let _ = std::fs::remove_file(&partial);
                     let tail = err.lines().rev().take(2).collect::<Vec<_>>().join(" | ");
                     return Err(format!(
                         "dd failed{}",
@@ -136,32 +194,46 @@ pub fn dump(device: &str, kind: &str, tx: &Sender<Msg>) -> Result<PathBuf, Strin
             Err(e) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                let _ = std::fs::remove_file(&target);
+                let _ = std::fs::remove_file(&partial);
                 return Err(format!("dd error: {}", e));
             }
         }
-        if let (Some(total), Ok(meta)) = (total, std::fs::metadata(&target)) {
-            if total > 0 {
-                let pct = (meta.len().saturating_mul(100) / total).min(100);
-                if pct != last_pct && (pct % 5 == 0 || pct >= 99) {
-                    last_pct = pct;
-                    let _ = tx.send(Msg::DiscDumpProgress(format!(
-                        "Dumping {}... {}%  ({:.1} / {:.1} GB)",
-                        kind,
-                        pct,
-                        meta.len() as f64 / 1e9,
-                        total as f64 / 1e9
-                    )));
-                }
-            }
+        let done = std::fs::metadata(&partial).map(|m| m.len()).unwrap_or(0);
+        let pct = total.map(|t| (done.saturating_mul(100) / t).min(100)).unwrap_or(0);
+        // Send at most twice a second; also send immediately when the whole
+        // percentage changes so the bar never appears stuck.
+        if last_sent.elapsed() >= Duration::from_millis(500)
+            || (total.is_some() && pct != last_pct)
+        {
+            last_pct = pct;
+            last_sent = Instant::now();
+            let text = match total {
+                Some(t) if t > 0 => format!(
+                    "Dumping {}... {}%  ({:.1} / {:.1} GB)",
+                    kind,
+                    pct,
+                    done as f64 / 1e9,
+                    t as f64 / 1e9
+                ),
+                _ => format!("Dumping {}... {:.1} GB", kind, done as f64 / 1e9),
+            };
+            let _ = tx.send(Msg::DiscDumpProgress {
+                done,
+                total: total.unwrap_or(0),
+                text,
+            });
         }
-        std::thread::sleep(Duration::from_millis(500));
+        std::thread::sleep(Duration::from_millis(200));
     }
 
-    let size = std::fs::metadata(&target).map(|m| m.len()).unwrap_or(0);
+    let size = std::fs::metadata(&partial).map(|m| m.len()).unwrap_or(0);
     if size == 0 {
-        let _ = std::fs::remove_file(&target);
+        let _ = std::fs::remove_file(&partial);
         return Err("dd produced an empty image".into());
+    }
+    if let Err(e) = std::fs::rename(&partial, &target) {
+        let _ = std::fs::remove_file(&partial);
+        return Err(format!("could not finalize image: {}", e));
     }
     Ok(target)
     }
@@ -178,13 +250,38 @@ mod tests {
             .unwrap()
             .as_nanos();
         let src = std::env::temp_dir().join(format!("mpdoom-dd-{}.bin", n));
+        let dir = std::env::temp_dir().join(format!("mpdoom-out-{}", n));
+        std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(&src, vec![0x5Au8; 1024 * 1024]).unwrap();
         let (tx, _rx) = std::sync::mpsc::channel();
-        let iso = dump(&src.to_string_lossy(), "DVD", &tx).expect("dd copy should work");
+        let cancel = AtomicBool::new(false);
+        let iso = dump(&src.to_string_lossy(), "DVD", &dir, &tx, &cancel)
+            .expect("dd copy should work");
         assert!(iso.is_file());
         assert_eq!(std::fs::metadata(&iso).unwrap().len(), 1024 * 1024);
         let _ = std::fs::remove_file(&iso);
         let _ = std::fs::remove_file(&src);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cancel_removes_partial_image() {
+        let n = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let src = std::env::temp_dir().join(format!("mpdoom-dd-cancel-{}.bin", n));
+        let dir = std::env::temp_dir().join(format!("mpdoom-out-cancel-{}", n));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&src, vec![0x5Au8; 8 * 1024 * 1024]).unwrap();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let cancel = AtomicBool::new(true);
+        let res = dump(&src.to_string_lossy(), "DVD", &dir, &tx, &cancel);
+        assert!(res.is_err(), "cancelled dump should fail");
+        let leftovers = std::fs::read_dir(&dir).unwrap().count();
+        assert_eq!(leftovers, 0, "partial image must be removed");
+        let _ = std::fs::remove_file(&src);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

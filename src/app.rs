@@ -237,6 +237,11 @@ pub(crate) struct PlayerApp {
     pub(crate) cd_physical: Option<CdInfo>,
     pub(crate) cd_ripping: bool,
     pub(crate) disc_dumping: bool,
+    pub(crate) disc_dump_done: u64,
+    pub(crate) disc_dump_total: u64,
+    pub(crate) disc_dump_text: String,
+    pub(crate) disc_dump_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub(crate) disc_dump_thread: Option<std::thread::JoinHandle<()>>,
     pub(crate) msg_tx: Sender<Msg>,
     pub(crate) last_cd_dir: Option<String>,
     /// Remembered library root, so startup doesn't re-walk every drive.
@@ -635,6 +640,11 @@ impl PlayerApp {
             cd_physical: None,
             cd_ripping: false,
             disc_dumping: false,
+            disc_dump_done: 0,
+            disc_dump_total: 0,
+            disc_dump_text: String::new(),
+            disc_dump_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            disc_dump_thread: None,
             msg_tx: msg_tx.clone(),
             last_cd_dir,
             music_root,
@@ -1693,17 +1703,24 @@ video_ended: false,
                 self.cd_ripping = false;
                 self.set_error(format!("CD rip failed: {}", e));
             }
-            Msg::DiscDumpProgress(text) => {
+            Msg::DiscDumpProgress { done, total, text } => {
                 self.disc_dumping = true;
+                self.disc_dump_done = done;
+                self.disc_dump_total = total;
+                self.disc_dump_text = text.clone();
                 self.set_status(text);
             }
             Msg::DiscDumpDone(path) => {
-                self.disc_dumping = false;
+                self.finish_disc_dump();
                 self.set_status(format!("Disc image written: {}", path));
             }
             Msg::DiscDumpFail(e) => {
-                self.disc_dumping = false;
+                self.finish_disc_dump();
                 self.set_error(format!("Disc dump failed: {}", e));
+            }
+            Msg::DiscDumpCancelled => {
+                self.finish_disc_dump();
+                self.set_status("Disc dump cancelled");
             }
             Msg::VideoCutDone { gen, path, cut, err } => {
                 if gen == self.video_gen {
@@ -1760,6 +1777,13 @@ impl std::ops::Drop for PlayerApp {
 
 impl eframe::App for PlayerApp {
     fn on_exit(&mut self) {
+        // Stop dd before the process goes away. Without this the orphaned
+        // child kept reading the disc after the window closed.
+        self.disc_dump_cancel
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(h) = self.disc_dump_thread.take() {
+            let _ = h.join();
+        }
         self.close_video();
         self.stop_radio();
         self.kill_audio_pipe();

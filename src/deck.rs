@@ -7,6 +7,7 @@ use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command};
+use std::sync::atomic::Ordering;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -733,18 +734,76 @@ impl PlayerApp {
             self.set_error("No optical drive found");
             return;
         };
+        // Don't make dd and the player fight over the same drive.
+        let playing_optical = self
+            .video_current
+            .as_deref()
+            .map(|p| crate::dvd::is_dvd(p) || crate::bluray::is_bluray(p))
+            .unwrap_or(false);
+        if playing_optical {
+            self.close_video();
+        }
+        // Let the user choose where the image goes. Cancelling the folder
+        // dialog cancels the dump (rather than silently writing to ~/Videos).
+        let start_dir = crate::disc::videos_dir();
+        let Some(dir) = rfd::FileDialog::new()
+            .set_title("Choose where to save the disc image")
+            .set_directory(&start_dir)
+            .pick_folder()
+        else {
+            self.set_status("Disc dump cancelled");
+            return;
+        };
+        if let Some(h) = self.disc_dump_thread.take() {
+            let _ = h.join();
+        }
+        self.disc_dump_cancel.store(false, Ordering::Relaxed);
         self.disc_dumping = true;
-        self.set_status(format!("Dumping {} disc from {}...", kind, device));
+        self.disc_dump_done = 0;
+        self.disc_dump_total = 0;
+        let text = format!("Dumping {} disc from {} to {}...", kind, device, dir.display());
+        self.disc_dump_text = text.clone();
+        self.set_status(text);
         let kind = kind.to_string();
         let tx = self.msg_tx.clone();
-        std::thread::spawn(move || match crate::disc::dump(&device, &kind, &tx) {
-            Ok(path) => {
-                let _ = tx.send(Msg::DiscDumpDone(path.to_string_lossy().to_string()));
+        let cancel = self.disc_dump_cancel.clone();
+        self.disc_dump_thread = Some(std::thread::spawn(move || {
+            match crate::disc::dump(&device, &kind, &dir, &tx, &cancel) {
+                Ok(path) => {
+                    let _ = tx.send(Msg::DiscDumpDone(path.to_string_lossy().to_string()));
+                }
+                Err(_) if cancel.load(Ordering::Relaxed) => {
+                    let _ = tx.send(Msg::DiscDumpCancelled);
+                }
+                Err(e) => {
+                    let _ = tx.send(Msg::DiscDumpFail(e));
+                }
             }
-            Err(e) => {
-                let _ = tx.send(Msg::DiscDumpFail(e));
-            }
-        });
+        }));
+    }
+
+    /// Stop a running disc dump, kill dd promptly, and remove the partial ISO.
+    pub(crate) fn cancel_disc_dump(&mut self) {
+        if !self.disc_dumping && self.disc_dump_thread.is_none() {
+            return;
+        }
+        self.disc_dump_cancel.store(true, Ordering::Relaxed);
+        if let Some(h) = self.disc_dump_thread.take() {
+            let _ = h.join();
+        }
+        self.disc_dumping = false;
+        self.set_status("Disc dump cancelled");
+    }
+
+    /// Clear dump state after the worker reports success/failure/cancel.
+    pub(crate) fn finish_disc_dump(&mut self) {
+        self.disc_dumping = false;
+        self.disc_dump_done = 0;
+        self.disc_dump_total = 0;
+        self.disc_dump_text.clear();
+        if let Some(h) = self.disc_dump_thread.take() {
+            let _ = h.join();
+        }
     }
 
     /// start_cd_rip ---------------------------------------------------------

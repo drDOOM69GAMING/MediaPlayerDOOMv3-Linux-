@@ -189,6 +189,17 @@ This app is built on the work of some incredible open-source projects, and it wo
 
 Full details, license texts, and donation links are in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). If you can, consider donating to FFmpeg, yt-dlp, and MKVToolNix - they give this all away for free.
 
+## v3.2.14 changelog
+
+- **Whole-disc dump overhaul (DVD + Blu-ray)**
+  - **Choose the destination folder** every time you click DUMP DISC → ISO (defaults to your Videos folder; cancelling the picker cancels the dump)
+  - **Live progress bar** with percentage and GB written, for Blu-rays as well as DVDs
+  - **CANCEL DUMP** button stops `dd`, kills the child process and deletes the partial image
+  - Closing/exiting the player now stops the dump immediately. The `dd` child is also tied to the app with `PR_SET_PDEATHSIG`, so it cannot keep reading the disc after a crash or forced exit
+  - Images are written as `<label>.iso.<pid>.part` and renamed to `.iso` only after the copy succeeds, so an interrupted dump can never be mistaken for a complete image
+  - Dumping now stops disc playback first, so `dd` and the movie player do not fight over the drive
+- Version bump to **v3.2.14**
+
 ## v3.2.13 changelog
 
 - **Blu-ray playback fixes**
