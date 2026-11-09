@@ -76,6 +76,93 @@ pub fn probe_video_info(path: &str) -> (u32, u32, f32) {
     }
 }
 
+#[derive(Clone, Copy, Default)]
+pub struct DvdMeta {
+    pub w: u32,
+    pub h: u32,
+    pub fps: f32,
+    pub dur: f32,
+}
+
+fn dvd_meta_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String, DvdMeta>> {
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, DvdMeta>>,
+    > = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn parse_rate(s: &str) -> f32 {
+    if let Some((n, d)) = s.split_once('/') {
+        let n: f32 = n.trim().parse().unwrap_or(0.0);
+        let d: f32 = d.trim().parse().unwrap_or(0.0);
+        if d > 0.0 { n / d } else { 0.0 }
+    } else {
+        s.trim().parse().unwrap_or(0.0)
+    }
+}
+
+/// One cached ffprobe pass per DVD: dimensions, frame rate and duration. A
+/// seek used to spawn a fresh duration probe while the new video/audio readers
+/// were opening; on a real DVD that extra seek thrashed the drive and corrupted
+/// the video. The cache means only the first open touches the disc.
+pub fn probe_dvd_meta(source: &str) -> Option<DvdMeta> {
+    let cache = dvd_meta_cache();
+    if let Ok(m) = cache.lock() {
+        if let Some(v) = m.get(source) {
+            return Some(*v);
+        }
+    }
+    let fp = ffprobe_path();
+    if !fp.is_file() {
+        return None;
+    }
+    let out = Command::new(fp)
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height,avg_frame_rate:format=duration",
+            "-of",
+            "json",
+            "-f",
+            "dvdvideo",
+            source,
+        ])
+        .no_window()
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
+    let st = v.get("streams")?.as_array()?.first()?;
+    let w = st.get("width")?.as_u64()? as u32;
+    let h = st.get("height")?.as_u64()? as u32;
+    let fps = parse_rate(st.get("avg_frame_rate")?.as_str()?);
+    let dur = v
+        .get("format")
+        .and_then(|f| f.get("duration"))
+        .and_then(|d| d.as_str())
+        .and_then(|d| d.parse::<f32>().ok())
+        .unwrap_or(0.0);
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let meta = DvdMeta { w, h, fps, dur };
+    if let Ok(mut m) = cache.lock() {
+        m.insert(source.to_string(), meta);
+    }
+    Some(meta)
+}
+
+pub fn clear_dvd_meta_cache() {
+    if let Ok(mut m) = dvd_meta_cache().lock() {
+        m.clear();
+    }
+}
+
 /// Read chapter markers via ffprobe: `(start_secs, end_secs, title)`.
 ///
 /// Anime/MKV releases frequently ship named chapters ("Opening", "Part A",
@@ -446,11 +533,20 @@ pub fn cut_video_file(source: &str, intro_end: f32, credits_start: f32) -> Resul
 
 /// Choose an English audio stream for optical discs, falling back to the first
 /// audio stream. Returned in ffmpeg `-map 0:a:N` form.
+fn audio_map_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String, String>> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, String>>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+pub fn clear_audio_map_cache() {
+    if let Ok(mut m) = audio_map_cache().lock() {
+        m.clear();
+    }
+}
+
 pub fn preferred_audio_map(path: &str) -> Option<String> {
-    use std::collections::HashMap;
-    use std::sync::{Mutex, OnceLock};
-    static CACHE: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let cache = audio_map_cache();
     if let Ok(m) = cache.lock() {
         if let Some(v) = m.get(path) {
             return Some(v.clone());

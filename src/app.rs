@@ -286,6 +286,8 @@ pub(crate) struct PlayerApp {
     pub(crate) convert_dest: Option<String>,
     pub(crate) convert_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub(crate) convert_thread: Option<std::thread::JoinHandle<()>>,
+    /// Dev/automation hook: seek a playing video to this time once, then clear.
+    pub(crate) auto_seek: Option<f32>,
     pub(crate) msg_tx: Sender<Msg>,
     pub(crate) last_cd_dir: Option<String>,
     /// Remembered library root, so startup doesn't re-walk every drive.
@@ -743,6 +745,9 @@ impl PlayerApp {
             convert_dest: None,
             convert_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             convert_thread: None,
+            auto_seek: std::env::var("MPDOOM_AUTO_SEEK")
+                .ok()
+                .and_then(|v| v.parse::<f32>().ok()),
             msg_tx: msg_tx.clone(),
             last_cd_dir,
             music_root,
@@ -2434,6 +2439,12 @@ impl eframe::App for PlayerApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.ctx = ctx.clone();
+        if let Some(t) = self.auto_seek {
+            if self.video_on && self.video_cur_secs > 1.0 {
+                self.auto_seek = None;
+                self.seek_video(t);
+            }
+        }
         ctx.request_repaint_after(std::time::Duration::from_millis(33));
         if !self.fs_asserted {
             self.fs_asserted = true;

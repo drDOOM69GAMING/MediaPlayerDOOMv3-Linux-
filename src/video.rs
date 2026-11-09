@@ -31,6 +31,13 @@ impl PlayerApp {
             return;
         }
         let wrapped = crate::dvd::wrap(source);
+        // Optical discs must never resume from a stale timestamp: an input
+        // seek on a real DVD can land in a bad cell and produce persistent
+        // macroblocking. Also drop cached DVD probes so a new disc is probed.
+        self.video_positions
+            .retain(|k, _| !k.starts_with(crate::dvd::PREFIX));
+        crate::ffmpeg::clear_dvd_meta_cache();
+        crate::ffmpeg::clear_audio_map_cache();
         self.video_queue = vec![wrapped.clone()];
         self.video_queue_idx = 0;
         self.play_video_item(wrapped);

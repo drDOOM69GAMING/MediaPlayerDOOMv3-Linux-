@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use lofty::prelude::*;
 use crate::consts::NO_WINDOW;
-use crate::ffmpeg::{bounds_from_chapters, cut_video_file, detect_credit_start, detect_intro_end, fit_video_dims, probe_chapters, probe_video_duration, probe_video_info, video_audio_levels};
+use crate::ffmpeg::{bounds_from_chapters, cut_video_file, detect_credit_start, detect_intro_end, fit_video_dims, probe_chapters, probe_dvd_meta, probe_video_duration, probe_video_info, video_audio_levels};
 use crate::files::*;
 use crate::library::{art_cache_ok, art_cache_path, write_art_cache};
 use crate::log::av_log;
@@ -321,12 +321,26 @@ LibCmd::Scan(dir) => {
                 // Optical discs are slow to open and every ffprobe pass makes
                 // the drive seek. Use known broadcast/BD dimensions for the
                 // first frame; local files still get a real probe.
+                // DVD metadata is probed once and cached. Re-probing on every
+                // seek added another disc reader while the new video/audio
+                // readers were opening, which corrupted DVD playback. PAL
+                // discs also need their real 720x576/25 values, not NTSC.
+                let dvd_meta = if dvd {
+                    probe_dvd_meta(crate::dvd::source(&path))
+                } else {
+                    None
+                };
                 let (sw, sh, sfps) = if bd {
                     (1920, 1080, 23.976)
-                } else if dvd {
-                    (720, 480, 29.97)
+                } else if let Some(m) = dvd_meta {
+                    (m.w, m.h, if m.fps > 0.0 { m.fps } else { 29.97 })
                 } else {
-                    probe_video_info(&path)
+                    let p = probe_video_info(&path);
+                    if p.0 == 0 || p.1 == 0 {
+                        if dvd { (720, 480, 29.97) } else { p }
+                    } else {
+                        p
+                    }
                 };
                 av_log(&format!("open: probe_info {}x{} fps={} took {}ms", sw, sh, sfps, t_open.elapsed().as_millis()));
                 let (tw, th) = fit_video_dims(sw, sh, 1920, 1080);
@@ -415,6 +429,14 @@ LibCmd::Scan(dir) => {
                     format!(
                         "scale_vaapi=w={tw}:h={th}:force_original_aspect_ratio=decrease:format=rgba,pad_vaapi=w={tw}:h={th}:x=(ow-iw)/2:y=(oh-ih)/2,hwdownload,format=rgba"
                     )
+                } else if dvd {
+                    // DVDs are usually 480i/576i (or soft-telecined). Scaling
+                    // interlaced fields directly produces combing/tearing that
+                    // looks like corruption, so deinterlace first. Progressive
+                    // frames are passed through by deint=interlaced.
+                    format!(
+                        "yadif=deint=interlaced,scale={tw}:{th}:force_original_aspect_ratio=decrease,pad={tw}:{th}:(ow-iw)/2:(oh-ih)/2"
+                    )
                 } else {
                     format!(
                         "scale={tw}:{th}:force_original_aspect_ratio=decrease,pad={tw}:{th}:(ow-iw)/2:(oh-ih)/2"
@@ -434,12 +456,16 @@ LibCmd::Scan(dir) => {
                 };
                 av_log(&format!("open: ffmpeg spawned at {}ms", t_open.elapsed().as_millis()));
                 if !bd {
-                    let tx2 = tx.clone();
-                    let p = path.clone();
-                    std::thread::spawn(move || {
-                        let dur = probe_video_duration(&p);
-                        let _ = tx2.send(Msg::VideoMeta { gen, dur });
-                    });
+                    if let Some(m) = dvd_meta.filter(|m| m.dur > 0.0) {
+                        let _ = tx.send(Msg::VideoMeta { gen, dur: m.dur });
+                    } else {
+                        let tx2 = tx.clone();
+                        let p = path.clone();
+                        std::thread::spawn(move || {
+                            let dur = probe_video_duration(&p);
+                            let _ = tx2.send(Msg::VideoMeta { gen, dur });
+                        });
+                    }
                 }
                 if let Some(stderr) = child.stderr.take() {
                     // ffmpeg's stderr used to go to Stdio::null(), so a file it

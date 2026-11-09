@@ -189,6 +189,16 @@ This app is built on the work of some incredible open-source projects, and it wo
 
 Full details, license texts, and donation links are in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). If you can, consider donating to FFmpeg, yt-dlp, and MKVToolNix - they give this all away for free.
 
+## v3.2.23 changelog
+
+- **DVD seeking fixed for real discs**
+  - The chunky pixelation was not CSS/libdvdcss: libdvdcss was already installed and a single ffmpeg reader produced clean frames. The player was starting an extra ffprobe duration read on every seek while the new video and audio readers were opening; on a real DVD that thrashed the drive and corrupted the video
+  - DVD metadata (dimensions, frame rate, duration) is now probed once and cached; seeks reuse it and start only the video/audio readers
+  - DVDs no longer resume from a saved timestamp; a stale input seek on a real disc could land in a bad cell and stay macroblocked
+  - Real PAL/NTSC dimensions and frame rate are probed instead of assuming 720x480/29.97
+  - DVD video is deinterlaced (`yadif=deint=interlaced`) before scaling, removing combing/tearing on 480i/576i discs
+- Version bump to **v3.2.23**
+
 ## v3.2.22 changelog
 
 - **Converter window close fixed**
