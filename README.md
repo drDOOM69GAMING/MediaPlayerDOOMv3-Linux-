@@ -189,6 +189,14 @@ This app is built on the work of some incredible open-source projects, and it wo
 
 Full details, license texts, and donation links are in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). If you can, consider donating to FFmpeg, yt-dlp, and MKVToolNix - they give this all away for free.
 
+## v3.2.22 changelog
+
+- **Converter window close fixed**
+  - The in-window **CLOSE** button now actually closes the converter. The window state was being overwritten at the end of the frame, undoing the click
+  - Added a **HIDE** button while a conversion is running; the conversion continues in the background and the Convert button reopens the progress window
+  - The window’s X button now closes/hides it correctly too
+- Version bump to **v3.2.22**
+
 ## v3.2.21 changelog
 
 - **Converter fixes**

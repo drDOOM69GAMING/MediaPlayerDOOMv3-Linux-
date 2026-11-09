@@ -1623,6 +1623,7 @@ impl PlayerApp {
     pub(crate) fn show_convert_window(&mut self, ctx: &egui::Context) {
         let th = self.theme_colors();
         let mut open = self.convert_open;
+        let mut close_requested = false;
         egui::Window::new("CONVERT MUSIC")
             .resizable(false)
             .collapsible(false)
@@ -1704,16 +1705,24 @@ impl PlayerApp {
                             .monospace()
                             .size(9.0),
                     );
-                    if retro_btn(
-                        ui,
-                        "CANCEL CONVERSION",
-                        Color32::from_rgb(255, 120, 120),
-                        th.btn_bg,
-                    )
-                    .clicked()
-                    {
-                        self.cancel_convert();
-                    }
+                    ui.horizontal(|ui| {
+                        if retro_btn(
+                            ui,
+                            "CANCEL CONVERSION",
+                            Color32::from_rgb(255, 120, 120),
+                            th.btn_bg,
+                        )
+                        .clicked()
+                        {
+                            self.cancel_convert();
+                        }
+                        if retro_btn(ui, "HIDE", th.btn_fg, th.btn_bg)
+                            .on_hover_text("Hide this window; the conversion keeps running")
+                            .clicked()
+                        {
+                            close_requested = true;
+                        }
+                    });
                 } else {
                     ui.horizontal(|ui| {
                         if retro_btn(ui, "START CONVERSION", th.playing_fg, th.btn_bg).clicked() {
@@ -1725,12 +1734,14 @@ impl PlayerApp {
                             }
                         }
                         if retro_btn(ui, "CLOSE", th.btn_fg, th.btn_bg).clicked() {
-                            self.convert_open = false;
+                            close_requested = true;
                         }
                     });
                 }
             });
-        self.convert_open = open;
+        // The in-window CLOSE/HIDE buttons and the window X are both honoured.
+        // (Assigning `open` alone used to undo the in-window CLOSE click.)
+        self.convert_open = open && !close_requested;
     }
 
     pub(crate) fn show_help_window(&mut self, ctx: &egui::Context) {
