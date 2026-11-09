@@ -189,6 +189,15 @@ This app is built on the work of some incredible open-source projects, and it wo
 
 Full details, license texts, and donation links are in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). If you can, consider donating to FFmpeg, yt-dlp, and MKVToolNix - they give this all away for free.
 
+## v3.2.21 changelog
+
+- **Converter fixes**
+  - Output folder now matches the folder you picked: `~/Music/<picked folder> (<format>)`, e.g. `~/Music/Alapalooza (MP3)`. Subfolders inside the picked folder are still preserved
+  - Closing or cancelling during conversion no longer freezes the UI. The folder scan is cancellable, cancellation is checked between files, `ffmpeg` is killed, and app shutdown no longer waits on the conversion worker
+  - Quality 1–10 is verified end-to-end: MP3/AAC/Opus/WMA change bitrate, FLAC changes compression level, WAV/AIFF/ALAC change bit depth. The slider label now says **lossless** for FLAC/ALAC and **no lossy compression** for PCM, so small size changes are not mistaken for a no-op
+  - Embedded artwork is preserved for MP3/AAC/FLAC/ALAC; tags are preserved everywhere
+- Version bump to **v3.2.21**
+
 ## v3.2.20 changelog
 
 - **New CONVERT MUSIC mode**

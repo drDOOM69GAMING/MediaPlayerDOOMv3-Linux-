@@ -894,6 +894,25 @@ video_ended: false,
             if let Ok(src) = std::env::var("MPDOOM_CONVERT_SRC") {
                 app.convert_src = Some(src);
             }
+            if let Ok(f) = std::env::var("MPDOOM_CONVERT_FORMAT") {
+                app.convert_format = match f.to_ascii_lowercase().as_str() {
+                    "mp3" => crate::convert::ConvertFormat::Mp3,
+                    "aac" | "m4a" => crate::convert::ConvertFormat::Aac,
+                    "flac" => crate::convert::ConvertFormat::Flac,
+                    "ogg" | "vorbis" => crate::convert::ConvertFormat::Vorbis,
+                    "opus" => crate::convert::ConvertFormat::Opus,
+                    "wav" => crate::convert::ConvertFormat::Wav,
+                    "aiff" => crate::convert::ConvertFormat::Aiff,
+                    "alac" => crate::convert::ConvertFormat::Alac,
+                    "wma" => crate::convert::ConvertFormat::Wma,
+                    _ => crate::convert::ConvertFormat::Same,
+                };
+            }
+            if let Ok(q) = std::env::var("MPDOOM_CONVERT_QUALITY") {
+                if let Ok(v) = q.parse::<u8>() {
+                    app.convert_quality = v.clamp(1, 10);
+                }
+            }
             if std::env::var_os("MPDOOM_CONVERT_START").is_some() {
                 app.start_convert();
             }
@@ -2342,7 +2361,7 @@ impl PlayerApp {
         self.convert_text = format!("Scanning {}...", src);
         let fmt = self.convert_format;
         let quality = self.convert_quality;
-        self.convert_dest = Some(crate::convert::destination(fmt).display().to_string());
+        self.convert_dest = Some(crate::convert::destination_for(&src, fmt).display().to_string());
         let tx = self.msg_tx.clone();
         let cancel = self.convert_cancel.clone();
         self.convert_thread = Some(std::thread::spawn(move || {
@@ -2371,11 +2390,11 @@ impl PlayerApp {
         }
         self.convert_cancel
             .store(true, std::sync::atomic::Ordering::Relaxed);
-        if let Some(h) = self.convert_thread.take() {
-            let _ = h.join();
-        }
-        self.convert_active = false;
-        self.set_status("Conversion cancelled");
+        // Do not join on the UI thread: a large folder scan or a stuck ffmpeg
+        // must not freeze the player. The worker sends ConvertCancelled and
+        // finish_convert joins it after it has actually stopped.
+        self.convert_text = "Cancelling...".to_string();
+        self.set_status("Cancelling conversion...");
     }
 
     fn finish_convert(&mut self) {
@@ -2389,11 +2408,10 @@ impl PlayerApp {
 impl eframe::App for PlayerApp {
     fn on_exit(&mut self) {
         // Stop any active music conversion before the process goes away.
+        // Do not join here: a huge folder scan or a stuck child must not make
+        // closing the window hang. ffmpeg is tied to the app with PDEATHSIG.
         self.convert_cancel
             .store(true, std::sync::atomic::Ordering::Relaxed);
-        if let Some(h) = self.convert_thread.take() {
-            let _ = h.join();
-        }
         // Stop dd before the process goes away. Without this the orphaned
         // child kept reading the disc after the window closed.
         self.disc_dump_cancel

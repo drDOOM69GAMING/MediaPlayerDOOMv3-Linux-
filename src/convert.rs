@@ -10,8 +10,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
-use crate::files::collect_audio;
-use crate::tools::{ffmpeg_path, ffprobe_path, xdg_user_dir};
+use crate::files::collect_audio_cancellable;
+use crate::tools::{ffmpeg_path, ffprobe_path};
 use crate::types::Msg;
 use crate::util::home_dir;
 
@@ -65,6 +65,21 @@ impl ConvertFormat {
         }
     }
 
+    fn folder_label(self) -> &'static str {
+        match self {
+            ConvertFormat::Same => "converted",
+            ConvertFormat::Mp3 => "MP3",
+            ConvertFormat::Aac => "AAC",
+            ConvertFormat::Flac => "FLAC",
+            ConvertFormat::Vorbis => "OGG",
+            ConvertFormat::Opus => "OPUS",
+            ConvertFormat::Wav => "WAV",
+            ConvertFormat::Aiff => "AIFF",
+            ConvertFormat::Alac => "ALAC",
+            ConvertFormat::Wma => "WMA",
+        }
+    }
+
     pub fn quality_label(self, q: u8) -> String {
         let q = q.clamp(1, 10);
         match self {
@@ -74,10 +89,14 @@ impl ConvertFormat {
             | ConvertFormat::Wma => format!("{} kbps", lossy_bitrate(q)),
             ConvertFormat::Opus => format!("{} kbps", opus_bitrate(q)),
             ConvertFormat::Vorbis => format!("q {}", q),
-            ConvertFormat::Flac => format!("compression level {}", flac_level(q)),
-            ConvertFormat::Wav | ConvertFormat::Aiff => format!("{}-bit PCM", pcm_bits(q)),
+            ConvertFormat::Flac => {
+                format!("compression level {} (lossless)", flac_level(q))
+            }
+            ConvertFormat::Wav | ConvertFormat::Aiff => {
+                format!("{}-bit PCM (no lossy compression)", pcm_bits(q))
+            }
             ConvertFormat::Alac => format!(
-                "{}-bit ALAC",
+                "{}-bit ALAC (lossless)",
                 if q <= 5 { 16 } else { 24 }
             ),
         }
@@ -234,11 +253,12 @@ fn probe_codec(path: &str) -> Option<String> {
 }
 
 pub fn music_dir() -> PathBuf {
-    xdg_user_dir("XDG_MUSIC_DIR")
+    crate::tools::music_dir()
         .or_else(|| home_dir().map(|h| h.join("Music")))
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
+/// Fallback destination used before a source folder has been chosen.
 pub fn destination(format: ConvertFormat) -> PathBuf {
     // Dev/automation override so conversion tests never write into the real
     // music folder. Normal launches never set this.
@@ -247,9 +267,24 @@ pub fn destination(format: ConvertFormat) -> PathBuf {
     }
     let name = match format {
         ConvertFormat::Same => "Converted (same format)".to_string(),
-        _ => format!("Converted {}", format.dest_label()),
+        _ => format!("Converted {}", format.folder_label()),
     };
     music_dir().join(name)
+}
+
+/// Destination named after the folder the user picked, e.g.
+/// `~/Music/My Album (MP3)`.
+pub fn destination_for(src: &str, format: ConvertFormat) -> PathBuf {
+    if let Ok(d) = std::env::var("MPDOOM_CONVERT_DEST") {
+        return PathBuf::from(d);
+    }
+    let base = music_dir();
+    let picked = Path::new(src)
+        .file_name()
+        .map(|n| crate::util::sanitize_win(&n.to_string_lossy()))
+        .filter(|n| !n.trim().is_empty())
+        .unwrap_or_else(|| "Converted".to_string());
+    base.join(format!("{} ({})", picked, format.folder_label()))
 }
 
 #[derive(Clone)]
@@ -266,7 +301,7 @@ pub fn convert_folder(
     tx: &Sender<Msg>,
     cancel: &AtomicBool,
 ) -> Result<ConvertResult, String> {
-    let dest = destination(format);
+    let dest = destination_for(src, format);
     convert_folder_to(src, format, quality, &dest, tx, cancel)
 }
 
@@ -281,7 +316,10 @@ pub fn convert_folder_to(
     if !Path::new(src).is_dir() {
         return Err(format!("{} is not a folder", src));
     }
-    let files_all = collect_audio(src);
+    let files_all = collect_audio_cancellable(src, cancel);
+    if cancel.load(Ordering::Relaxed) {
+        return Err("cancelled".into());
+    }
     // If the user picked a folder that contains the destination (e.g. their
     // whole Music folder), don't re-convert previous output.
     let dest_canon = dest_root
@@ -296,6 +334,15 @@ pub fn convert_folder_to(
     }
     std::fs::create_dir_all(dest_root)
         .map_err(|e| format!("cannot create {}: {}", dest_root.display(), e))?;
+    // Remove hidden partial files left by a previous crash/forced exit.
+    if let Ok(rd) = std::fs::read_dir(dest_root) {
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            if name.starts_with(".mpdoom-convert-") {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
     let total = files.len();
     let _ = tx.send(Msg::ConvertProgress {
         done: 0,
@@ -491,6 +538,52 @@ mod tests {
     use super::*;
 
     #[test]
+    fn quality_changes_mp3_bitrate() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("mpdoom-convert-quality-{}", stamp));
+        let src = root.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let wav = src.join("tone.wav");
+        let st = Command::new(ffmpeg_path())
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=2",
+                "-c:a",
+                "pcm_s16le",
+            ])
+            .arg(&wav)
+            .status()
+            .expect("generate wav");
+        assert!(st.success());
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let cancel = AtomicBool::new(false);
+        let out_lo = root.join("lo");
+        let out_hi = root.join("hi");
+        convert_folder_to(&src.to_string_lossy(), ConvertFormat::Mp3, 1, &out_lo, &tx, &cancel)
+            .expect("low quality");
+        convert_folder_to(&src.to_string_lossy(), ConvertFormat::Mp3, 10, &out_hi, &tx, &cancel)
+            .expect("high quality");
+        let lo = std::fs::metadata(out_lo.join("tone.mp3")).unwrap().len();
+        let hi = std::fs::metadata(out_hi.join("tone.mp3")).unwrap().len();
+        assert!(
+            hi > lo + lo / 2,
+            "quality 10 output ({} bytes) should be much larger than quality 1 ({} bytes)",
+            hi,
+            lo
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn preserves_embedded_cover_art() {
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -499,7 +592,6 @@ mod tests {
         let root = std::env::temp_dir().join(format!("mpdoom-convert-art-{}", stamp));
         let src = root.join("src");
         std::fs::create_dir_all(&src).unwrap();
-        let wav = root.join("tone.wav");
         let icon = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/app_icon.jpg");
         let source = src.join("cover.flac");
         let st = Command::new(ffmpeg_path())
@@ -559,8 +651,17 @@ mod tests {
                 file.display()
             );
         }
-        let _ = std::fs::remove_file(&wav);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn destination_uses_the_picked_folder_name() {
+        let p = destination_for("/tmp/Some Album", ConvertFormat::Mp3);
+        assert!(
+            p.to_string_lossy().ends_with("Some Album (MP3)"),
+            "unexpected destination {}",
+            p.display()
+        );
     }
 
     #[test]

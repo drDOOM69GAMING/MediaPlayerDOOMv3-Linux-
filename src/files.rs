@@ -79,6 +79,65 @@ pub fn collect_audio(dir: &str) -> Vec<String> {
     out
 }
 
+/// Same as `collect_audio`, but stops promptly when `cancel` is set. Used by
+/// folder conversion so closing the app during a large-library scan does not
+/// freeze the UI while it waits for the walk to finish.
+pub fn collect_audio_cancellable(
+    dir: &str,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut visited = HashSet::new();
+    walk_audio_cancellable(Path::new(dir), &mut out, &mut visited, cancel);
+    out.sort();
+    out
+}
+
+fn walk_audio_cancellable(
+    dir: &Path,
+    out: &mut Vec<String>,
+    visited: &mut HashSet<PathBuf>,
+    cancel: &std::sync::atomic::AtomicBool,
+) {
+    use std::sync::atomic::Ordering;
+    if cancel.load(Ordering::Relaxed) {
+        return;
+    }
+    let canon = dir.canonicalize().ok();
+    if let Some(c) = &canon {
+        if !visited.insert(c.clone()) {
+            return;
+        }
+    }
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    for e in rd.flatten() {
+        if cancel.load(Ordering::Relaxed) {
+            return;
+        }
+        let Ok(ft) = e.file_type() else { continue };
+        let p = e.path();
+        if ft.is_dir() {
+            if let Some(name) = p.file_name().map(|n| n.to_string_lossy().to_string()) {
+                if skip_scan_dir(&name) {
+                    continue;
+                }
+            }
+            walk_audio_cancellable(&p, out, visited, cancel);
+        } else if ft.is_symlink() && p.is_dir() {
+            if let Some(name) = p.file_name().map(|n| n.to_string_lossy().to_string()) {
+                if !skip_scan_dir(&name) {
+                    walk_audio_cancellable(&p, out, visited, cancel);
+                }
+            }
+        } else if ft.is_file() || (ft.is_symlink() && p.is_file()) {
+            let s = p.to_string_lossy().to_string();
+            if is_audio(&s) {
+                out.push(s);
+            }
+        }
+    }
+}
+
 pub fn collect_audio_report(dir: &str, tx: &Sender<Msg>) -> Vec<String> {
     let mut out = Vec::new();
     let mut last = std::time::Instant::now();

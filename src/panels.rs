@@ -1668,7 +1668,11 @@ impl PlayerApp {
                             .clamping(egui::SliderClamping::Always),
                     );
                 });
-                let dest = crate::convert::destination(self.convert_format);
+                let dest = if let Some(src) = &self.convert_src {
+                    crate::convert::destination_for(src, self.convert_format)
+                } else {
+                    crate::convert::destination(self.convert_format)
+                };
                 ui.label(
                     RichText::new(format!("SAVE TO  {}", dest.display()))
                         .color(Color32::from_gray(150))
