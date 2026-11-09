@@ -74,12 +74,19 @@ pub fn spawn_radio_stream(url: &str, ffmpeg: &Path) -> Result<(Child, PipeSource
 }
 
 pub fn spawn_video_audio(path: &str, ffmpeg: &Path, seek: f32) -> Result<(Child, PipeSource), String> {
-    let mut args: Vec<String> = vec!["-hide_banner".to_string(), "-loglevel".to_string(), "error".to_string(), "-re".to_string()];
+    let dvd = crate::dvd::is_dvd(path);
+    let input = crate::dvd::source(path);
+    let mut args: Vec<String> = vec!["-hide_banner".to_string(), "-loglevel".to_string(), "error".to_string()];
+    if dvd {
+        args.push("-f".into());
+        args.push("dvdvideo".into());
+    }
+    args.push("-re".into());
     if seek > 0.0 {
         args.push("-ss".to_string());
         args.push(format!("{:.3}", seek));
     }
-    args.extend(["-i", path, "-vn", "-ac", "2", "-ar", "44100", "-f", "s16le", "-"].iter().map(|s| s.to_string()));
+    args.extend(["-i", input, "-vn", "-ac", "2", "-ar", "44100", "-f", "s16le", "-"].iter().map(|s| s.to_string()));
     let mut child = Command::new(ffmpeg.to_string_lossy().to_string())
         .args(&args)
         .stdout(std::process::Stdio::piped())

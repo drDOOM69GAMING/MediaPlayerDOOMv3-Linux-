@@ -10,6 +10,7 @@ A retro DOOM-styled media player rendered in egui. Tape, CD, and Radio faces on 
   - **TAPE**: auto-reverse cassette with counters, winding, and tune slider
   - **CD**: spinning disc tray with track counter, LCDs, in-order playback, and **physical audio CD** support on Linux: discs in the optical tray are detected automatically and can be ripped as lossless FLAC (tags, cover art and correct `Artist/Album/01 - Title.flac` naming)
   - **RADIO**: FM/AM dial with click-and-drag tuning, presets, SCAN, live web streams, and an **ADD STATION** dialog to save your own FM/AM stream presets
+  - **DVD**: play a DVD movie directly from the optical drive or from an `.iso`/`.img` image using ffmpeg's `dvdvideo` demuxer; encrypted discs are decrypted with libdvdcss when installed
 - **Bands catalog**: songs grouped by artist folder (A-Z, scrollable), rebuilt from whatever folder you add
 - **Play order switch**: flip the retro wall switch under BANDS. ON = random shuffle, OFF = normal in-order playback
 - **Smart shuffle**: weighted by your listening history, or plain shuffle
@@ -37,7 +38,7 @@ A retro DOOM-styled media player rendered in egui. Tape, CD, and Radio faces on 
 
 **Linux (tested on CachyOS/KDE Plasma on both Wayland and X11)**
 - Rust toolchain (`rustup` recommended, or the distro's `rust`)
-- Runtime tools: `ffmpeg` (includes ffprobe), `mkvmerge` (MKVToolNix), and `cdparanoia` for CD ripping
+- Runtime tools: `ffmpeg` (includes ffprobe), `mkvmerge` (MKVToolNix), `cdparanoia` for CD ripping, and libdvdread/libdvdnav for DVD playback (ffmpeg normally pulls these in). `libdvdcss` is needed only for encrypted commercial DVDs
 - ALSA (PipeWire/PulseAudio provide it), plus X11 or Wayland libraries
 - An XDG desktop portal and backend for the file pickers (KDE/GNOME/XFCE provide one)
 - `xdg-utils` for "show in folder" (the app falls back to `gio`, `kioclient`, `thunar`, `nautilus`)
@@ -116,6 +117,12 @@ Start on the CD deck directly (useful with a disc in the tray):
 ./target/release/mediaplayerofdoom --mode cd
 ```
 
+Play a DVD ISO directly (or use the DVD deck for the optical drive):
+
+```bash
+./target/release/mediaplayerofdoom --dvd "/path/movie.iso"
+```
+
 ### Install with icon and launcher (Linux)
 
 ```bash
@@ -178,6 +185,18 @@ This app is built on the work of some incredible open-source projects, and it wo
 - The **Rust** language and its crate ecosystem.
 
 Full details, license texts, and donation links are in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). If you can, consider donating to FFmpeg, yt-dlp, and MKVToolNix - they give this all away for free.
+
+## v3.2.8 changelog
+
+- **New DVD deck mode**
+  - Play a DVD movie directly from the optical drive or from an `.iso`/`.img` image
+  - Uses ffmpeg's `dvdvideo` demuxer (libdvdread/libdvdnav); libdvdcss handles encrypted commercial discs when installed
+  - The existing fullscreen video player, queue, seek bar and A/V clock are reused, with the main title selected automatically
+  - `--mode dvd` opens the deck directly; `--dvd /path/movie.iso` starts a movie immediately
+  - Verified with a real generated DVD-Video ISO: 720x480, 29.97 fps, audio drift within about 35 ms
+  - DVD titles are excluded from mkvmerge auto-cut and automatic intro/credits detection (those are for episode files)
+- Added libdvdread/libdvdnav/libdvdcss to the Arch/CachyOS dependency installer; documented libdvdcss for other distros
+- Version bump to **v3.2.8**
 
 ## v3.2.7 changelog
 

@@ -8,6 +8,7 @@ use std::time::Duration;
 pub enum DeckMode {
     Tape,
     Disc,
+    Dvd,
     Radio,
 }
 

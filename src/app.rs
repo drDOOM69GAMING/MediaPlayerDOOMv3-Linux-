@@ -319,7 +319,7 @@ impl PlayerApp {
             .unwrap_or_default()
     }
 
-    pub(crate) fn new(cc: &eframe::CreationContext<'_>, startup_video: Option<String>, windowed: bool, startup_mode: Option<String>) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    pub(crate) fn new(cc: &eframe::CreationContext<'_>, startup_video: Option<String>, windowed: bool, startup_mode: Option<String>, startup_dvd: Option<String>) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         #[cfg(target_os = "windows")]
         apply_taskbar_icon(cc);
         let ctx = cc.egui_ctx.clone();
@@ -723,6 +723,7 @@ video_ended: false,
         app.apply_eq_live();
         match startup_mode.as_deref() {
             Some("cd") | Some("disc") => app.set_deck_mode(DeckMode::Disc),
+            Some("dvd") => app.set_deck_mode(DeckMode::Dvd),
             Some("radio") => app.set_deck_mode(DeckMode::Radio),
             Some("tape") => app.set_deck_mode(DeckMode::Tape),
             _ => {}
@@ -735,6 +736,10 @@ video_ended: false,
             } else {
                 app.set_error(format!("Video not found: {}", v));
             }
+        }
+        if let Some(d) = startup_dvd {
+            app.play_dvd_source(&d);
+            app.set_video_fs(true);
         }
         // Reuse the remembered library root when it still exists. The full
         // search walks `Music` recursively on *every* logical drive, so paying
@@ -1834,7 +1839,7 @@ impl eframe::App for PlayerApp {
     }
 }
 
-pub fn run(startup_video: Option<String>, windowed: bool, startup_mode: Option<String>) -> eframe::Result {
+pub fn run(startup_video: Option<String>, windowed: bool, startup_mode: Option<String>, startup_dvd: Option<String>) -> eframe::Result {
 std::panic::set_hook(Box::new(|info| {
         // Expected, caught decode panics (rodio symphonia init-seek bug) are
         // muted here; open_decoder logs a clean decode-skip line instead.
@@ -1869,7 +1874,7 @@ std::panic::set_hook(Box::new(|info| {
         APP_NAME,
         options,
         Box::new(|cc| {
-            let app = PlayerApp::new(cc, startup_video.clone(), windowed, startup_mode.clone())?;
+            let app = PlayerApp::new(cc, startup_video.clone(), windowed, startup_mode.clone(), startup_dvd.clone())?;
             Ok(Box::new(app) as Box<dyn eframe::App>)
         }),
     )

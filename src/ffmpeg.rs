@@ -12,11 +12,14 @@ pub fn probe_video_duration(path: &str) -> f32 {
     if !fp.is_file() {
         return 0.0;
     }
-    let out = std::process::Command::new(fp)
-        .args(["-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1"])
-        .arg(path)
-        .no_window()
-        .output();
+    let dvd = crate::dvd::is_dvd(path);
+    let input = crate::dvd::source(path);
+    let mut cmd = std::process::Command::new(fp);
+    cmd.args(["-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1"]);
+    if dvd {
+        cmd.args(["-f", "dvdvideo"]);
+    }
+    let out = cmd.arg(input).no_window().output();
     match out {
         Ok(o) => std::str::from_utf8(&o.stdout).ok()
             .and_then(|s| s.trim().parse::<f32>().ok())
@@ -30,11 +33,14 @@ pub fn probe_video_info(path: &str) -> (u32, u32, f32) {
     if !fp.is_file() {
         return (0, 0, 0.0);
     }
-    let out = std::process::Command::new(fp)
-        .args(["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height,avg_frame_rate", "-of", "default=noprint_wrappers=1:nokey=1"])
-        .arg(path)
-        .no_window()
-        .output();
+    let dvd = crate::dvd::is_dvd(path);
+    let input = crate::dvd::source(path);
+    let mut cmd = std::process::Command::new(fp);
+    cmd.args(["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height,avg_frame_rate", "-of", "default=noprint_wrappers=1:nokey=1"]);
+    if dvd {
+        cmd.args(["-f", "dvdvideo"]);
+    }
+    let out = cmd.arg(input).no_window().output();
     match out {
         Ok(o) => {
             let lines: Vec<&str> = std::str::from_utf8(&o.stdout).unwrap_or("")
@@ -152,6 +158,10 @@ pub fn fit_video_dims(w: u32, h: u32, max_w: u32, max_h: u32) -> (u32, u32) {
 }
 
 pub fn video_audio_levels(path: &str, ffmpeg: &Path, start: f32, len: f32) -> Vec<f32> {
+    // Auto intro/credits detection is for local episode files, not DVDs.
+    if crate::dvd::is_dvd(path) {
+        return Vec::new();
+    }
     let mut cmd = Command::new(ffmpeg);
     cmd.args(["-hide_banner", "-loglevel", "error"]);
     if start > 0.0 {
@@ -360,6 +370,9 @@ pub fn detect_credit_start(slice: &[f32], secs_per_sample: f32) -> f32 {
 }
 
 pub fn cut_video_file(source: &str, intro_end: f32, credits_start: f32) -> Result<String, String> {
+    if crate::dvd::is_dvd(source) {
+        return Err("cannot cut a DVD title with mkvmerge".into());
+    }
     let mm = mkvmerge_path();
     if !mm.is_file() {
         return Err("mkvmerge not available (install MKVToolNix)".into());

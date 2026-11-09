@@ -285,12 +285,17 @@ LibCmd::Scan(dir) => {
                 av_log(&format!("open: probe_info {}x{} fps={} took {}ms", sw, sh, sfps, t_open.elapsed().as_millis()));
                 let (tw, th) = fit_video_dims(sw, sh, 1920, 1080);
                 let fps = if sfps > 0.0 { sfps } else { 24.0 };
+                let dvd = crate::dvd::is_dvd(&path);
+                let input = crate::dvd::source(&path);
                 let mut cmd = std::process::Command::new(ffmpeg_path());
                 cmd.args(["-hide_banner", "-loglevel", "error"]);
+                if dvd {
+                    cmd.args(["-f", "dvdvideo"]);
+                }
                 if seek > 0.0 {
                     cmd.args(["-ss"]).arg(format!("{:.3}", seek));
                 }
-                cmd.arg("-i").arg(&path)
+                cmd.arg("-i").arg(input)
                     .args(["-an", "-vf", &format!("scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2", tw, th, tw, th), "-pix_fmt", "rgb24", "-f", "rawvideo", "-"])
                     .stdout(std::process::Stdio::piped())
                     .stderr(std::process::Stdio::piped())
@@ -470,6 +475,10 @@ LibCmd::Scan(dir) => {
             LibCmd::VideoAnalyze { path, gen } => {
                 let tx2 = tx.clone();
                 std::thread::spawn(move || {
+                    if crate::dvd::is_dvd(&path) {
+                        let _ = tx2.send(Msg::VideoBounds { gen, path, intro_end: 0.0, credits_start: 0.0 });
+                        return;
+                    }
                     let dur = probe_video_duration(&path);
                     // Named chapters are the most trustworthy source. A file
                     // with "Opening"/"Ending" chapters needs no guessing (and

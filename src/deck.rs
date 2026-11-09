@@ -39,13 +39,15 @@ impl PlayerApp {
     pub(crate) fn cycle_deck_mode(&mut self) {
         let next = match self.deck_mode {
             DeckMode::Tape => DeckMode::Disc,
-            DeckMode::Disc => DeckMode::Radio,
+            DeckMode::Disc => DeckMode::Dvd,
+            DeckMode::Dvd => DeckMode::Radio,
             DeckMode::Radio => DeckMode::Tape,
         };
         self.set_deck_mode(next);
         self.set_status(format!("Deck: {}", match next {
             DeckMode::Tape => "TAPE",
             DeckMode::Disc => "CD",
+            DeckMode::Dvd => "DVD",
             DeckMode::Radio => "RADIO",
         }));
     }

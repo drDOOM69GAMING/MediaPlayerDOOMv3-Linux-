@@ -24,6 +24,46 @@ use crate::{
 // Video playback: open/seek/window, video queue, bounds/cut analysis and video-audio attach.
 
 impl PlayerApp {
+    pub(crate) fn play_dvd_source(&mut self, source: &str) {
+        let source = source.trim();
+        if source.is_empty() {
+            self.set_error("No DVD source");
+            return;
+        }
+        let wrapped = crate::dvd::wrap(source);
+        self.video_queue = vec![wrapped.clone()];
+        self.video_queue_idx = 0;
+        self.play_video_item(wrapped);
+        self.set_status(format!("DVD: {}", crate::dvd::display_name(&crate::dvd::wrap(source))));
+    }
+
+    pub(crate) fn play_dvd_drive(&mut self) {
+        match crate::dvd::first_drive() {
+            Some(d) => self.play_dvd_source(&d),
+            None => self.set_error("No optical drive found"),
+        }
+    }
+
+    pub(crate) fn open_dvd_iso(&mut self) {
+        if let Some(p) = rfd::FileDialog::new()
+            .add_filter("DVD image", &["iso", "img"])
+            .pick_file()
+        {
+            self.play_dvd_source(&p.to_string_lossy());
+        }
+    }
+
+    pub(crate) fn eject_dvd(&mut self) {
+        let current = self.video_current.clone().filter(|p| crate::dvd::is_dvd(p));
+        if let Some(cur) = current {
+            crate::dvd::eject(&cur);
+            self.close_video();
+            self.set_status("DVD tray ejected");
+        } else if let Some(d) = crate::dvd::first_drive() {
+            crate::dvd::eject(&crate::dvd::wrap(&d));
+        }
+    }
+
     pub(crate) fn set_video_fs(&mut self, on: bool) {
         if on && !self.video_fs {
             if !self.fullscreen {
@@ -197,7 +237,7 @@ impl PlayerApp {
         self.attach_video_audio(&path, saved_pos);
         self.video_cur_secs = saved_pos;
         self.auto_bounds.remove(&path);
-        if self.intro_skip_enabled && !path.ends_with("_cut.mkv") {
+        if self.intro_skip_enabled && !path.ends_with("_cut.mkv") && !crate::dvd::is_dvd(&path) {
             // No manual and no learned markers? Analyse this episode's audio
             // in the worker thread while it plays. Analysis is advisory: it
             // only seek-skips, never cuts and never writes settings.
@@ -206,7 +246,12 @@ impl PlayerApp {
                 let _ = self.lib_tx.send(LibCmd::VideoAnalyze { path: path.clone(), gen });
             }
         }
-        self.set_status(format!("MOVIE {}/{}: {}", self.video_queue_idx + 1, self.video_queue.len(), stem(&path)));
+        self.set_status(format!(
+            "MOVIE {}/{}: {}",
+            self.video_queue_idx + 1,
+            self.video_queue.len(),
+            if crate::dvd::is_dvd(&path) { crate::dvd::display_name(&path) } else { stem(&path) }
+        ));
         self.video_deferred_open = true;
     }
 
@@ -333,6 +378,9 @@ impl PlayerApp {
             return;
         }
         if path.ends_with("_cut.mkv") || self.video_cut_inflight.contains(&path) || self.video_cut_cache.contains_key(&path) {
+            return;
+        }
+        if crate::dvd::is_dvd(&path) {
             return;
         }
         let (ie, cs) = self.video_bounds.get(&path).copied().unwrap_or((0.0, 0.0));

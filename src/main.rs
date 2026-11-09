@@ -11,6 +11,7 @@ include!(concat!(env!("OUT_DIR"), "/embedded_tools.rs"));
 pub(crate) mod app;
 pub(crate) mod audio;
 pub(crate) mod consts;
+pub(crate) mod dvd;
 #[cfg(target_os = "linux")]
 pub(crate) mod cd;
 #[cfg(not(target_os = "linux"))]
@@ -75,6 +76,7 @@ fn main() -> eframe::Result {
         return Ok(());
     }
     let mut video: Option<String> = None;
+    let mut dvd: Option<String> = None;
     let mut windowed = false;
     let mut mode: Option<String> = None;
     let mut i = 0;
@@ -83,6 +85,13 @@ fn main() -> eframe::Result {
             windowed = true;
             i += 1;
             continue;
+        }
+        if args[i] == "--dvd" {
+            if let Some(p) = args.get(i + 1) {
+                dvd = Some(p.clone());
+                i += 2;
+                continue;
+            }
         }
         if args[i] == "--mode" {
             if let Some(m) = args.get(i + 1) {
@@ -102,5 +111,5 @@ fn main() -> eframe::Result {
         }
         i += 1;
     }
-    app::run(video, windowed, mode)
+    app::run(video, windowed, mode, dvd)
 }

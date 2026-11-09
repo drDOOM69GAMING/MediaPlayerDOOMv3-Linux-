@@ -30,6 +30,13 @@ Thank you to the entire FFmpeg team and the gyan.dev build maintainers for makin
 
 Thank you to the yt-dlp team for maintaining the best open-source YouTube downloader.
 
+### libdvdread / libdvdnav / libdvdcss
+
+- **Used for:** DVD-Video playback (ffmpeg `dvdvideo` demuxer). `libdvdcss` decrypts encrypted commercial DVDs.
+- **License:** GNU GPL v2 (or later)
+- **Projects:** <https://www.videolan.org/developers/libdvdcss.html> - <https://www.videolan.org/developers/libdvdnav.html>
+- **Note:** used through ffmpeg/external libraries; not statically linked into this app.
+
 ### cdparanoia
 
 - **Used for:** bit-perfect CDDA extraction from audio CDs before ffmpeg encodes FLAC.

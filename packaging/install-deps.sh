@@ -7,6 +7,7 @@ if command -v pacman >/dev/null 2>&1; then
     echo "Detected Arch/CachyOS (pacman)"
     sudo pacman -S --needed --noconfirm \
         base-devel rust ffmpeg mkvtoolnix-cli cdparanoia \
+        libdvdread libdvdnav libdvdcss \
         alsa-lib openssl libxkbcommon libxkbcommon-x11 wayland libx11 xdg-utils
 elif command -v apt >/dev/null 2>&1; then
     echo "Detected Debian/Ubuntu/Mint (apt)"
@@ -42,3 +43,5 @@ if ! command -v cargo >/dev/null 2>&1; then
     fi
 fi
 echo "Dependencies ready. Now run: ./install.sh"
+echo "Note: encrypted DVDs need libdvdcss (Arch: pacman -S libdvdcss;"
+echo "      Ubuntu/Mint may require the VideoLAN repo; unencrypted DVDs/ISOs work without it)."
