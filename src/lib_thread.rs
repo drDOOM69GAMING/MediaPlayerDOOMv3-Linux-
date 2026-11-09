@@ -226,7 +226,9 @@ LibCmd::Scan(dir) => {
                 let _ = tag_tx.send(paths);
             }
             LibCmd::ArtLocal(path) => {
-                let bytes = find_local_art(&path);
+                // Decode/downscale on this worker, not the UI thread. A 4000px
+                // folder scan would otherwise hitch every track change.
+                let bytes = find_local_art(&path).and_then(|b| normalize_art(&b));
                 let _ = tx.send(Msg::ArtLocal { bytes });
             }
             LibCmd::BatchMeta(paths) => {

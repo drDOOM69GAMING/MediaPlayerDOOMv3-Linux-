@@ -115,6 +115,10 @@ pub(crate) struct PlayerApp {
     pub(crate) art_all_pending: HashSet<String>,
     pub(crate) web_all_pending: HashSet<String>,
     pub(crate) meta_all_active: bool,
+    /// True while the background Meta All cache validation is running.
+    pub(crate) meta_all_art_scanning: bool,
+    /// Playlist labels need rebuilding (coalesced to once per message drain).
+    pub(crate) display_dirty: bool,
     pub(crate) no_art: HashSet<String>,
     pub(crate) no_art_dirty: bool,
     pub(crate) pl_view_h: f32,
@@ -553,6 +557,8 @@ impl PlayerApp {
             art_all_pending: HashSet::new(),
             web_all_pending: HashSet::new(),
             meta_all_active: false,
+            meta_all_art_scanning: false,
+            display_dirty: false,
             no_art: no_art_boot,
             no_art_dirty: false,
             pl_view_h: 300.0,
@@ -873,14 +879,14 @@ video_ended: false,
     }
 
     pub(crate) fn rebuild_display_cache(&mut self) {
-        let pl = self.state.playlist.clone();
+        // Borrow the playlist in place: cloning all 18k paths on every tag
+        // batch was a significant allocation spike.
         let mut seed: Vec<(String, String)> = Vec::new();
-        let mut cache: Vec<String> = Vec::with_capacity(pl.len());
-        for p in &pl {
+        let mut cache: Vec<String> = Vec::with_capacity(self.state.playlist.len());
+        for p in &self.state.playlist {
             if let Some(n) = self.tag_names.get(p) {
                 cache.push(n.clone());
             } else if let Some(e) = self.meta_cache.get(p) {
-                // Local cache hit: real name with no lofty re-read needed.
                 let n = playlist_display(&e.artist, &e.title, p);
                 seed.push((p.clone(), n.clone()));
                 cache.push(n);
@@ -892,6 +898,7 @@ video_ended: false,
             self.tag_names.insert(p, n);
         }
         self.display_cache = cache;
+        self.display_dirty = false;
         self.request_playlist_tags();
     }
 
@@ -939,32 +946,29 @@ video_ended: false,
             .cloned()
             .collect();
         let have_meta = pl.len() - need_meta.len();
-        let need_art: Vec<String> = pl
-            .iter()
-            .filter(|p| !art_cache_ok(p) && !self.no_art.contains(*p) && !self.art_all_pending.contains(*p))
-            .cloned()
-            .collect();
-        let have_art = pl.len() - need_art.len();
-        if need_meta.is_empty() && need_art.is_empty() {
-            self.set_status(format!(
-                "All done here! Everything is already cached locally ({} tracks) - add more music and hit Meta All again to download more.",
-                pl.len()
-            ));
-            return;
-        }
         self.meta_all_active = true;
+        self.meta_all_art_scanning = true;
         const CHUNK: usize = 200;
         for chunk in need_meta.chunks(CHUNK) {
             self.meta_all_pending.extend(chunk.iter().cloned());
             let _ = self.lib_tx.send(LibCmd::BatchMeta(chunk.to_vec()));
         }
-        for chunk in need_art.chunks(CHUNK) {
-            self.art_all_pending.extend(chunk.iter().cloned());
-            let _ = self.lib_tx.send(LibCmd::ArtAll(chunk.to_vec()));
-        }
+        // Validating every cached cover decodes 18k small JPEGs, so do it on a
+        // worker. The old version did that on the UI thread and froze the app.
+        let tx = self.msg_tx.clone();
+        let playlist = pl.clone();
+        let no_art = self.no_art.clone();
+        std::thread::spawn(move || {
+            let need_art: Vec<String> = playlist
+                .iter()
+                .filter(|p| !no_art.contains(*p) && !crate::library::art_cache_ok(p))
+                .cloned()
+                .collect();
+            let _ = tx.send(Msg::MetaAllArtScan { need_art, total: playlist.len() });
+        });
         self.set_status(format!(
-            "Meta All (8 parallel workers): resuming - {} tags + {} covers already cached; fetching {} tags and {} covers...",
-            have_meta, have_art, need_meta.len(), need_art.len()
+            "Meta All: {} tags already cached, checking cover cache in the background...",
+            have_meta
         ));
     }
 
@@ -973,7 +977,11 @@ video_ended: false,
             return;
         }
         self.set_status(msg);
-        if self.meta_all_pending.is_empty() && self.art_all_pending.is_empty() && self.web_all_pending.is_empty() {
+        if !self.meta_all_art_scanning
+            && self.meta_all_pending.is_empty()
+            && self.art_all_pending.is_empty()
+            && self.web_all_pending.is_empty()
+        {
             self.meta_all_active = false;
             let total = self.state.playlist.len();
             let no_art_cnt = self.state.playlist
@@ -1065,6 +1073,11 @@ video_ended: false,
         }
         if self.no_art_dirty && self.meta_cache_last_save.elapsed() > Duration::from_secs(3) {
             self.save_no_art();
+        }
+        // Coalesce tag/art label updates into one rebuild instead of rebuilding
+        // 18k labels for every 200-item worker batch.
+        if self.display_dirty {
+            self.rebuild_display_cache();
         }
     }
 
@@ -1175,9 +1188,10 @@ video_ended: false,
             Msg::Added { files } => {
                 self.scanning = false;
                 self.ingest_bands(&files, None);
+                let mut existing: HashSet<String> = self.state.playlist.iter().cloned().collect();
                 let mut n = 0;
                 for f in files {
-                    if !self.state.playlist.contains(&f) {
+                    if existing.insert(f.clone()) {
                         self.state.playlist.push(f);
                         n += 1;
                     }
@@ -1235,19 +1249,16 @@ video_ended: false,
             }
             Msg::Tags { entries } => {
                 let mut changed = false;
-                let in_pl: HashSet<String> = self.state.playlist.iter().cloned().collect();
                 for (path, artist, title) in entries {
                     self.tags_pending.remove(&path);
                     if self.tag_names.contains_key(&path) {
                         continue;
                     }
                     self.tag_names.insert(path.clone(), playlist_display(&artist, &title, &path));
-                    if in_pl.contains(&path) {
-                        changed = true;
-                    }
+                    changed = true;
                 }
                 if changed {
-                    self.rebuild_display_cache();
+                    self.display_dirty = true;
                 }
             }
             Msg::BatchMeta { entries } => {
@@ -1264,18 +1275,40 @@ video_ended: false,
                     }
                 }
                 if changed {
-                    self.rebuild_display_cache();
+                    self.display_dirty = true;
                 }
                 self.meta_all_tick(format!("Meta All: {} tag jobs, {} covers, {} web left", self.meta_all_pending.len(), self.art_all_pending.len(), self.web_all_pending.len()));
+            }
+            Msg::MetaAllArtScan { need_art, total } => {
+                self.meta_all_art_scanning = false;
+                let have_art = total.saturating_sub(need_art.len());
+                const CHUNK: usize = 200;
+                for chunk in need_art.chunks(CHUNK) {
+                    self.art_all_pending.extend(chunk.iter().cloned());
+                    let _ = self.lib_tx.send(LibCmd::ArtAll(chunk.to_vec()));
+                }
+                if !need_art.is_empty() {
+                    self.set_status(format!(
+                        "Meta All: {} cover(s) already cached; scanning {} locally, then web fallback...",
+                        have_art,
+                        need_art.len()
+                    ));
+                }
+                self.meta_all_tick(format!(
+                    "Meta All: {} tag jobs, {} covers, {} web left",
+                    self.meta_all_pending.len(),
+                    self.art_all_pending.len(),
+                    self.web_all_pending.len()
+                ));
             }
             Msg::ArtLocal { bytes } => {
                 if let Some(b) = bytes {
                     self.art_local_valid = true;
                     self.load_art_texture(b.clone());
                     if let Some(cur) = self.state.current_song.clone() {
-                        if let Some(nb) = normalize_art(&b) {
-                            let _ = write_art_cache(&cur, &nb);
-                        }
+                        // The worker already normalized it; no second big decode
+                        // on the UI thread.
+                        let _ = write_art_cache(&cur, &b);
                     }
                 } else if self.want_web {
                     let (a, al) = (self.meta.1.clone(), self.meta.2.clone());
@@ -1295,9 +1328,7 @@ video_ended: false,
                         }
                         if !self.art_local_valid {
                             if let Some(cur) = self.state.current_song.clone() {
-                                if let Some(nb) = normalize_art(&b) {
-                                    let _ = write_art_cache(&cur, &nb);
-                                }
+                                let _ = write_art_cache(&cur, &b);
                             }
                         }
                     } else if self.art_tex.is_none() {
@@ -1337,12 +1368,8 @@ video_ended: false,
             Msg::ArtWebFor { path, bytes } => {
                 self.web_all_pending.remove(&path);
                 if let Some(b) = bytes {
-                    if let Some(nb) = normalize_art(&b) {
-                        if write_art_cache(&path, &nb) {
-                            if self.no_art.remove(&path) {
-                                self.no_art_dirty = true;
-                            }
-                        } else if self.no_art.insert(path.clone()) {
+                    if write_art_cache(&path, &b) {
+                        if self.no_art.remove(&path) {
                             self.no_art_dirty = true;
                         }
                     } else if self.no_art.insert(path.clone()) {

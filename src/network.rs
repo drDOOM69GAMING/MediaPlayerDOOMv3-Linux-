@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant};
 use crate::consts::{APP_NAME, APP_VERSION};
+use crate::files::normalize_art;
 use crate::tools::*;
 use crate::types::*;
 use crate::util::*;
@@ -15,7 +16,7 @@ pub fn net_loop(rx: Receiver<NetCmd>, tx: Sender<Msg>) {
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             match cmd {
                 NetCmd::WebArt(artist, album) => {
-                    let bytes = fetch_web_art(&artist, &album);
+                    let bytes = fetch_web_art(&artist, &album).and_then(|b| normalize_art(&b));
                     let _ = tx.send(Msg::ArtWeb { bytes });
                 }
                 NetCmd::WebArtFor { .. } => {
@@ -44,7 +45,7 @@ pub fn web_art_loop(rx: std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Receive
         let Ok(cmd) = cmd else { break };
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             if let NetCmd::WebArtFor { path, artist, album } = cmd {
-                let bytes = fetch_web_art(&artist, &album);
+                let bytes = fetch_web_art(&artist, &album).and_then(|b| normalize_art(&b));
                 let _ = tx.send(Msg::ArtWebFor { path, bytes });
             }
         }));

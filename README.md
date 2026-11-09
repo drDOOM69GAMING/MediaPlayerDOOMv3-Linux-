@@ -179,6 +179,19 @@ This app is built on the work of some incredible open-source projects, and it wo
 
 Full details, license texts, and donation links are in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). If you can, consider donating to FFmpeg, yt-dlp, and MKVToolNix - they give this all away for free.
 
+## v3.2.7 changelog
+
+- **Async UI work - no more multi-second freezes**
+  - **Meta All** no longer validates every cached cover on the UI thread (that decoded 18k JPEGs synchronously). Cache validation now runs on a worker; the playlist stays responsive
+  - Album art is decoded, downscaled and re-encoded on the art/network workers instead of on the UI thread; the UI only uploads the small final texture
+  - Tag/cover label updates are coalesced into a single playlist rebuild per frame instead of rebuilding 18k labels for every 200-item worker batch
+  - Playlist rebuilds no longer clone the entire path list first
+  - The playlist pane no longer allocates an 18k-element index vector on every repaint when the search box is empty (the common case)
+  - Tag batches no longer build a full-library `HashSet` per batch, and adding many files no longer does O(n²) membership checks
+  - Current-song lookup checks the cached index first instead of scanning the full playlist every frame
+- 88 tests pass
+- Version bump to **v3.2.7**
+
 ## v3.2.6 changelog
 
 - **Hard-drive performance**

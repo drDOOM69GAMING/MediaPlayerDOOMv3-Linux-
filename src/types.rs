@@ -100,6 +100,7 @@ pub enum Msg {
     VideoBounds { gen: u64, path: String, intro_end: f32, credits_start: f32 },
     VideoCutDone { gen: u64, path: String, cut: Option<String>, err: Option<String> },
     CdDetected(Option<CdInfo>),
+    MetaAllArtScan { need_art: Vec<String>, total: usize },
     CdProgress { track: usize, total: usize, text: String },
     CdDone { folder: String, files: Vec<String>, label: String },
     CdFail(String),

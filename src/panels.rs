@@ -1039,34 +1039,44 @@ impl PlayerApp {
                 });
             }
 
-            let query = self.search_query.to_lowercase();
-            let cur_song = self.state.current_song.clone();
-            let cur_idx = cur_song
-                .as_deref()
-                .and_then(|c| self.state.playlist.iter().position(|p| p.as_str() == c))
-                .or_else(|| {
-                    self.playing_pl_idx
-                        .filter(|i| *i < self.state.playlist.len())
-                });
-            // Indices only, not cloned labels: this runs every frame, and with
-            // a large library cloning one String per row allocated ~18k strings
-            // per repaint, which was a real drag on playback. The labels are
-            // read straight out of display_cache when a row is actually drawn.
-            let rows: Vec<usize> = self
+            let query = if self.search_query.is_empty() {
+                String::new()
+            } else {
+                self.search_query.to_lowercase()
+            };
+            // The common case (no search) no longer builds an 18k-element index
+            // vector every repaint. Only a real search allocates one.
+            let cur_idx = self
                 .state
-                .playlist
-                .iter()
-                .enumerate()
-                .filter(|(i, p)| {
-                    if query.is_empty() {
-                        return true;
-                    }
-                    let d = self.display_cache[*i].to_lowercase();
-                    let path = p.to_lowercase();
-                    d.contains(&query) || path.contains(&query)
+                .current_song
+                .as_deref()
+                .and_then(|c| {
+                    self.playing_pl_idx
+                        .filter(|i| self.state.playlist.get(*i).map(|p| p.as_str() == c).unwrap_or(false))
                 })
-                .map(|(i, _)| i)
-                .collect();
+                .or_else(|| {
+                    self.state
+                        .current_song
+                        .as_deref()
+                        .and_then(|c| self.state.playlist.iter().position(|p| p.as_str() == c))
+                });
+            let filtered = !query.is_empty();
+            let rows: Vec<usize> = if filtered {
+                self.state
+                    .playlist
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, p)| {
+                        let d = self.display_cache[*i].to_lowercase();
+                        let path = p.to_lowercase();
+                        d.contains(&query) || path.contains(&query)
+                    })
+                    .map(|(i, _)| i)
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let row_count = if filtered { rows.len() } else { self.state.playlist.len() };
 
             ui.horizontal(|ui| {
                 ui.label(RichText::new("PLAYLIST").color(darken(th.accent, 0.35)).monospace().strong().size(10.0));
@@ -1076,7 +1086,7 @@ impl PlayerApp {
                     None => (format!("NOW  -/{}", total), Color32::from_gray(90)),
                 };
                 ui.label(RichText::new(now_txt).color(now_col).monospace().size(10.0));
-                let shown = cur_song.as_deref().map(stem).unwrap_or_default();
+                let shown = self.state.current_song.as_deref().map(stem).unwrap_or_default();
                 ui.label(RichText::new(truncate_mid(&shown, 42)).color(now_col).monospace().size(10.0));
             });
             ui.add_space(2.0);
@@ -1087,19 +1097,26 @@ impl PlayerApp {
             if cur_idx != self.pl_last_cur {
                 self.pl_last_cur = cur_idx;
                 if let Some(ci) = cur_idx {
-                    if let Some(pos) = rows.iter().position(|i| *i == ci) {
+                    let pos = if filtered {
+                        rows.iter().position(|i| *i == ci)
+                    } else if ci < row_count {
+                        Some(ci)
+                    } else {
+                        None
+                    };
+                    if let Some(pos) = pos {
                         let avail_h = ui.available_height().max(1.0);
                         let spacing_y = ui.spacing().item_spacing.y;
                         let sh = row_h + spacing_y;
                         let target = (pos as f32 * sh) - avail_h * 0.5;
-                        let max_off = (sh * rows.len() as f32 - spacing_y - avail_h).max(0.0);
+                        let max_off = (sh * row_count as f32 - spacing_y - avail_h).max(0.0);
                         sa = sa.vertical_scroll_offset(target.clamp(0.0, max_off));
                     }
                 }
             }
-            sa.show_rows(ui, row_h, rows.len(), |ui, range| {
+            sa.show_rows(ui, row_h, row_count, |ui, range| {
                     for i in range {
-                        let idx = rows[i];
+                        let idx = if filtered { rows[i] } else { i };
                         let is_current = cur_idx == Some(idx);
                         let color = if is_current { th.playing_fg } else { th.fg };
                         let mark = if is_current { "▶ " } else { "  " };
