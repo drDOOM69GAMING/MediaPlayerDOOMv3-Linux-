@@ -44,7 +44,6 @@ Name=MediaPlayerDOOM
 GenericName=Media Player
 Comment=Retro DOOM-styled music and video player
 Exec=$exec_path %F
-TryExec=$exec_path
 Icon=$icon_path
 Terminal=false
 Categories=AudioVideo;Audio;Video;Player;

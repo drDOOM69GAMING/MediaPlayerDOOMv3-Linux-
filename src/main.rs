@@ -49,6 +49,18 @@ fn main() -> eframe::Result {
     // (a bare path also works). Handy for testing and for opening an episode
     // straight from a file manager.
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        println!("{} v{}", crate::consts::APP_NAME, crate::consts::APP_VERSION);
+        return Ok(());
+    }
+    if args.iter().any(|a| a == "--create-shortcut") {
+        let made = crate::desktop::ensure_desktop_shortcut();
+        println!(
+            "{}",
+            if made { "desktop shortcut created" } else { "desktop shortcut already exists (or could not be created; see desktop.log)" }
+        );
+        return Ok(());
+    }
     let mut video: Option<String> = None;
     let mut windowed = false;
     let mut i = 0;

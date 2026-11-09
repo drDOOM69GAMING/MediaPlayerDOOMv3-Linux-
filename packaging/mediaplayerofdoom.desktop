@@ -4,7 +4,6 @@ Name=MediaPlayerDOOM
 GenericName=Media Player
 Comment=Retro DOOM-styled music and video player
 Exec=mediaplayerofdoom %F
-TryExec=mediaplayerofdoom
 Icon=mediaplayerofdoom
 Terminal=false
 Categories=AudioVideo;Audio;Video;Player;

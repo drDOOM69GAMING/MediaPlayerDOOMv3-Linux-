@@ -309,6 +309,12 @@ impl PlayerApp {
         let ctx = cc.egui_ctx.clone();
         // Keep the icon-bearing launchers in sync with this executable.
         crate::desktop::ensure_desktop_shortcut();
+        // A login-autostart launch can race the desktop session; retry once
+        // after the window is up. This is a no-op if the shortcut exists.
+        std::thread::spawn(|| {
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            crate::desktop::ensure_desktop_shortcut();
+        });
 
         let (stream, handle) = OutputStream::try_default()?;
         let sink = Sink::try_new(&handle)?;

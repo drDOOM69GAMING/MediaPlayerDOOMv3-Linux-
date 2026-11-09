@@ -172,6 +172,12 @@ This app is built on the work of some incredible open-source projects, and it wo
 
 Full details, license texts, and donation links are in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). If you can, consider donating to FFmpeg, yt-dlp, and MKVToolNix - they give this all away for free.
 
+## v3.2.4 changelog
+
+- **Fixed the desktop shortcut not appearing on KDE Plasma**: the launcher contained a quoted `TryExec=`, which Plasma interpreted as an invalid command path and therefore hid the shortcut. `TryExec` is no longer written; the icon and launcher now show on the desktop
+- Verified on Plasma 6.8: the shortcut appears with the artwork, and the app creates it when missing while leaving an existing one untouched
+- Version bump to **v3.2.4**
+
 ## v3.2.3 changelog
 
 - Desktop shortcut behaviour is now exactly "make sure it's there": on launch the release build checks `Desktop/MediaPlayerDOOM.desktop` and creates it (with the artwork icon) only when missing. If it already exists, it does not rewrite it and creates no other launchers on that path

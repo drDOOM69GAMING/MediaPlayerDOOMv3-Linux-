@@ -14,6 +14,18 @@ use crate::util::{data_home, home_dir};
 
 pub const ICON_PNG: &[u8] = include_bytes!("../assets/mediaplayerofdoom.png");
 
+fn log(msg: &str) {
+    use std::io::Write as _;
+    let path = crate::util::data_dir().join("desktop.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let _ = writeln!(f, "[{}] {}", ts, msg);
+    }
+}
+
 fn quote_exec(path: &Path) -> String {
     let s = path
         .to_string_lossy()
@@ -32,7 +44,6 @@ Name=MediaPlayerDOOM\n\
 GenericName=Media Player\n\
 Comment=Retro DOOM-styled music and video player\n\
 Exec={exec} %F\n\
-TryExec={exec}\n\
 Icon={icon}\n\
 Terminal=false\n\
 Categories=AudioVideo;Audio;Video;Player;\n\
@@ -101,13 +112,21 @@ pub fn ensure_desktop_shortcut() -> bool {
     if cfg!(debug_assertions) {
         return false;
     }
-    let Some(home) = home_dir() else { return false };
+    let Some(home) = home_dir() else {
+        log("skip: no HOME");
+        return false;
+    };
     let desktop_dir = xdg_user_dir("XDG_DESKTOP_DIR")
         .or_else(|| Some(home.join("Desktop")).filter(|p| p.is_dir()));
-    let Some(dir) = desktop_dir.filter(|d| d.is_dir()) else { return false };
+    log(&format!("desktop dir candidate: {:?}", desktop_dir));
+    let Some(dir) = desktop_dir.filter(|d| d.is_dir()) else {
+        log("skip: desktop dir missing");
+        return false;
+    };
     let shortcut = dir.join("MediaPlayerDOOM.desktop");
     if shortcut.exists() {
         // Already there: deliberately do nothing at all.
+        log(&format!("ok: already exists at {}", shortcut.display()));
         return false;
     }
 
@@ -115,6 +134,7 @@ pub fn ensure_desktop_shortcut() -> bool {
         .ok()
         .and_then(|p| p.canonicalize().ok())
     else {
+        log("skip: could not resolve current exe");
         return false;
     };
     let icon = data_home().join("icons/hicolor/512x512/apps/mediaplayerofdoom.png");
@@ -122,14 +142,20 @@ pub fn ensure_desktop_shortcut() -> bool {
         if let Some(parent) = icon.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        if std::fs::write(&icon, ICON_PNG).is_err() {
-            return false;
+        match std::fs::write(&icon, ICON_PNG) {
+            Ok(()) => log(&format!("wrote icon {}", icon.display())),
+            Err(e) => log(&format!("icon write failed: {e}; using theme icon name")),
         }
     }
-    let text = entry_text(&exe, &icon);
+    // Even if the icon file could not be written, still create the shortcut.
+    // Falling back to the theme name keeps the launcher useful.
+    let icon_for_entry = if icon.is_file() { icon } else { PathBuf::from("mediaplayerofdoom") };
+    let text = entry_text(&exe, &icon_for_entry);
     if !write_if_changed(&shortcut, &text) {
+        log(&format!("shortcut write failed: {}", shortcut.display()));
         return false;
     }
     make_launchable(&shortcut);
+    log(&format!("created shortcut {}", shortcut.display()));
     true
 }
