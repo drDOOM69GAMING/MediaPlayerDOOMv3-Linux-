@@ -32,19 +32,38 @@ impl PlayerApp {
             } else {
                 0.0
             };
+            let speed = if self.disc_dump_speed > 0.05 {
+                format!("  {:.1} MB/s", self.disc_dump_speed)
+            } else {
+                String::new()
+            };
+            let eta = if self.disc_dump_speed > 0.05 && self.disc_dump_total > self.disc_dump_done {
+                let s = ((self.disc_dump_total - self.disc_dump_done) as f32
+                    / 1e6
+                    / self.disc_dump_speed) as u64;
+                if s >= 60 {
+                    format!("  ~{}m", s / 60)
+                } else {
+                    format!("  ~{}s", s)
+                }
+            } else {
+                String::new()
+            };
             let text = if self.disc_dump_total > 0 {
                 format!(
-                    "{:.0}%  {:.1}/{:.1} GB",
+                    "{:.0}%  {:.1}/{:.1} GB{}{}",
                     frac * 100.0,
                     self.disc_dump_done as f64 / 1e9,
-                    self.disc_dump_total as f64 / 1e9
+                    self.disc_dump_total as f64 / 1e9,
+                    speed,
+                    eta
                 )
             } else {
-                format!("{} dumping...", kind)
+                format!("{} dumping...{}", kind, speed)
             };
             ui.add(
                 egui::ProgressBar::new(frac)
-                    .desired_width(240.0)
+                    .desired_width(300.0)
                     .text(text),
             );
             if retro_btn(ui, "CANCEL DUMP", Color32::from_rgb(255, 120, 120), th.btn_bg).clicked() {

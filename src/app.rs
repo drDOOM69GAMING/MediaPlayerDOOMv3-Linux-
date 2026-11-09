@@ -275,6 +275,9 @@ pub(crate) struct PlayerApp {
     pub(crate) disc_dump_text: String,
     pub(crate) disc_dump_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub(crate) disc_dump_thread: Option<std::thread::JoinHandle<()>>,
+    pub(crate) disc_dump_speed: f32,
+    pub(crate) disc_dump_last_done: u64,
+    pub(crate) disc_dump_last_at: Instant,
     pub(crate) convert_open: bool,
     pub(crate) convert_src: Option<String>,
     pub(crate) convert_format: crate::convert::ConvertFormat,
@@ -734,6 +737,9 @@ impl PlayerApp {
             disc_dump_text: String::new(),
             disc_dump_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             disc_dump_thread: None,
+            disc_dump_speed: 0.0,
+            disc_dump_last_done: 0,
+            disc_dump_last_at: Instant::now(),
             convert_open: false,
             convert_src: None,
             convert_format: crate::convert::ConvertFormat::Same,
@@ -2250,6 +2256,18 @@ video_ended: false,
                 self.set_error(format!("CD rip failed: {}", e));
             }
             Msg::DiscDumpProgress { done, total, text } => {
+                let now = Instant::now();
+                let dt = now.duration_since(self.disc_dump_last_at).as_secs_f32();
+                if done > self.disc_dump_last_done && dt > 0.15 {
+                    let inst = (done - self.disc_dump_last_done) as f32 / 1e6 / dt;
+                    self.disc_dump_speed = if self.disc_dump_speed <= 0.0 {
+                        inst
+                    } else {
+                        self.disc_dump_speed * 0.6 + inst * 0.4
+                    };
+                }
+                self.disc_dump_last_done = done;
+                self.disc_dump_last_at = now;
                 self.disc_dumping = true;
                 self.disc_dump_done = done;
                 self.disc_dump_total = total;

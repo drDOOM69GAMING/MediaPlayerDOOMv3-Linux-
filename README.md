@@ -189,6 +189,14 @@ This app is built on the work of some incredible open-source projects, and it wo
 
 Full details, license texts, and donation links are in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). If you can, consider donating to FFmpeg, yt-dlp, and MKVToolNix - they give this all away for free.
 
+## v3.2.24 changelog
+
+- **Disc-image dump speed**
+  - ISO dumping now uses larger **4 MB direct reads** on Linux optical devices, and shows live **MB/s + ETA** in the dump progress bar
+  - On the ID4 DVD this drive measures about 4–9 MB/s depending on whether it is reading the inner or outer tracks (the drive reports a 16× CAV maximum). A 7.5 GB DVD-9 therefore needs roughly 15–30 minutes; this is the drive/disc, not the app
+  - Structural disc protection or a dirty/scratched disc can slow reads further; the progress bar now makes that visible
+- Version bump to **v3.2.24**
+
 ## v3.2.23 changelog
 
 - **DVD seeking fixed for real discs**

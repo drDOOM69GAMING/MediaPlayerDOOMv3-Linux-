@@ -761,6 +761,9 @@ impl PlayerApp {
         self.disc_dumping = true;
         self.disc_dump_done = 0;
         self.disc_dump_total = 0;
+        self.disc_dump_speed = 0.0;
+        self.disc_dump_last_done = 0;
+        self.disc_dump_last_at = Instant::now();
         let text = format!("Dumping {} disc from {} to {}...", kind, device, dir.display());
         self.disc_dump_text = text.clone();
         self.set_status(text);
@@ -800,6 +803,9 @@ impl PlayerApp {
         self.disc_dumping = false;
         self.disc_dump_done = 0;
         self.disc_dump_total = 0;
+        self.disc_dump_speed = 0.0;
+        self.disc_dump_last_done = 0;
+        self.disc_dump_last_at = Instant::now();
         self.disc_dump_text.clear();
         if let Some(h) = self.disc_dump_thread.take() {
             let _ = h.join();

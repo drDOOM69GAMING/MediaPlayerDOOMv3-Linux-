@@ -134,12 +134,20 @@ pub fn dump(
         total: total.unwrap_or(0),
         text: format!("Dumping {} to {}...", device, target.display()),
     });
+    let block_device = device.starts_with("/dev/");
     let mut cmd = Command::new("dd");
     cmd.arg(format!("if={}", device))
         .arg(format!("of={}", partial.to_string_lossy()))
-        .args(["bs=1M", "conv=noerror,sync"])
+        .arg(format!("bs={}", if block_device { "4M" } else { "1M" }))
+        .arg("conv=noerror,sync")
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
+    // Larger direct reads avoid the page-cache bounce and are a bit faster on
+    // optical drives. Regular-file test sources stay on buffered I/O.
+    #[cfg(target_os = "linux")]
+    if block_device {
+        cmd.arg("iflag=direct");
+    }
     // If the player dies (even with SIGKILL), make the kernel terminate dd so
     // it cannot keep reading the disc after the window is gone.
     #[cfg(target_os = "linux")]
