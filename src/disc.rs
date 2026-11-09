@@ -26,7 +26,7 @@ pub fn videos_dir() -> PathBuf {
     dir
 }
 
-fn disc_label(device: &str) -> Option<String> {
+pub fn disc_label(device: &str) -> Option<String> {
     for args in [
         vec!["-s", "LABEL", "-o", "value", device],
         vec!["-no", "LABEL", device],
@@ -66,7 +66,7 @@ fn target_path_in(dir: &Path, kind: &str, device: &str) -> PathBuf {
     base
 }
 
-fn device_size(device: &str) -> Option<u64> {
+pub fn device_size(device: &str) -> Option<u64> {
     if let Ok(out) = Command::new("blockdev")
         .args(["--getsize64", device])
         .output()
@@ -247,6 +247,169 @@ pub fn dump(
     }
 }
 
+pub fn dir_size(path: &Path) -> u64 {
+    let Ok(rd) = std::fs::read_dir(path) else { return 0 };
+    let mut total = 0u64;
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            total = total.saturating_add(dir_size(&p));
+        } else if let Ok(m) = e.metadata() {
+            total = total.saturating_add(m.len());
+        }
+    }
+    total
+}
+
+fn contains_mkv(path: &Path) -> bool {
+    let Ok(rd) = std::fs::read_dir(path) else { return false };
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            if contains_mkv(&p) {
+                return true;
+            }
+        } else if p.extension().and_then(|x| x.to_str()).map(|x| x.eq_ignore_ascii_case("mkv")).unwrap_or(false) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Unique output folder for a clean MKV dump, named `<label> (MKV)`.
+pub fn mkv_output_dir(dir: &Path, label: &str) -> PathBuf {
+    let trimmed = label.trim();
+    let label = if trimmed.is_empty() {
+        String::new()
+    } else {
+        sanitize_win(trimmed)
+    };
+    let label = if label.trim().is_empty() { "disc".to_string() } else { label };
+    for n in 0..1000 {
+        let name = if n == 0 {
+            format!("{} (MKV)", label)
+        } else {
+            format!("{} (MKV) ({})", label, n + 1)
+        };
+        let p = dir.join(name);
+        if !p.exists() {
+            return p;
+        }
+    }
+    dir.join(format!("{} (MKV)", label))
+}
+
+/// Decrypt/remux a disc or ISO to clean MKV files with MakeMKV. MakeMKV's
+/// `mkv` mode always decrypts, so the output never carries CSS/AACS.
+pub fn dump_to_mkv(
+    source_spec: &str,
+    out_dir: &Path,
+    total: u64,
+    tx: &Sender<Msg>,
+    cancel: &AtomicBool,
+) -> Result<PathBuf, String> {
+    #[cfg(windows)]
+    {
+        let _ = (source_spec, out_dir, total, tx, cancel);
+        return Err("MKV dumping is only supported on Linux".into());
+    }
+    #[cfg(not(windows))]
+    {
+    std::fs::create_dir_all(out_dir)
+        .map_err(|e| format!("cannot create {}: {}", out_dir.display(), e))?;
+    let _ = tx.send(Msg::DiscDumpProgress {
+        done: 0,
+        total,
+        text: format!("Dumping to MKV in {}...", out_dir.display()),
+    });
+    let mut cmd = Command::new("makemkvcon");
+    cmd.args(["-r", "mkv", "--minlength=0", source_spec, "all"])
+        .arg(out_dir)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+                Ok(())
+            });
+        }
+    }
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("MakeMKV failed to start (is makemkvcon installed?): {}", e))?;
+    let err_handle = child.stderr.take().map(|mut e| {
+        std::thread::spawn(move || {
+            let mut s = String::new();
+            let _ = e.read_to_string(&mut s);
+            s
+        })
+    });
+    let mut last_sent = Instant::now() - Duration::from_secs(5);
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = std::fs::remove_dir_all(out_dir);
+            return Err("cancelled".into());
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let err = err_handle.and_then(|h| h.join().ok()).unwrap_or_default();
+                if !status.success() {
+                    let _ = std::fs::remove_dir_all(out_dir);
+                    let tail = err.lines().rev().take(3).collect::<Vec<_>>().join(" | ");
+                    return Err(format!(
+                        "MakeMKV failed{}",
+                        if tail.is_empty() { String::new() } else { format!(": {}", tail) }
+                    ));
+                }
+                break;
+            }
+            Ok(None) => {}
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = std::fs::remove_dir_all(out_dir);
+                return Err(format!("MakeMKV error: {}", e));
+            }
+        }
+        let done = dir_size(out_dir);
+        if last_sent.elapsed() >= Duration::from_millis(500) {
+            last_sent = Instant::now();
+            let pct = if total > 0 {
+                (done.saturating_mul(100) / total).min(100)
+            } else {
+                0
+            };
+            let text = if total > 0 {
+                format!(
+                    "Dumping to MKV... {}%  ({:.1} / {:.1} GB)",
+                    pct,
+                    done as f64 / 1e9,
+                    total as f64 / 1e9
+                )
+            } else {
+                format!("Dumping to MKV... {:.1} GB", done as f64 / 1e9)
+            };
+            let _ = tx.send(Msg::DiscDumpProgress {
+                done,
+                total,
+                text,
+            });
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    if !contains_mkv(out_dir) {
+        let _ = std::fs::remove_dir_all(out_dir);
+        return Err("MakeMKV did not produce any MKV files".into());
+    }
+    Ok(out_dir.to_path_buf())
+    }
+}
+
 /// Destination for a decrypted DVD image, named `<disc label> (decrypted).iso`.
 pub fn decrypted_iso_path(dir: &Path, device: &str) -> PathBuf {
     let label = disc_label(device)
@@ -267,10 +430,333 @@ pub fn decrypted_iso_path(dir: &Path, device: &str) -> PathBuf {
     dir.join(format!("{} (decrypted).iso", label))
 }
 
+/// Find the folder that directly contains `VIDEO_TS` under a dvdbackup output
+/// tree.
+fn find_video_ts_root(root: &Path) -> Option<PathBuf> {
+    if root.join("VIDEO_TS").is_dir() {
+        return Some(root.to_path_buf());
+    }
+    let rd = std::fs::read_dir(root).ok()?;
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.is_dir() && p.join("VIDEO_TS").is_dir() {
+            return Some(p);
+        }
+    }
+    None
+}
+
+/// Free bytes on the filesystem containing `path` (Linux).
+#[cfg(not(windows))]
+fn free_space(path: &Path) -> Option<u64> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statvfs(c.as_ptr(), &mut st) } == 0 {
+        Some(st.f_bavail as u64 * st.f_frsize as u64)
+    } else {
+        None
+    }
+}
+
+/// Fast decrypted DVD image: `dvdbackup -M` reads through libdvdread/libdvdcss
+/// (so CSS is removed), then `genisoimage` builds a playable DVD-Video ISO.
+/// This is much quicker than MakeMKV for DVDs and does not need a license key.
+pub fn dump_dvd_with_backup(
+    device: &str,
+    dir: &Path,
+    tx: &Sender<Msg>,
+    cancel: &AtomicBool,
+) -> Result<PathBuf, String> {
+    #[cfg(windows)]
+    {
+        let _ = (device, dir, tx, cancel);
+        return Err("decrypted disc imaging is only supported on Linux".into());
+    }
+    #[cfg(not(windows))]
+    {
+        if !Path::new(device).exists() {
+            return Err(format!("{} not found", device));
+        }
+        let Some(mkbackup) = crate::tools::dvdbackup_path() else {
+            return Err("dvdbackup is not installed".into());
+        };
+        let Some(mkiso) = crate::tools::genisoimage_path() else {
+            return Err("genisoimage is not installed".into());
+        };
+        std::fs::create_dir_all(dir)
+            .map_err(|e| format!("cannot create destination folder: {}", e))?;
+        let target = decrypted_iso_path(dir, device);
+        let partial = target.with_file_name(format!(
+            "{}.part",
+            target
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "dvd.iso".to_string())
+        ));
+        let _ = std::fs::remove_file(&partial);
+        let total = device_size(device).unwrap_or(0);
+        // The rip is written as a VIDEO_TS tree and then read again to build
+        // the ISO, so this path temporarily needs about twice the disc size.
+        if total > 0 {
+            if let Some(free) = free_space(dir) {
+                let need = total.saturating_mul(22) / 10;
+                if free < need {
+                    return Err(format!(
+                        "not enough free space for dvdbackup: need about {:.1} GB (VIDEO_TS + ISO), only {:.1} GB available",
+                        need as f64 / 1e9,
+                        free as f64 / 1e9
+                    ));
+                }
+            }
+        }
+        let work = dir.join(format!(".mpdoom-dvd-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&work);
+        std::fs::create_dir_all(&work)
+            .map_err(|e| format!("cannot create working folder: {}", e))?;
+        let label = disc_label(device)
+            .map(|l| sanitize_win(&l))
+            .filter(|l| !l.trim().is_empty())
+            .unwrap_or_else(|| "dvd".to_string());
+
+        // ---- stage 1: dvdbackup (decrypts via libdvdcss) ----
+        let _ = tx.send(Msg::DiscDumpProgress {
+            done: 0,
+            total,
+            text: format!(
+                "Decrypting DVD with dvdbackup to {} (this removes CSS)...",
+                target.display()
+            ),
+        });
+        let mut cmd = Command::new(&mkbackup);
+        cmd.args(["-M", "-p", "-i", device, "-o"])
+            .arg(&work)
+            .arg("-n")
+            .arg(&label)
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::process::CommandExt;
+            unsafe {
+                cmd.pre_exec(|| {
+                    libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+                    Ok(())
+                });
+            }
+        }
+        let mut child = cmd.spawn().map_err(|e| {
+            let _ = std::fs::remove_dir_all(&work);
+            format!("dvdbackup failed to start: {}", e)
+        })?;
+        let err_handle = child.stderr.take().map(|mut e| {
+            std::thread::spawn(move || {
+                let mut s = String::new();
+                let _ = e.read_to_string(&mut s);
+                s
+            })
+        });
+        let mut last_sent = Instant::now() - Duration::from_secs(5);
+        loop {
+            if cancel.load(Ordering::Relaxed) {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = std::fs::remove_dir_all(&work);
+                let _ = std::fs::remove_file(&partial);
+                return Err("cancelled".into());
+            }
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    let err = err_handle.and_then(|h| h.join().ok()).unwrap_or_default();
+                    if !status.success() {
+                        let _ = std::fs::remove_dir_all(&work);
+                        let tail = err.lines().rev().take(3).collect::<Vec<_>>().join(" | ");
+                        return Err(format!(
+                            "dvdbackup failed{}",
+                            if tail.is_empty() {
+                                String::new()
+                            } else {
+                                format!(": {}", tail)
+                            }
+                        ));
+                    }
+                    break;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = std::fs::remove_dir_all(&work);
+                    return Err(format!("dvdbackup error: {}", e));
+                }
+            }
+            let done = dir_size(&work);
+            if last_sent.elapsed() >= Duration::from_millis(500) {
+                last_sent = Instant::now();
+                let pct = if total > 0 {
+                    (done.saturating_mul(100) / total).min(100)
+                } else {
+                    0
+                };
+                let text = if total > 0 {
+                    format!(
+                        "Decrypting DVD... {}%  ({:.1} / {:.1} GB)",
+                        pct,
+                        done as f64 / 1e9,
+                        total as f64 / 1e9
+                    )
+                } else {
+                    format!("Decrypting DVD... {:.1} GB", done as f64 / 1e9)
+                };
+                let _ = tx.send(Msg::DiscDumpProgress { done, total, text });
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+
+        let Some(disc_root) = find_video_ts_root(&work) else {
+            let _ = std::fs::remove_dir_all(&work);
+            return Err("dvdbackup produced no VIDEO_TS folder".into());
+        };
+
+        // ---- stage 2: build the ISO from the decrypted files ----
+        let _ = tx.send(Msg::DiscDumpProgress {
+            done: 0,
+            total,
+            text: format!("Building decrypted ISO {}...", target.display()),
+        });
+        let mut cmd = Command::new(&mkiso);
+        cmd.args(["-dvd-video", "-udf", "-quiet", "-V"])
+            .arg(&label)
+            .arg("-o")
+            .arg(&partial)
+            .arg(&disc_root)
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::process::CommandExt;
+            unsafe {
+                cmd.pre_exec(|| {
+                    libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+                    Ok(())
+                });
+            }
+        }
+        let mut child = cmd.spawn().map_err(|e| {
+            let _ = std::fs::remove_dir_all(&work);
+            let _ = std::fs::remove_file(&partial);
+            format!("genisoimage failed to start: {}", e)
+        })?;
+        let err_handle = child.stderr.take().map(|mut e| {
+            std::thread::spawn(move || {
+                let mut s = String::new();
+                let _ = e.read_to_string(&mut s);
+                s
+            })
+        });
+        let mut last_sent = Instant::now() - Duration::from_secs(5);
+        loop {
+            if cancel.load(Ordering::Relaxed) {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = std::fs::remove_dir_all(&work);
+                let _ = std::fs::remove_file(&partial);
+                return Err("cancelled".into());
+            }
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    let err = err_handle.and_then(|h| h.join().ok()).unwrap_or_default();
+                    if !status.success() {
+                        let _ = std::fs::remove_dir_all(&work);
+                        let _ = std::fs::remove_file(&partial);
+                        let tail = err.lines().rev().take(3).collect::<Vec<_>>().join(" | ");
+                        return Err(format!(
+                            "genisoimage failed{}",
+                            if tail.is_empty() {
+                                String::new()
+                            } else {
+                                format!(": {}", tail)
+                            }
+                        ));
+                    }
+                    break;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = std::fs::remove_dir_all(&work);
+                    let _ = std::fs::remove_file(&partial);
+                    return Err(format!("genisoimage error: {}", e));
+                }
+            }
+            let done = std::fs::metadata(&partial).map(|m| m.len()).unwrap_or(0);
+            if last_sent.elapsed() >= Duration::from_millis(500) {
+                last_sent = Instant::now();
+                let pct = if total > 0 {
+                    (done.saturating_mul(100) / total).min(100)
+                } else {
+                    0
+                };
+                let text = if total > 0 {
+                    format!(
+                        "Building decrypted ISO... {}%  ({:.1} / {:.1} GB)",
+                        pct,
+                        done as f64 / 1e9,
+                        total as f64 / 1e9
+                    )
+                } else {
+                    format!("Building decrypted ISO... {:.1} GB", done as f64 / 1e9)
+                };
+                let _ = tx.send(Msg::DiscDumpProgress { done, total, text });
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        let size = std::fs::metadata(&partial).map(|m| m.len()).unwrap_or(0);
+        if size == 0 {
+            let _ = std::fs::remove_dir_all(&work);
+            let _ = std::fs::remove_file(&partial);
+            return Err("genisoimage produced an empty image".into());
+        }
+        if let Err(e) = std::fs::rename(&partial, &target) {
+            let _ = std::fs::remove_dir_all(&work);
+            let _ = std::fs::remove_file(&partial);
+            return Err(format!("could not finalize decrypted image: {}", e));
+        }
+        let _ = std::fs::remove_dir_all(&work);
+        Ok(target)
+    }
+}
+
+/// Decrypt a CSS DVD to a playable ISO. Prefers the bundled `dvdbackup` plus
+/// `genisoimage`; falls back to MakeMKV's `backup --decrypt` when those are
+/// unavailable or the disc defeats dvdbackup. Either path removes CSS.
+pub fn dump_decrypted_dvd(
+    device: &str,
+    dir: &Path,
+    tx: &Sender<Msg>,
+    cancel: &AtomicBool,
+) -> Result<PathBuf, String> {
+    if crate::tools::dvdbackup_path().is_some() && crate::tools::genisoimage_path().is_some() {
+        match dump_dvd_with_backup(device, dir, tx, cancel) {
+            Ok(path) => return Ok(path),
+            Err(e) if e == "cancelled" => return Err(e),
+            Err(e) => {
+                let _ = tx.send(Msg::DiscDumpProgress {
+                    done: 0,
+                    total: 0,
+                    text: format!("dvdbackup could not finish ({}); trying MakeMKV...", e),
+                });
+            }
+        }
+    }
+    dump_decrypted_dvd_makemkv(device, dir, tx, cancel)
+}
+
 /// Decrypt a CSS DVD to a playable ISO using MakeMKV's `backup` mode.
 /// Unlike raw `dd`, this removes CSS so the image plays cleanly in the app or
 /// any other player. Requires the physical disc and `makemkvcon`.
-pub fn dump_decrypted_dvd(
+pub fn dump_decrypted_dvd_makemkv(
     device: &str,
     dir: &Path,
     tx: &Sender<Msg>,
@@ -441,6 +927,54 @@ mod tests {
         assert_eq!(leftovers, 0, "partial image must be removed");
         let _ = std::fs::remove_file(&src);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn mkv_output_names_are_unique_and_sanitized() {
+        let dir = std::env::temp_dir().join(format!("mpdoom-mkv-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let a = mkv_output_dir(&dir, "ID4");
+        assert_eq!(a, dir.join("ID4 (MKV)"));
+        std::fs::create_dir_all(&a).expect("create collision");
+        let b = mkv_output_dir(&dir, "ID4");
+        assert_ne!(a, b, "existing folder must not be reused");
+        assert!(b.to_string_lossy().ends_with("ID4 (MKV) (2)"));
+        let empty = mkv_output_dir(&dir, "   ");
+        assert_eq!(empty, dir.join("disc (MKV)"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dir_size_sums_nested_files() {
+        let dir = std::env::temp_dir().join(format!("mpdoom-size-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sub")).expect("create temp dir");
+        std::fs::write(dir.join("a.mkv"), vec![0u8; 100]).unwrap();
+        std::fs::write(dir.join("sub/b.mkv"), vec![0u8; 250]).unwrap();
+        assert_eq!(dir_size(&dir), 350);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn finds_video_ts_root_in_dvdbackup_layout() {
+        let dir = std::env::temp_dir().join(format!("mpdoom-vts-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let disc = dir.join("ID4");
+        std::fs::create_dir_all(disc.join("VIDEO_TS")).expect("create temp tree");
+        assert_eq!(find_video_ts_root(&dir), Some(disc.clone()));
+        assert_eq!(find_video_ts_root(&disc), Some(disc.clone()));
+        let empty = dir.join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        assert_eq!(find_video_ts_root(&empty), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn free_space_reports_a_positive_value() {
+        let dir = std::env::temp_dir();
+        assert!(free_space(&dir).unwrap_or(0) > 0);
     }
 
     #[test]

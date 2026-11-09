@@ -72,6 +72,36 @@ fn main() -> eframe::Result {
     if args.first().map(|a| a.as_str()) == Some("--bd-stream") {
         std::process::exit(crate::bdstream::run_cli(&args[1..]));
     }
+    if args.iter().any(|a| a == "--check-dvd") {
+        let deps = crate::tools::dvd_deps();
+        println!("DVD / Blu-ray support check");
+        println!(
+            "  dvdbackup .... {}",
+            crate::tools::dvdbackup_path()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "MISSING".to_string())
+        );
+        println!(
+            "  genisoimage .. {}",
+            crate::tools::genisoimage_path()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "MISSING".to_string())
+        );
+        for (name, ok) in [
+            ("libdvdread", deps.libdvdread),
+            ("libdvdnav", deps.libdvdnav),
+            ("libdvdcss", deps.libdvdcss),
+        ] {
+            println!("  {:<13} {}", name, if ok { "ok" } else { "MISSING" });
+        }
+        let hint = deps.package_hint();
+        if hint.is_empty() {
+            println!("All DVD tools are present.");
+        } else {
+            println!("{}", hint);
+        }
+        return Ok(());
+    }
     if args.iter().any(|a| a == "--version" || a == "-V") {
         println!("{} v{}", crate::consts::APP_NAME, crate::consts::APP_VERSION);
         return Ok(());

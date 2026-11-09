@@ -721,72 +721,9 @@ impl PlayerApp {
 }
 
 impl PlayerApp {
-    /// Copy a whole DVD/Blu-ray disc to an ISO on a worker thread.
-    pub(crate) fn start_disc_dump(&mut self, kind: &str) {
-        if self.disc_dumping {
-            return;
-        }
-        let source = match kind {
-            "DVD" => crate::dvd::first_drive(),
-            _ => crate::bluray::first_drive(),
-        };
-        let Some(device) = source else {
-            self.set_error("No optical drive found");
-            return;
-        };
-        // Don't make dd and the player fight over the same drive.
-        let playing_optical = self
-            .video_current
-            .as_deref()
-            .map(|p| crate::dvd::is_dvd(p) || crate::bluray::is_bluray(p))
-            .unwrap_or(false);
-        if playing_optical {
-            self.close_video();
-        }
-        // Let the user choose where the image goes. Cancelling the folder
-        // dialog cancels the dump (rather than silently writing to ~/Videos).
-        let start_dir = crate::disc::videos_dir();
-        let Some(dir) = rfd::FileDialog::new()
-            .set_title("Choose where to save the disc image")
-            .set_directory(&start_dir)
-            .pick_folder()
-        else {
-            self.set_status("Disc dump cancelled");
-            return;
-        };
-        if let Some(h) = self.disc_dump_thread.take() {
-            let _ = h.join();
-        }
-        self.disc_dump_cancel.store(false, Ordering::Relaxed);
-        self.disc_dumping = true;
-        self.disc_dump_done = 0;
-        self.disc_dump_total = 0;
-        self.disc_dump_speed = 0.0;
-        self.disc_dump_last_done = 0;
-        self.disc_dump_last_at = Instant::now();
-        let text = format!("Dumping {} disc from {} to {}...", kind, device, dir.display());
-        self.disc_dump_text = text.clone();
-        self.set_status(text);
-        let kind = kind.to_string();
-        let tx = self.msg_tx.clone();
-        let cancel = self.disc_dump_cancel.clone();
-        self.disc_dump_thread = Some(std::thread::spawn(move || {
-            match crate::disc::dump(&device, &kind, &dir, &tx, &cancel) {
-                Ok(path) => {
-                    let _ = tx.send(Msg::DiscDumpDone(path.to_string_lossy().to_string()));
-                }
-                Err(_) if cancel.load(Ordering::Relaxed) => {
-                    let _ = tx.send(Msg::DiscDumpCancelled);
-                }
-                Err(e) => {
-                    let _ = tx.send(Msg::DiscDumpFail(e));
-                }
-            }
-        }));
-    }
-
-    /// Decrypt a CSS DVD to a clean ISO with MakeMKV. This is separate from
-    /// the raw `dd` archival copy, which preserves encryption.
+    /// Decrypt a CSS DVD to a clean ISO. The worker prefers bundled
+    /// `dvdbackup` + `genisoimage`, then falls back to MakeMKV. Raw encrypted
+    /// images are never produced.
     pub(crate) fn start_dvd_decrypted_dump(&mut self) {
         if self.disc_dumping {
             return;
@@ -823,7 +760,7 @@ impl PlayerApp {
         self.disc_dump_last_done = 0;
         self.disc_dump_last_at = Instant::now();
         let text = format!(
-            "Decrypting DVD from {} to {} with MakeMKV...",
+            "Decrypting DVD from {} to {} (this removes CSS)...",
             device,
             dir.display()
         );
@@ -846,7 +783,127 @@ impl PlayerApp {
         }));
     }
 
-    /// Stop a running disc dump, kill dd promptly, and remove the partial ISO.
+    /// Dump a DVD/Blu-ray to clean MKV files with MakeMKV. If a disc image is
+    /// already open, that image is the source; otherwise the physical disc is
+    /// read. MakeMKV's `mkv` mode always decrypts, so the output never keeps
+    /// CSS/AACS.
+    pub(crate) fn start_mkv_dump(&mut self, kind: &str) {
+        if self.disc_dumping {
+            return;
+        }
+        let is_dvd = kind.eq_ignore_ascii_case("DVD");
+        let current = self.video_current.clone().filter(|p| {
+            if is_dvd {
+                crate::dvd::is_dvd(p)
+            } else {
+                crate::bluray::is_bluray(p)
+            }
+        });
+        let current_src = current
+            .as_deref()
+            .map(|p| {
+                if is_dvd {
+                    crate::dvd::source(p)
+                } else {
+                    crate::bluray::source(p)
+                }
+            })
+            .map(|s| s.to_string());
+
+        let (source_spec, label, total) = match current_src {
+            Some(src) if !src.starts_with("/dev/") => {
+                let path = PathBuf::from(&src);
+                let is_dir = path.is_dir();
+                let label = if is_dir {
+                    path.file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| kind.to_string())
+                } else {
+                    path.file_stem()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| kind.to_string())
+                };
+                let total = if is_dir {
+                    crate::disc::dir_size(&path)
+                } else {
+                    std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0)
+                };
+                let spec = if is_dir {
+                    format!("file:{}", src)
+                } else {
+                    format!("iso:{}", src)
+                };
+                (spec, label, total)
+            }
+            _ => {
+                let device = if is_dvd {
+                    crate::dvd::first_drive()
+                } else {
+                    crate::bluray::first_drive()
+                };
+                let Some(device) = device else {
+                    self.set_error("No optical drive found");
+                    return;
+                };
+                // Don't make MakeMKV and the player fight over the same drive.
+                let playing_optical = self
+                    .video_current
+                    .as_deref()
+                    .map(|p| crate::dvd::is_dvd(p) || crate::bluray::is_bluray(p))
+                    .unwrap_or(false);
+                if playing_optical {
+                    self.close_video();
+                }
+                let label = crate::disc::disc_label(&device).unwrap_or_else(|| kind.to_string());
+                (
+                    String::from("disc:0"),
+                    label,
+                    crate::disc::device_size(&device).unwrap_or(0),
+                )
+            }
+        };
+
+        let start_dir = crate::disc::videos_dir();
+        let Some(dir) = rfd::FileDialog::new()
+            .set_title("Choose where to save the MKV files")
+            .set_directory(&start_dir)
+            .pick_folder()
+        else {
+            self.set_status("MKV dump cancelled");
+            return;
+        };
+        let out = crate::disc::mkv_output_dir(&dir, &label);
+        if let Some(h) = self.disc_dump_thread.take() {
+            let _ = h.join();
+        }
+        self.disc_dump_cancel.store(false, Ordering::Relaxed);
+        self.disc_dumping = true;
+        self.disc_dump_done = 0;
+        self.disc_dump_total = 0;
+        self.disc_dump_speed = 0.0;
+        self.disc_dump_last_done = 0;
+        self.disc_dump_last_at = Instant::now();
+        let text = format!("Dumping {} to MKV (decrypted) in {}...", kind, out.display());
+        self.disc_dump_text = text.clone();
+        self.set_status(text);
+        let tx = self.msg_tx.clone();
+        let cancel = self.disc_dump_cancel.clone();
+        self.disc_dump_thread = Some(std::thread::spawn(move || {
+            match crate::disc::dump_to_mkv(&source_spec, &out, total, &tx, &cancel) {
+                Ok(path) => {
+                    let _ = tx.send(Msg::DiscDumpDone(path.to_string_lossy().to_string()));
+                }
+                Err(_) if cancel.load(Ordering::Relaxed) => {
+                    let _ = tx.send(Msg::DiscDumpCancelled);
+                }
+                Err(e) => {
+                    let _ = tx.send(Msg::DiscDumpFail(e));
+                }
+            }
+        }));
+    }
+
+    /// Stop a running dump, kill the worker promptly, and remove partial output.
     pub(crate) fn cancel_disc_dump(&mut self) {
         if !self.disc_dumping && self.disc_dump_thread.is_none() {
             return;

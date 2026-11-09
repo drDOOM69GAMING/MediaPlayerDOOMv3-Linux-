@@ -12,7 +12,7 @@ A retro DOOM-styled media player rendered in egui. Tape, CD, and Radio faces on 
   - **RADIO**: FM/AM dial with click-and-drag tuning, presets, SCAN, live web streams, and an **ADD STATION** dialog to save your own FM/AM stream presets
   - **DVD**: play a DVD movie directly from the optical drive or from an `.iso`/`.img` image using ffmpeg's `dvdvideo` demuxer; encrypted discs are decrypted with libdvdcss when installed
   - **BLU-RAY**: play a Blu-ray movie from the optical drive or an `.iso`/`.img` using ffmpeg's `bluray` protocol. AACS keys are read from the user's own `~/.config/aacs/KEYDB.cfg` (or `$XDG_CONFIG_HOME/aacs/KEYDB.cfg`); no keys are shipped with the app. English audio is preferred and subtitles are disabled by default for DVD/Blu-ray
-  - **Disc imaging**: both the DVD and Blu-ray decks have **DUMP DISC → ISO**, which copies the entire disc (menus, extras and all) to a uniquely named `.iso` in your XDG Videos folder using a background `dd` worker with progress
+  - **Disc dumping**: both the DVD and Blu-ray decks have **DUMP TO MKV**, which decrypts and remuxes every title to clean MKV files with MakeMKV (from the open image or the physical disc). The DVD deck also has **DUMP TO ISO**, a decrypted, directly playable image built with the bundled `dvdbackup` + `genisoimage` (MakeMKV is the fallback). No encrypted video output is ever produced
 - **Bands catalog**: songs grouped by artist folder (A-Z, scrollable), rebuilt from whatever folder you add
 - **Play order switch**: flip the retro wall switch under BANDS. ON = random shuffle, OFF = normal in-order playback
 - **Smart shuffle**: weighted by your listening history, or plain shuffle
@@ -40,7 +40,7 @@ A retro DOOM-styled media player rendered in egui. Tape, CD, and Radio faces on 
 
 **Linux (tested on CachyOS/KDE Plasma on both Wayland and X11)**
 - Rust toolchain (`rustup` recommended, or the distro's `rust`)
-- Runtime tools: `ffmpeg` (includes ffprobe), `mkvmerge` (MKVToolNix), `cdparanoia` for CD ripping, and libdvdread/libdvdnav for DVD playback (ffmpeg normally pulls these in). `libdvdcss` is needed only for encrypted commercial DVDs
+- Runtime tools: `ffmpeg` (includes ffprobe), `mkvmerge` (MKVToolNix), `cdparanoia` for CD ripping, and libdvdread/libdvdnav for DVD playback (ffmpeg normally pulls these in). `libdvdcss` is needed only for encrypted commercial DVDs. `dvdbackup` + `genisoimage` power the fast decrypted **DUMP TO ISO** path; a CachyOS `dvdbackup` build is bundled and installed automatically
 - ALSA (PipeWire/PulseAudio provide it), plus X11 or Wayland libraries
 - An XDG desktop portal and backend for the file pickers (KDE/GNOME/XFCE provide one)
 - `xdg-utils` for "show in folder" (the app falls back to `gio`, `kioclient`, `thunar`, `nautilus`)
@@ -53,17 +53,30 @@ install their dependencies in one command:
 ./packaging/install-deps.sh
 ```
 
+Check the DVD stack at any time with:
+
+```bash
+mediaplayerofdoom --check-dvd
+```
+
+That prints the locations of `dvdbackup`/`genisoimage` and whether
+`libdvdread`, `libdvdnav`, and `libdvdcss` are present, plus the install
+command for CachyOS/Arch (`libdvdread libdvdnav libdvdcss`) or Debian/Ubuntu/Mint
+(`libdvdread4 libdvdnav4 libdvdcss2`).
+
 Or install them manually:
 
 ```bash
 # Arch / CachyOS / Manjaro
 sudo pacman -S --needed base-devel rust ffmpeg mkvtoolnix-cli \
+  libdvdread libdvdnav libdvdcss dvdbackup cdrkit \
   alsa-lib openssl libxkbcommon wayland libx11 xdg-utils
 
 # Debian / Ubuntu / Mint / Pop!_OS
 sudo apt update
 sudo apt install build-essential pkg-config libasound2-dev libxkbcommon-dev \
   libwayland-dev libx11-dev libssl-dev ffmpeg mkvtoolnix xdg-utils \
+  libdvdread4 libdvdnav4 libdvdcss2 dvdbackup genisoimage \
   xdg-desktop-portal
 
 # Fedora
@@ -188,6 +201,32 @@ This app is built on the work of some incredible open-source projects, and it wo
 - The **Rust** language and its crate ecosystem.
 
 Full details, license texts, and donation links are in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). If you can, consider donating to FFmpeg, yt-dlp, and MKVToolNix - they give this all away for free.
+
+## v3.2.29 changelog
+
+- **Bundled CachyOS `dvdbackup` + faster decrypted DVD images**
+  - Vendored the CachyOS/Arch `dvdbackup` 0.4.2 build in `packaging/vendor/`
+  - `install.sh` installs it into the app's per-user tools folder (system installs use `$PREFIX/lib/mediaplayerofdoom`)
+  - **DUMP TO ISO** now prefers `dvdbackup -M` + `genisoimage`, which decrypts through libdvdcss and is much faster than a MakeMKV rescan; MakeMKV `backup --decrypt` remains the automatic fallback
+  - Cancelling removes the partial ISO and the temporary VIDEO_TS tree
+- **DVD dependency reporting**
+  - The DVD deck and **Help** now list the required libraries: `libdvdread`, `libdvdnav`, `libdvdcss` (CachyOS/Arch) and `libdvdread4`, `libdvdnav4`, `libdvdcss2` (Debian/Ubuntu/Mint)
+  - Missing tools show an install hint in the deck instead of failing silently
+  - New `mediaplayerofdoom --check-dvd` prints the resolved `dvdbackup`/`genisoimage` paths, library status, and the correct install command for CachyOS/Arch or Debian/Ubuntu/Mint
+  - `DUMP TO ISO` checks free space up front (the temporary VIDEO_TS tree plus the ISO need about twice the disc size) and falls back to MakeMKV when the fast path cannot run
+  - `packaging/install-deps.sh` now installs `dvdbackup`, `cdrkit`/`genisoimage` and the DVD libraries for each distro
+- Version bump to **v3.2.29**
+
+## v3.2.28 changelog
+
+- **Decrypted-only video dumps**
+  - Added **DUMP TO MKV** to the DVD and Blu-ray decks; it decrypts and remuxes every title with MakeMKV
+  - MKV dumping uses the currently open ISO/folder when there is one, otherwise the physical disc, and always strips CSS/AACS
+  - Renamed **DECRYPT → ISO** to **DUMP TO ISO** on the DVD deck; it writes a clean, directly playable ISO with `makemkvcon backup --decrypt`
+  - Removed the raw encrypted **DUMP DISC → ISO** action from the UI; raw `dd` remains internal only
+  - Dump progress reports decrypted output size, speed and ETA, and CANCEL removes the partial output
+- **Help menu**: documents DUMP TO MKV, DUMP TO ISO, and the no-encryption policy
+- Version bump to **v3.2.28**
 
 ## v3.2.27 changelog
 

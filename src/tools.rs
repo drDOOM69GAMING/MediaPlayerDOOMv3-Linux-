@@ -65,6 +65,137 @@ pub fn mkvmerge_path() -> PathBuf {
     tool_path("mkvmerge")
 }
 
+/// Resolve a DVD helper: the app-managed copy wins, then a copy next to the
+/// executable, then one installed in `$PREFIX/lib/mediaplayerofdoom`, then
+/// `PATH`.
+pub fn dvdbackup_path() -> Option<PathBuf> {
+    let local = tools_dir().join(format!("dvdbackup{}", EXE_SUFFIX));
+    if local.is_file() {
+        return Some(local);
+    }
+    let exe = exe_dir();
+    for cand in [
+        exe.join(format!("dvdbackup{}", EXE_SUFFIX)),
+        exe.join(format!("../lib/mediaplayerofdoom/dvdbackup{}", EXE_SUFFIX)),
+    ] {
+        if cand.is_file() {
+            return Some(cand);
+        }
+    }
+    which(&format!("dvdbackup{}", EXE_SUFFIX)).or_else(|| which("dvdbackup"))
+}
+
+pub fn genisoimage_path() -> Option<PathBuf> {
+    which("genisoimage").or_else(|| which("mkisofs"))
+}
+
+/// Runtime pieces the DVD decks need. Names follow the Arch/CachyOS packages;
+/// `package_hint` also prints the Debian/Ubuntu equivalents.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DvdDeps {
+    pub dvdbackup: bool,
+    pub genisoimage: bool,
+    pub libdvdread: bool,
+    pub libdvdnav: bool,
+    pub libdvdcss: bool,
+}
+
+impl DvdDeps {
+    pub fn missing_playback(&self) -> Vec<&'static str> {
+        let mut v = Vec::new();
+        if !self.libdvdread {
+            v.push("libdvdread");
+        }
+        if !self.libdvdnav {
+            v.push("libdvdnav");
+        }
+        if !self.libdvdcss {
+            v.push("libdvdcss");
+        }
+        v
+    }
+
+    pub fn missing_dump(&self) -> Vec<&'static str> {
+        let mut v = self.missing_playback();
+        if !self.dvdbackup {
+            v.push("dvdbackup");
+        }
+        if !self.genisoimage {
+            v.push("genisoimage");
+        }
+        v
+    }
+
+    pub fn all_present(&self) -> bool {
+        self.missing_dump().is_empty()
+    }
+
+    /// Human-readable install hints for both supported distro families.
+    pub fn package_hint(&self) -> String {
+        let missing = self.missing_dump();
+        if missing.is_empty() {
+            return String::new();
+        }
+        let arch = missing.join(" ");
+        let deb = missing
+            .iter()
+            .map(|n| match *n {
+                "libdvdread" => "libdvdread4",
+                "libdvdnav" => "libdvdnav4",
+                "libdvdcss" => "libdvdcss2",
+                "genisoimage" => "genisoimage",
+                other => other,
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        format!(
+            "Missing DVD tools: {}.  CachyOS/Arch: sudo pacman -S {}   Debian/Ubuntu/Mint: sudo apt install {}",
+            missing.join(", "),
+            arch,
+            deb
+        )
+    }
+}
+
+fn ldconfig_lists(name: &str) -> bool {
+    if let Ok(out) = std::process::Command::new("ldconfig").arg("-p").output() {
+        if out.status.success() {
+            return String::from_utf8_lossy(&out.stdout).contains(name);
+        }
+    }
+    false
+}
+
+pub fn dvd_deps() -> DvdDeps {
+    // Called from the DVD deck every frame; probe the system only once.
+    static CACHE: std::sync::OnceLock<DvdDeps> = std::sync::OnceLock::new();
+    *CACHE.get_or_init(dvd_deps_probe)
+}
+
+fn dvd_deps_probe() -> DvdDeps {
+    #[cfg(windows)]
+    {
+        // Windows builds do not use the Linux DVD stack; don't nag about it.
+        return DvdDeps {
+            dvdbackup: false,
+            genisoimage: false,
+            libdvdread: true,
+            libdvdnav: true,
+            libdvdcss: true,
+        };
+    }
+    #[cfg(not(windows))]
+    {
+        DvdDeps {
+            dvdbackup: dvdbackup_path().is_some(),
+            genisoimage: genisoimage_path().is_some(),
+            libdvdread: ldconfig_lists("libdvdread.so"),
+            libdvdnav: ldconfig_lists("libdvdnav.so"),
+            libdvdcss: ldconfig_lists("libdvdcss.so"),
+        }
+    }
+}
+
 /// Folder where REC saves WAV files.
 ///
 /// Windows keeps the historical `<exe dir>/Recordings`; Linux writes under the
@@ -247,4 +378,37 @@ fn download_ffmpeg_windows(tx: &Sender<Msg>) -> Result<(), String> {
         return Err("ffmpeg extraction produced no ffmpeg.exe".into());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dvd_hint_lists_both_package_families() {
+        let deps = DvdDeps::default();
+        let hint = deps.package_hint();
+        for arch in ["libdvdread", "libdvdnav", "libdvdcss", "dvdbackup", "genisoimage"] {
+            assert!(hint.contains(arch), "missing Arch name {} in {}", arch, hint);
+        }
+        for deb in ["libdvdread4", "libdvdnav4", "libdvdcss2", "dvdbackup", "genisoimage"] {
+            assert!(hint.contains(deb), "missing Debian name {} in {}", deb, hint);
+        }
+        assert!(hint.contains("pacman -S"));
+        assert!(hint.contains("apt install"));
+    }
+
+    #[test]
+    fn dvd_deps_reports_missing_playback_only() {
+        let deps = DvdDeps {
+            dvdbackup: true,
+            genisoimage: true,
+            libdvdread: true,
+            libdvdnav: false,
+            libdvdcss: false,
+        };
+        assert_eq!(deps.missing_playback(), vec!["libdvdnav", "libdvdcss"]);
+        assert!(!deps.all_present());
+        assert_eq!(deps.missing_dump(), vec!["libdvdnav", "libdvdcss"]);
+    }
 }

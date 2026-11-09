@@ -2326,7 +2326,7 @@ video_ended: false,
             }
             Msg::DiscDumpDone(path) => {
                 self.finish_disc_dump();
-                self.set_status(format!("Disc image written: {}", path));
+                self.set_status(format!("Dump finished: {}", path));
             }
             Msg::DiscDumpFail(e) => {
                 self.finish_disc_dump();

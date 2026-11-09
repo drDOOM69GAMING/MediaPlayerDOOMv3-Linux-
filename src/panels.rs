@@ -69,17 +69,26 @@ impl PlayerApp {
             if retro_btn(ui, "CANCEL DUMP", Color32::from_rgb(255, 120, 120), th.btn_bg).clicked() {
                 self.cancel_disc_dump();
             }
-        } else if retro_btn(ui, "DUMP DISC → ISO", th.fg, th.btn_bg).clicked() {
-            self.start_disc_dump(kind);
+        } else if retro_btn(ui, "DUMP TO MKV", th.fg, th.btn_bg)
+            .on_hover_text(
+                "Decrypt and remux every title to clean MKV files with MakeMKV. \
+                 Works from the open disc image or the physical disc; output is never encrypted.",
+            )
+            .clicked()
+        {
+            self.start_mkv_dump(kind);
         }
     }
 
-    /// DVD dump pair: raw archival ISO plus a CSS-decrypted, playable ISO.
+    /// DVD dump pair: clean MKV from the open image/disc, plus a decrypted ISO.
     pub(crate) fn draw_dvd_dump_buttons(&mut self, ui: &mut egui::Ui, th: &ThemePalette) {
         self.draw_disc_dump(ui, "DVD", th);
         if !self.disc_dumping {
-            if retro_btn(ui, "DECRYPT → ISO", th.fg, th.btn_bg)
-                .on_hover_text("Decrypt a CSS DVD to a playable ISO with MakeMKV (requires the physical disc)")
+            if retro_btn(ui, "DUMP TO ISO", th.fg, th.btn_bg)
+                .on_hover_text(
+                    "Decrypt the physical DVD to a clean, playable ISO with MakeMKV \
+                     (removes CSS; requires the disc in the drive).",
+                )
                 .clicked()
             {
                 self.start_dvd_decrypted_dump();
@@ -714,6 +723,15 @@ impl PlayerApp {
                                     .monospace()
                                     .size(9.0),
                             );
+                            let deps = crate::tools::dvd_deps();
+                            if !deps.all_present() {
+                                ui.label(
+                                    RichText::new(deps.package_hint())
+                                        .color(Color32::from_rgb(255, 190, 120))
+                                        .monospace()
+                                        .size(9.0),
+                                );
+                            }
                         });
                     });
                     ui.add_space(8.0);
@@ -1816,9 +1834,13 @@ impl PlayerApp {
                 ui.label(RichText::new("Play ................ Drive or ISO; English audio preferred; subtitles off; fullscreen player with seek bar and STOP").color(dim).monospace());
                 ui.label(RichText::new("DVD seeking ......... Software MPEG-2 decode + CPU filters; metadata probed once so seeks do not thrash the drive").color(dim).monospace());
                 ui.label(RichText::new("Blu-ray ............. VAAPI hardware decode + GPU scale/pad/RGBA; libbluray streamer gives real time seeking").color(dim).monospace());
-                ui.label(RichText::new("DUMP DISC → ISO ..... Raw 1:1 archival image (preserves CSS/encryption); drive-limited speed with MB/s and ETA").color(dim).monospace());
-                ui.label(RichText::new("DECRYPT → ISO ....... DVD only: MakeMKV backup to a clean, playable ISO (requires the physical disc and makemkvcon)").color(dim).monospace());
-                ui.label(RichText::new("Raw ISO note ........ A raw copy of an encrypted DVD is not playable as-is; use DECRYPT → ISO or play the disc").color(dim).monospace());
+                ui.label(RichText::new("DVD tools ........... libdvdread + libdvdnav + libdvdcss; CachyOS/Arch: sudo pacman -S libdvdread libdvdnav libdvdcss").color(dim).monospace());
+                ui.label(RichText::new("DVD tools (Debian) .. libdvdread4 + libdvdnav4 + libdvdcss2; sudo apt install libdvdread4 libdvdnav4 libdvdcss2").color(dim).monospace());
+                ui.label(RichText::new("Dump tools .......... dvdbackup (bundled CachyOS build) + genisoimage; MakeMKV is used for MKV and as ISO fallback").color(dim).monospace());
+                ui.label(RichText::new("DUMP TO MKV ........ Decrypt and remux every title to clean MKV files (MakeMKV); works from the open image or the physical disc").color(dim).monospace());
+                ui.label(RichText::new("DUMP TO ISO ........ DVD only: dvdbackup + genisoimage (or MakeMKV backup --decrypt) to a clean, playable ISO").color(dim).monospace());
+                ui.label(RichText::new("Dump space .......... DUMP TO ISO temporarily needs about twice the disc size; the VIDEO_TS copy is removed after the ISO is built").color(dim).monospace());
+                ui.label(RichText::new("No encryption ....... Every video output is decrypted; raw encrypted images are never produced or offered").color(dim).monospace());
                 ui.add_space(6.0);
 
                 ui.label(RichText::new("CD MODE").color(acc).monospace().strong());
@@ -1833,7 +1855,8 @@ impl PlayerApp {
                 ui.add_space(6.0);
 
                 ui.label(RichText::new("TROUBLESHOOTING").color(acc).monospace().strong());
-                ui.label(RichText::new("DVD blocks .......... Raw CSS ISO? Use DECRYPT → ISO or play the physical disc").color(dim).monospace());
+                ui.label(RichText::new("DVD blocks .......... Encrypted image? Use DUMP TO MKV from the image or DUMP TO ISO; raw encrypted images are unsupported").color(dim).monospace());
+                ui.label(RichText::new("Check DVD tools ..... Run `mediaplayerofdoom --check-dvd` to list dvdbackup, genisoimage and the DVD libraries").color(dim).monospace());
                 ui.label(RichText::new("Ratings missing ..... MusicBrainz has no community rating for that track/album; no public star feed covers everything").color(dim).monospace());
                 ui.label(RichText::new("Covers missing ...... No local/web match; Meta All retries every run and reports the count without art").color(dim).monospace());
                 ui.label(RichText::new("Dump slow ........... Optical CAV/riplock; check the live MB/s and ETA; dirty discs are slower").color(dim).monospace());

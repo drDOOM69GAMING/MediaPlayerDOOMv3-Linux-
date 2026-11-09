@@ -22,6 +22,28 @@ install -Dm755 target/release/mediaplayerofdoom "$BIN/mediaplayerofdoom"
 install -Dm644 packaging/mediaplayerofdoom.desktop "$APPS/mediaplayerofdoom.desktop"
 install -Dm644 assets/mediaplayerofdoom.png "$ICONS/mediaplayerofdoom.png"
 
+# Ship the CachyOS dvdbackup build for decrypted DVD images. The app looks in
+# its per-user tools folder first, then next to the binary and on PATH.
+if [ -x packaging/vendor/dvdbackup ]; then
+    if [ "$(id -u)" -eq 0 ]; then
+        DVD_DEST="$PREFIX/lib/mediaplayerofdoom/dvdbackup"
+    else
+        DATA="${XDG_DATA_HOME:-$HOME/.local/share}"
+        case "$DATA" in
+            /*) ;;
+            *) DATA="$HOME/.local/share" ;;
+        esac
+        DVD_DEST="$DATA/mediaplayerofdoom/tools/dvdbackup"
+    fi
+    install -Dm755 packaging/vendor/dvdbackup "$DVD_DEST"
+    # A vendored x86_64-v3 binary cannot run on older CPUs. Drop it if it
+    # cannot start so the app falls back to a distro-installed dvdbackup.
+    if ! "$DVD_DEST" --version >/dev/null 2>&1; then
+        echo "warning: bundled dvdbackup cannot run on this CPU; install the distro dvdbackup package"
+        rm -f "$DVD_DEST"
+    fi
+fi
+
 if command -v update-desktop-database >/dev/null 2>&1; then
     update-desktop-database "$APPS" >/dev/null 2>&1 || true
 fi

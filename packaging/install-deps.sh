@@ -7,7 +7,8 @@ if command -v pacman >/dev/null 2>&1; then
     echo "Detected Arch/CachyOS (pacman)"
     sudo pacman -S --needed --noconfirm \
         base-devel rust ffmpeg mkvtoolnix-cli cdparanoia \
-        libdvdread libdvdnav libdvdcss libbluray libaacs \
+        libdvdread libdvdnav libdvdcss dvdbackup cdrkit \
+        libbluray libaacs \
         alsa-lib openssl libxkbcommon libxkbcommon-x11 wayland libx11 xdg-utils
 elif command -v apt >/dev/null 2>&1; then
     echo "Detected Debian/Ubuntu/Mint (apt)"
@@ -16,6 +17,7 @@ elif command -v apt >/dev/null 2>&1; then
         build-essential pkg-config libasound2-dev \
         libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-dev \
         libssl-dev ffmpeg mkvtoolnix cdparanoia libbluray2 libaacs0 xdg-utils \
+        dvdbackup genisoimage \
         xdg-desktop-portal xdg-desktop-portal-gtk
 elif command -v dnf >/dev/null 2>&1; then
     echo "Detected Fedora (dnf)"
@@ -44,4 +46,7 @@ if ! command -v cargo >/dev/null 2>&1; then
 fi
 echo "Dependencies ready. Now run: ./install.sh"
 echo "Note: encrypted DVDs need libdvdcss (Arch: pacman -S libdvdcss;"
-echo "      Ubuntu/Mint may require the VideoLAN repo; unencrypted DVDs/ISOs work without it)."
+echo "      Debian/Ubuntu/Mint: apt install libdvdcss2 from the VideoLAN repo)."
+echo "      DUMP TO ISO uses dvdbackup + genisoimage; a CachyOS dvdbackup"
+echo "      binary is bundled in packaging/vendor and installed by install.sh."
+echo "      Debian names for the DVD stack: libdvdread4 libdvdnav4 libdvdcss2."
