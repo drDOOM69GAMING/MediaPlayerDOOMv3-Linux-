@@ -92,20 +92,24 @@ pub fn lib_loop(rx: Receiver<LibCmd>, tx: Sender<Msg>, clock: std::sync::Arc<std
             };
             let Ok(paths) = paths else { return; };
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let mut done: Vec<String> = Vec::new();
                 let mut missing: Vec<String> = Vec::new();
                 for p in paths {
                     if art_cache_ok(&p) {
+                        done.push(p);
                         continue;
                     }
                     if let Some(b) = find_local_art(&p) {
                         if let Some(nb) = normalize_art(&b) {
-                            let _ = write_art_cache(&p, &nb);
-                            continue;
+                            if write_art_cache(&p, &nb) {
+                                done.push(p);
+                                continue;
+                            }
                         }
                     }
                     missing.push(p);
                 }
-                let _ = tx2.send(Msg::ArtAll { missing });
+                let _ = tx2.send(Msg::ArtAll { done, missing });
             }));
         });
     }

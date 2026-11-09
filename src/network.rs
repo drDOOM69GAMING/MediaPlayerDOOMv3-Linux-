@@ -3,6 +3,7 @@
 // Net thread: yt-dlp + web art/lyrics lookup.
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant};
 use crate::consts::{APP_NAME, APP_VERSION};
@@ -23,6 +24,9 @@ pub fn net_loop(rx: Receiver<NetCmd>, tx: Sender<Msg>) {
                     // "Meta All" web lookups are handled by the parallel
                     // web_art_loop pool, not the single net thread.
                 }
+                NetCmd::WebArtGroup { .. } => {
+                    // Album-group lookups also run in the parallel pool.
+                }
                 NetCmd::Lyrics(artist, title) => {
                     let text = fetch_lyrics(&artist, &title);
                     let _ = tx.send(Msg::Lyrics { artist, title, text });
@@ -36,7 +40,11 @@ pub fn net_loop(rx: Receiver<NetCmd>, tx: Sender<Msg>) {
 /// several artwork lookups happen in parallel instead of one slow sequential
 /// stream on the single net thread - a big library would otherwise sit at
 /// "N web art left" for hours and never finish.
-pub fn web_art_loop(rx: std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Receiver<NetCmd>>>, tx: Sender<Msg>) {
+pub fn web_art_loop(
+    rx: std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Receiver<NetCmd>>>,
+    tx: Sender<Msg>,
+    generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
+) {
     loop {
         let cmd = {
             let guard = rx.lock().unwrap();
@@ -44,11 +52,49 @@ pub fn web_art_loop(rx: std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Receive
         };
         let Ok(cmd) = cmd else { break };
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            if let NetCmd::WebArtFor { path, artist, album } = cmd {
-                let bytes = fetch_web_art(&artist, &album).and_then(|b| normalize_art(&b));
-                let _ = tx.send(Msg::ArtWebFor { path, bytes });
+            match cmd {
+                NetCmd::WebArtFor { path, artist, album } => {
+                    let bytes = fetch_web_art(&artist, &album).and_then(|b| normalize_art(&b));
+                    let _ = tx.send(Msg::ArtWebFor { path, bytes });
+                }
+                NetCmd::WebArtGroup { gen, paths, artist, album } => {
+                    if gen == generation.load(Ordering::Relaxed) {
+                        let bytes = fetch_web_art(&artist, &album).and_then(|b| normalize_art(&b));
+                        if gen == generation.load(Ordering::Relaxed) {
+                            let _ = tx.send(Msg::ArtWebGroup { paths, bytes });
+                        }
+                    }
+                }
+                _ => {}
             }
         }));
+    }
+}
+
+/// Sequential MusicBrainz ratings worker. MusicBrainz allows ~1 request per
+/// second, so running more threads would not help. Each album takes two
+/// requests (release search + release lookup with recordings/ratings).
+pub fn ratings_loop(
+    rx: Receiver<RatingCmd>,
+    tx: Sender<Msg>,
+    cancel: std::sync::Arc<AtomicBool>,
+    generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
+) {
+    while let Ok(cmd) = rx.recv() {
+        let RatingCmd::Album { gen, key, artist, album, paths } = cmd;
+        if cancel.load(Ordering::Relaxed)
+            || gen != generation.load(std::sync::atomic::Ordering::Relaxed)
+        {
+            continue;
+        }
+        let result = fetch_album_ratings(&artist, &album);
+        if cancel.load(Ordering::Relaxed)
+            || gen != generation.load(std::sync::atomic::Ordering::Relaxed)
+        {
+            continue;
+        }
+        let (album_stars, tracks) = result.unwrap_or((0, Vec::new()));
+        let _ = tx.send(Msg::RatingsAlbum { gen, key, paths, album_stars, tracks });
     }
 }
 
@@ -107,18 +153,28 @@ fn http_client() -> Option<reqwest::blocking::Client> {
 pub fn fetch_web_art(artist: &str, album: &str) -> Option<Vec<u8>> {
     let artist = artist.trim();
     let album = album.trim();
-    if is_placeholder_meta(artist) || is_placeholder_meta(album) {
+    if is_placeholder_meta(album) {
         return None;
     }
+    // A known album with an unknown/Various-Artists artist is still worth an
+    // album-only search (compilations and untagged rips).
+    let search_artist = if is_placeholder_meta(artist) || artist.eq_ignore_ascii_case("various artists") {
+        ""
+    } else {
+        artist
+    };
     let client = http_client()?;
     let mut urls: Vec<String> = Vec::new();
-    if let Some(u) = itunes_art_url(&client, artist, album) {
+    if let Some(u) = itunes_art_url(&client, search_artist, album) {
         urls.push(u);
     }
-    if let Some(u) = deezer_art_url(&client, artist, album) {
+    if let Some(u) = deezer_art_url(&client, search_artist, album) {
         urls.push(u);
     }
-    if let Some(u) = cover_art_archive_url(&client, artist, album) {
+    if let Some(u) = cover_art_archive_url(&client, search_artist, album) {
+        urls.push(u);
+    }
+    if let Some(u) = theaudiodb_art_url(&client, search_artist, album) {
         urls.push(u);
     }
     for url in urls {
@@ -223,18 +279,54 @@ fn mb_throttle() {
     }
 }
 
-fn cover_art_archive_url(client: &reqwest::blocking::Client, artist: &str, album: &str) -> Option<String> {
-    mb_throttle();
-    let query = format!("release:\"{}\" AND artist:\"{}\"", album, artist);
-    let res = client
-        .get("https://musicbrainz.org/ws/2/release/")
-        .query(&[("query", query), ("fmt", "json".to_string()), ("limit", "8".to_string())])
-        .send()
-        .ok()?;
-    if !res.status().is_success() {
+/// MusicBrainz occasionally answers a burst with 503/429. Retry with backoff
+/// (honouring Retry-After when present) so a large Meta All run does not lose
+/// albums to a transient throttle.
+fn mb_get_json(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    params: &[(&str, String)],
+    retries: u64,
+) -> Option<serde_json::Value> {
+    for attempt in 0..retries {
+        mb_throttle();
+        let res = client.get(url).query(params).send().ok()?;
+        if res.status().is_success() {
+            return res.json().ok();
+        }
+        let code = res.status().as_u16();
+        if code == 429 || code == 503 {
+            let wait = res
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(2 + attempt * 3)
+                .clamp(1, 15);
+            std::thread::sleep(Duration::from_secs(wait));
+            continue;
+        }
         return None;
     }
-    let json: serde_json::Value = res.json().ok()?;
+    None
+}
+
+fn cover_art_archive_url(client: &reqwest::blocking::Client, artist: &str, album: &str) -> Option<String> {
+    let query = if is_placeholder_meta(artist) {
+        format!("release:\"{}\"", album)
+    } else {
+        format!("release:\"{}\" AND artist:\"{}\"", album, artist)
+    };
+    let json = mb_get_json(
+        client,
+        "https://musicbrainz.org/ws/2/release/",
+        &[
+            ("query", query),
+            ("fmt", "json".to_string()),
+            ("limit", "8".to_string()),
+        ],
+        1,
+    )?;
     let id = parse_musicbrainz_id(&json, artist, album)?;
     Some(format!("https://coverartarchive.org/release/{}/front-500", id))
 }
@@ -273,6 +365,199 @@ fn normalize_name(s: &str) -> String {
 
 /// 0 means "not the same album". Anything >= 3 is a plausible match; a higher
 /// score means a better one.
+/// TheAudioDB is the last-resort cover source: a free community database that
+/// often has artwork for releases the big services miss. The public test key
+/// (`2`) is rate-limited, so it is tried only after iTunes/Deezer/CAA.
+fn theaudiodb_art_url(client: &reqwest::blocking::Client, artist: &str, album: &str) -> Option<String> {
+    let mut req = client
+        .get("https://www.theaudiodb.com/api/v1/json/2/searchalbum.php")
+        .query(&[("a", album)]);
+    if !is_placeholder_meta(artist) {
+        req = req.query(&[("s", artist)]);
+    }
+    let res = req.send().ok()?;
+    if !res.status().is_success() {
+        return None;
+    }
+    let json: serde_json::Value = res.json().ok()?;
+    parse_theaudiodb_art(&json, artist, album)
+}
+
+pub fn parse_theaudiodb_art(json: &serde_json::Value, artist: &str, album: &str) -> Option<String> {
+    let list = json.get("album")?.as_array()?;
+    let mut best: Option<(i32, String)> = None;
+    for r in list {
+        let ca = r.get("strArtist").and_then(|v| v.as_str()).unwrap_or("");
+        let al = r.get("strAlbum").and_then(|v| v.as_str()).unwrap_or("");
+        let score = match_score(artist, album, ca, al);
+        if score < 3 {
+            continue;
+        }
+        if let Some(url) = r.get("strAlbumThumb").and_then(|v| v.as_str()) {
+            if !url.is_empty() && best.as_ref().map_or(true, |(s, _)| score > *s) {
+                best = Some((score, url.to_string()));
+            }
+        }
+    }
+    best.map(|(_, u)| u)
+}
+
+// ---------------------------------------------------------------------------
+// MusicBrainz community ratings (1-5 stars)
+//
+// MusicBrainz exposes public community ratings for release groups (albums) and
+// recordings (songs). One release lookup returns both, so an album costs two
+// requests: a release search and the release lookup.
+// ---------------------------------------------------------------------------
+
+fn mb_escape(s: &str) -> String {
+    s.replace('\\', " ").replace('"', " ").trim().to_string()
+}
+
+fn mb_stars(value: f64) -> u8 {
+    if value <= 0.0 {
+        0
+    } else {
+        (value.round() as i64).clamp(1, 5) as u8
+    }
+}
+
+/// Normalized key used to match a local track title to a MusicBrainz track.
+pub fn rating_title_key(title: &str) -> String {
+    let mut s = normalize_name(title);
+    // Common suffixes that differ between local rips and MusicBrainz.
+    for junk in ["remastered", "remaster", "deluxe edition", "deluxe", "bonus track", "edition", "explicit"] {
+        s = s.replace(junk, "");
+    }
+    s
+}
+
+fn mb_release_search(client: &reqwest::blocking::Client, artist: &str, album: &str) -> Option<String> {
+    let query = if is_placeholder_meta(artist) {
+        format!("release:\"{}\"", mb_escape(album))
+    } else {
+        format!("release:\"{}\" AND artist:\"{}\"", mb_escape(album), mb_escape(artist))
+    };
+    let json = mb_get_json(
+        client,
+        "https://musicbrainz.org/ws/2/release/",
+        &[
+            ("query", query),
+            ("fmt", "json".to_string()),
+            ("limit", "8".to_string()),
+        ],
+        4,
+    )?;
+    if let Some(id) = parse_mb_release_id(&json, artist, album) {
+        return Some(id);
+    }
+    // Compilations and "Various Artists" folders often have a track artist
+    // that is not the release artist. Retry album-only before giving up.
+    if !is_placeholder_meta(artist) {
+        let query = format!("release:\"{}\"", mb_escape(album));
+        let json = mb_get_json(
+            client,
+            "https://musicbrainz.org/ws/2/release/",
+            &[
+                ("query", query),
+                ("fmt", "json".to_string()),
+                ("limit", "8".to_string()),
+            ],
+            4,
+        )?;
+        return parse_mb_release_id(&json, "", album);
+    }
+    None
+}
+
+pub fn parse_mb_release_id(json: &serde_json::Value, artist: &str, album: &str) -> Option<String> {
+    let releases = json.get("releases")?.as_array()?;
+    let mut best: Option<(i32, String)> = None;
+    for r in releases {
+        let al = r.get("title").and_then(|v| v.as_str()).unwrap_or("");
+        let ca = r
+            .get("artist-credit")
+            .and_then(|v| v.as_array())
+            .and_then(|a| a.first())
+            .and_then(|c| c.get("name"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let mut score = match_score(artist, album, ca, al);
+        if score < 3 {
+            continue;
+        }
+        if r.get("status").and_then(|v| v.as_str()) == Some("Official") {
+            score += 1;
+        }
+        if r.get("country").and_then(|v| v.as_str()).is_some() {
+            score += 1;
+        }
+        if let Some(id) = r.get("id").and_then(|v| v.as_str()) {
+            if best.as_ref().map_or(true, |(s, _)| score > *s) {
+                best = Some((score, id.to_string()));
+            }
+        }
+    }
+    best.map(|(_, id)| id)
+}
+
+/// Fetch per-song and album community ratings for one album. Returns
+/// `(album_stars, [(normalized track title, stars)])`, or `None` when no
+/// release matched. A `(0, [])` result means "matched but nobody rated it".
+pub fn fetch_album_ratings(artist: &str, album: &str) -> Option<(u8, Vec<(String, u8)>)> {
+    let author = artist.trim();
+    let album = album.trim();
+    if album.is_empty() || is_placeholder_meta(album) {
+        return None;
+    }
+    let client = http_client()?;
+    let id = mb_release_search(&client, author, album)?;
+    let json = mb_get_json(
+        &client,
+        &format!(
+            "https://musicbrainz.org/ws/2/release/{}?inc=recordings+ratings+release-groups&fmt=json",
+            id
+        ),
+        &[],
+        4,
+    )?;
+    Some(parse_album_ratings(&json))
+}
+
+pub fn parse_album_ratings(json: &serde_json::Value) -> (u8, Vec<(String, u8)>) {
+    let album_stars = json
+        .get("release-group")
+        .and_then(|g| g.get("rating"))
+        .and_then(|r| r.get("value"))
+        .and_then(|v| v.as_f64())
+        .map(mb_stars)
+        .unwrap_or(0);
+    let mut tracks: Vec<(String, u8)> = Vec::new();
+    if let Some(media) = json.get("media").and_then(|v| v.as_array()) {
+        for m in media {
+            let Some(list) = m.get("tracks").and_then(|v| v.as_array()) else { continue };
+            for t in list {
+                let title = t.get("title").and_then(|v| v.as_str()).unwrap_or("");
+                if title.is_empty() {
+                    continue;
+                }
+                if let Some(value) = t
+                    .get("recording")
+                    .and_then(|r| r.get("rating"))
+                    .and_then(|r| r.get("value"))
+                    .and_then(|v| v.as_f64())
+                {
+                    let stars = mb_stars(value);
+                    if stars > 0 {
+                        tracks.push((rating_title_key(title), stars));
+                    }
+                }
+            }
+        }
+    }
+    (album_stars, tracks)
+}
+
 pub fn match_score(artist: &str, album: &str, cand_artist: &str, cand_album: &str) -> i32 {
     let a = normalize_name(album);
     let ca = normalize_name(cand_album);
@@ -380,6 +665,49 @@ mod art_tests {
             let bytes = fetch_web_art(artist, album);
             eprintln!("  result: {}", bytes.as_ref().map(|b| b.len()).unwrap_or(0));
             assert!(bytes.is_some(), "no art found for {artist} / {album}");
+        }
+    }
+
+    #[test]
+    fn musicbrainz_album_and_track_ratings() {
+        let json: serde_json::Value = serde_json::from_str(r#"{
+          "release-group": {"rating": {"value": 4.45, "votes-count": 72}},
+          "media": [{"tracks": [
+            {"title":"Smells Like Teen Spirit","recording":{"rating":{"value":4.25,"votes-count":41}}},
+            {"title":"In Bloom (Remastered)","recording":{"rating":{"value":3.95,"votes-count":22}}},
+            {"title":"Unrated Song","recording":{}}
+          ]}]}"#).unwrap();
+        let (album, tracks) = parse_album_ratings(&json);
+        assert_eq!(album, 4);
+        assert_eq!(tracks.len(), 2);
+        assert_eq!(tracks[0].1, 4);
+        assert_eq!(tracks[1].0, rating_title_key("In Bloom"));
+        assert_eq!(tracks[1].1, 4);
+    }
+
+    #[test]
+    fn theaudiodb_parses_album_thumb() {
+        let json: serde_json::Value = serde_json::from_str(r#"{
+          "album": [
+            {"strArtist":"A Perfect Circle","strAlbum":"Mer de Noms","strAlbumThumb":"https://example/wrong.jpg"},
+            {"strArtist":"Tool","strAlbum":"Lateralus","strAlbumThumb":"https://example/right.jpg"}
+          ]}"#).unwrap();
+        assert_eq!(parse_theaudiodb_art(&json, "Tool", "Lateralus").unwrap(), "https://example/right.jpg");
+    }
+
+    /// Live network check, run manually:
+    /// `cargo test live_album_ratings -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn live_album_ratings() {
+        for (artist, album) in [
+            ("Nirvana", "Nevermind"),
+            ("Tool", "Lateralus"),
+            ("Pink Floyd", "The Dark Side of the Moon"),
+        ] {
+            let r = fetch_album_ratings(artist, album);
+            eprintln!("{artist} / {album}: {r:?}");
+            assert!(r.is_some(), "no MusicBrainz release for {artist} / {album}");
         }
     }
 

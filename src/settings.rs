@@ -64,6 +64,14 @@ pub struct Settings {
     pub eq_custom: Option<[f32; 10]>,
     #[serde(default)]
     pub ratings: HashMap<String, u8>,
+    /// Songs whose rating was set by the user (so Meta All never overwrites
+    /// them with a community rating).
+    #[serde(default)]
+    pub manual_ratings: HashSet<String>,
+    /// 0 = old schema where every existing rating was manual; 1 = manual vs
+    /// fetched ratings are tracked separately.
+    #[serde(default)]
+    pub ratings_schema: u32,
     #[serde(default)]
     pub rating_filter: u8,
     /// Library root that the startup scan settled on.

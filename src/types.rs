@@ -72,8 +72,12 @@ pub enum Msg {
     ArtLocal { bytes: Option<Vec<u8>> },
     ArtWeb { bytes: Option<Vec<u8>> },
     BatchMeta { entries: Vec<(String, String, String, String, f32)> },
-    ArtAll { missing: Vec<String> },
+    ArtAll { done: Vec<String>, missing: Vec<String> },
     ArtWebFor { path: String, bytes: Option<Vec<u8>> },
+    ArtWebGroup { paths: Vec<String>, bytes: Option<Vec<u8>> },
+    /// MusicBrainz community ratings for one album. `tracks` are
+    /// (normalized title, stars) and `album_stars` is the release-group fallback.
+    RatingsAlbum { gen: u64, key: String, paths: Vec<String>, album_stars: u8, tracks: Vec<(String, u8)> },
     Lyrics { artist: String, title: String, text: Option<String> },
     YtStatus(String),
     YtLog(String),
@@ -136,7 +140,15 @@ pub enum LibCmd {
 pub enum NetCmd {
     WebArt(String, String),
     WebArtFor { path: String, artist: String, album: String },
+    /// One lookup shared by every track on an album; the image is written to
+    /// all `paths` so a 12-track album needs one request, not twelve.
+    WebArtGroup { gen: u64, paths: Vec<String>, artist: String, album: String },
     Lyrics(String, String),
+}
+
+/// One album's worth of ratings to look up on MusicBrainz.
+pub enum RatingCmd {
+    Album { gen: u64, key: String, artist: String, album: String, paths: Vec<String> },
 }
 
 pub enum YtCmd {

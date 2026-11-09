@@ -189,6 +189,36 @@ This app is built on the work of some incredible open-source projects, and it wo
 
 Full details, license texts, and donation links are in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). If you can, consider donating to FFmpeg, yt-dlp, and MKVToolNix - they give this all away for free.
 
+## v3.2.16 changelog
+
+- **Meta All now fetches real star ratings**
+  - Uses **MusicBrainz community ratings** (1–5 stars) for each recording, with the album/release-group rating as a fallback for tracks nobody has rated individually
+  - Ratings are only filled where you have not set one yourself; clicking a star still overrides and is remembered as a manual rating
+  - Ratings are grouped by album, so one lookup rates every track on that album. MusicBrainz is rate-limited (about two requests per album), so a large library takes a while; the progress bar shows an ETA and **CANCEL** stops it
+  - Persisted in `settings.json` (`ratings`, `manual_ratings`, `ratings_schema`); old settings are migrated once so pre-existing ratings are treated as manual
+- **Meta All progress bar**
+  - Shows overall percent, ETA, and a live breakdown: `tags … | covers done/total | ratings done/total`
+  - Cover progress is counted per **album**, not per track, so the ETA reflects actual lookups (one album cover fills all its tracks)
+  - CANCEL stops queued rating and cover lookups; completed tags/covers/ratings are kept
+- **Cover art sources and efficiency**
+  - iTunes, Deezer, **Cover Art Archive**, and a new **TheAudioDB** fallback are all tried for each album
+  - One web lookup per album is written to every track on that album (a 12-track album is one request, not twelve)
+  - Local folder art is still preferred before any web source
+- Version bump to **v3.2.16**
+
+## v3.2.15 changelog
+
+- **Stop the startup drive hammering**
+  - The player was queueing tag reads for all 18,400 playlist tracks on every launch, even though `metacache.json` already had every entry. Startup now seeds names from the cache and only auto-fetches a small budget (400) for genuinely uncached tracks; **Meta All** remains the explicit full-library fetch
+  - `request_playlist_tags` now skips paths already present in the tag cache (the tag cache and display cache previously disagreed at startup, causing a full re-read)
+  - Truly idle launches no longer read the music drive from end to end; the only remaining reads are the track that is actually playing
+- **Fix the skip cascade**
+  - The “sink empty” watchdog waited only 600 ms, so a cold 4 TB HDD that took longer to open/buffer a FLAC made the player skip good tracks in a loop, opening a new file and cover every couple of seconds. Patience is now 5 s
+- **Fewer disk writes**
+  - `settings.json` (a ~2 MB playlist) is debounced to one write per 10 s instead of every 2 s
+  - `metacache.json`/`missing_art.json` are written at most every 30 s instead of every 3 s while batches stream in; final state is still saved on exit
+- Version bump to **v3.2.15**
+
 ## v3.2.14 changelog
 
 - **Whole-disc dump overhaul (DVD + Blu-ray)**

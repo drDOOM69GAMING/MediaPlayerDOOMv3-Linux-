@@ -276,9 +276,11 @@ impl PlayerApp {
         let stars = stars.min(5);
         if stars == 0 {
             self.ratings.remove(path);
+            self.manual_ratings.remove(path);
             self.set_status(format!("{}: rating cleared", stem(path)));
         } else {
             self.ratings.insert(path.to_string(), stars);
+            self.manual_ratings.insert(path.to_string());
             self.set_status(format!("{}: {} {}", stem(path), "★".repeat(stars as usize), if stars == 1 { "star" } else { "stars" }));
         }
         self.save_settings();
@@ -296,6 +298,13 @@ impl PlayerApp {
     }
 
     pub(crate) fn skip_song(&mut self) {
+        av_log(&format!(
+            "skip_song current={:?} elapsed={:?} sink_empty={} paused={}",
+            self.state.current_song,
+            self.play_started.map(|t| t.elapsed()),
+            self.sink.empty(),
+            self.state.is_paused
+        ));
         if let Some(cur) = self.state.current_song.clone() {
             if self.pos < 10.0 {
                 let w = self.state.song_weights.entry(cur.clone()).or_insert(1.0);
@@ -625,7 +634,12 @@ impl PlayerApp {
     pub(crate) fn update_playback_state(&mut self) {
         if !self.state.is_paused {
             if let Some(start) = self.play_started {
-                if start.elapsed() > Duration::from_millis(600) && self.sink.empty() && self.state.current_song.is_some() {
+                // A cold 4 TB HDD can take several seconds to open and buffer
+                // the first samples of a FLAC. The old 600 ms patience made
+                // the player skip perfectly good tracks in a loop, opening a
+                // new file (and its art) every couple of seconds.
+                if start.elapsed() > Duration::from_secs(5) && self.sink.empty() && self.state.current_song.is_some() {
+                    av_log(&format!("watchdog: sink empty after {:?}, skipping", start.elapsed()));
                     let now = Instant::now();
                     if now.duration_since(self.last_skip) > Duration::from_millis(1500) {
                         self.last_skip = now;

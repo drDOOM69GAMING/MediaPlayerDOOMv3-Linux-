@@ -999,10 +999,41 @@ impl PlayerApp {
                         let _ = self.lib_tx.send(LibCmd::AddMany(entries));
                     }
                 }
-                if retro_btn(ui, "Meta All", th.playing_fg, th.btn_bg).on_hover_text("Fetch tags + cover art for every playlist track into the local app-data cache (one-time per track)").clicked() {
+                if self.meta_all_active {
+                    let scanning = self.meta_all_art_scanning;
+                    let frac = if scanning { 0.0 } else { self.meta_all_frac() };
+                    let eta = self.meta_all_eta_text();
+                    let label = if scanning {
+                        "checking cover cache...".to_string()
+                    } else {
+                        format!("{:.0}%  {}", frac * 100.0, eta)
+                    };
+                    ui.add(
+                        egui::ProgressBar::new(frac)
+                            .desired_width(220.0)
+                            .text(label),
+                    );
+                    if retro_btn(ui, "CANCEL", Color32::from_rgb(255, 120, 120), th.btn_bg)
+                        .on_hover_text("Stop Meta All (already-completed tags/covers/ratings are kept)")
+                        .clicked()
+                    {
+                        self.cancel_meta_all();
+                    }
+                } else if retro_btn(ui, "Meta All", th.playing_fg, th.btn_bg)
+                    .on_hover_text("Fetch tags, cover art (iTunes/Deezer/Cover Art Archive/TheAudioDB) and MusicBrainz community ratings for every playlist track")
+                    .clicked()
+                {
                     self.download_all_meta();
                 }
             });
+            if self.meta_all_active {
+                ui.label(
+                    RichText::new(self.meta_all_detail_text())
+                        .color(Color32::from_gray(150))
+                        .monospace()
+                        .size(9.0),
+                );
+            }
 
             ui.horizontal(|ui| {
                 let accent = |on: bool| if on { th.playing_fg } else { th.btn_fg };

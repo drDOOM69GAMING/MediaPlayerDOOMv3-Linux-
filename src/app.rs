@@ -107,6 +107,10 @@ pub(crate) struct PlayerApp {
     pub(crate) art_local_valid: bool,
     pub(crate) display_cache: Vec<String>,
     pub(crate) tag_names: HashMap<String, String>,
+    /// Automatic tag lookups allowed per session. The full library is handled
+    /// by the explicit "Meta All" button; startup only fills a small window so
+    /// an 18k-track HDD library is not read from end to end on every launch.
+    pub(crate) auto_tag_budget: usize,
     pub(crate) tags_pending: HashSet<String>,
     pub(crate) meta_cache: HashMap<String, MetaCacheEntry>,
     pub(crate) meta_cache_dirty: bool,
@@ -117,6 +121,31 @@ pub(crate) struct PlayerApp {
     pub(crate) meta_all_active: bool,
     /// True while the background Meta All cache validation is running.
     pub(crate) meta_all_art_scanning: bool,
+    /// Overall Meta All progress: total tasks (tags + covers + rating albums),
+    /// completed tasks, start time for ETA, and a short phase label.
+    pub(crate) meta_all_total: u64,
+    pub(crate) meta_all_done: u64,
+    pub(crate) meta_all_started: Option<Instant>,
+    pub(crate) meta_all_phase: String,
+    /// Generation of the current Meta All run; also used to drop stale cover
+    /// requests when the user cancels or starts a new run.
+    pub(crate) meta_gen: u64,
+    pub(crate) rating_tx: Sender<RatingCmd>,
+    pub(crate) rating_pending: HashSet<String>,
+    pub(crate) rating_total: usize,
+    pub(crate) rating_done: usize,
+    /// Cover progress is counted per album group, because one web lookup fills
+    /// every track in the album. This keeps the ETA meaningful instead of
+    /// treating 18k tracks as 18k separate downloads.
+    pub(crate) cover_groups_total: usize,
+    pub(crate) cover_groups_done: usize,
+    pub(crate) cover_group_remaining: HashMap<String, usize>,
+    pub(crate) rating_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Bumped whenever Meta All starts or is cancelled; stale rating results
+    /// from an older run are ignored by the worker and the UI.
+    pub(crate) rating_gen: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Ratings the user set by clicking stars; Meta All must not overwrite them.
+    pub(crate) manual_ratings: HashSet<String>,
     /// Playlist labels need rebuilding (coalesced to once per message drain).
     pub(crate) display_dirty: bool,
     pub(crate) no_art: HashSet<String>,
@@ -353,6 +382,8 @@ impl PlayerApp {
         let mut video_aspect_default = VideoAspect::Original;
         let mut video_volume = 100;
         let mut ratings: HashMap<String, u8> = HashMap::new();
+        let mut manual_ratings: HashSet<String> = HashSet::new();
+        let mut ratings_schema = 0u32;
         let mut rating_filter = 0u8;
         let mut last_cd_dir: Option<String> = None;
         let mut music_root: Option<String> = None;
@@ -392,8 +423,16 @@ impl PlayerApp {
                 if !s.eq_preset.is_empty() { state.eq_preset = s.eq_preset; }
                 eq_custom = s.eq_custom;
                 ratings = s.ratings;
+                manual_ratings = s.manual_ratings;
+                ratings_schema = s.ratings_schema;
                 rating_filter = s.rating_filter.min(5);
             }
+        }
+        // Upgrade from the old schema: ratings that predate the "manual" flag
+        // were set by hand, so protect them from being overwritten. Only do
+        // this once; on later launches manual_ratings is authoritative.
+        if ratings_schema == 0 && manual_ratings.is_empty() && !ratings.is_empty() {
+            manual_ratings = ratings.keys().cloned().collect();
         }
         if settings_version < SETTINGS_VERSION {
             // v1: intro/credits markers used to be auto-detected on playback
@@ -439,6 +478,8 @@ impl PlayerApp {
                 video_cut_cache: video_cut_cache.clone(),
                 video_cut_inflight: HashSet::new(),
                 ratings: ratings.clone(),
+                manual_ratings: manual_ratings.clone(),
+                ratings_schema: 1,
                 rating_filter,
             };
             if let Ok(text) = serde_json::to_string_pretty(&upgraded) {
@@ -456,6 +497,9 @@ impl PlayerApp {
         let (lib_tx, lib_rx) = channel::<LibCmd>();
         let (net_tx, net_rx) = channel::<NetCmd>();
         let (web_tx, web_rx) = channel::<NetCmd>();
+        let (rating_tx, rating_rx) = channel::<RatingCmd>();
+        let rating_cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let rating_gen = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
         let (yt_tx, yt_rx) = channel::<YtCmd>();
         // Built before the workers start so the download thread can consult the
         // local library to learn which album a single-song download belongs to.
@@ -476,11 +520,18 @@ impl PlayerApp {
         for _ in 0..6 {
             let rx = std::sync::Arc::clone(&web_rx);
             let tx = msg_tx.clone();
-            thread::spawn(move || web_art_loop(rx, tx));
+            let gen = std::sync::Arc::clone(&rating_gen);
+            thread::spawn(move || web_art_loop(rx, tx, gen));
         }
         {
             let tx = msg_tx.clone();
             thread::spawn(move || yt_loop(yt_rx, tx, std::sync::Arc::clone(&yt_album_index)));
+        }
+        {
+            let tx = msg_tx.clone();
+            let cancel = std::sync::Arc::clone(&rating_cancel);
+            let gen = std::sync::Arc::clone(&rating_gen);
+            thread::spawn(move || ratings_loop(rating_rx, tx, cancel, gen));
         }
         {
             let tx = msg_tx.clone();
@@ -558,6 +609,7 @@ impl PlayerApp {
             art_local_valid: false,
             display_cache,
             tag_names: HashMap::new(),
+            auto_tag_budget: 400,
             tags_pending: HashSet::new(),
             meta_cache: meta_cache_boot,
             meta_cache_dirty: false,
@@ -567,6 +619,21 @@ impl PlayerApp {
             web_all_pending: HashSet::new(),
             meta_all_active: false,
             meta_all_art_scanning: false,
+            meta_all_total: 0,
+            meta_all_done: 0,
+            meta_all_started: None,
+            meta_all_phase: String::new(),
+            meta_gen: 0,
+            rating_tx,
+            rating_pending: HashSet::new(),
+            rating_total: 0,
+            rating_done: 0,
+            cover_groups_total: 0,
+            cover_groups_done: 0,
+            cover_group_remaining: HashMap::new(),
+            rating_cancel,
+            rating_gen,
+            manual_ratings,
             display_dirty: false,
             no_art: no_art_boot,
             no_art_dirty: false,
@@ -776,13 +843,21 @@ video_ended: false,
                 let _ = app.lib_tx.send(LibCmd::FindMusicFolder);
             }
         }
-        app.request_playlist_tags();
+        app.rebuild_display_cache();
+        // Dev/automation hook used to verify the Meta All pipeline without a
+        // mouse click. Undocumented; normal launches never set this.
+        if std::env::var_os("MPDOOM_META_ALL").is_some() {
+            app.download_all_meta();
+        }
         Ok(app)
     }
 
     pub(crate) fn save_settings(&self) {
         self.settings_dirty.set(true);
-        if self.settings_saved_at.get().elapsed() < Duration::from_secs(2) {
+        // settings.json contains the whole 18k-track playlist (~2 MB). Writing
+        // it every couple of seconds was needless SSD wear; 10 s is enough to
+        // survive a crash, and Drop/on_exit always writes the final state.
+        if self.settings_saved_at.get().elapsed() < Duration::from_secs(10) {
             return;
         }
         self.write_settings();
@@ -821,6 +896,8 @@ video_ended: false,
             video_cut_cache: self.video_cut_cache.clone(),
             video_cut_inflight: self.video_cut_inflight.clone(),
             ratings: self.ratings.clone(),
+            manual_ratings: self.manual_ratings.clone(),
+            ratings_schema: 1,
             rating_filter: self.rating_filter,
         };
         // Compact JSON: pretty-printing a 18k-track playlist on every save was
@@ -951,10 +1028,8 @@ video_ended: false,
         }
     }
 
-    /// "Meta All": batch-fetch tags + cover art for every track in the current
-    /// playlist into the local %APPDATA% cache. Tags stream back via the tag
-    /// worker, covers are scanned locally by the art worker and any track still
-    /// missing art with known artist/album gets a web cover fetch.
+    /// "Meta All": batch-fetch tags + cover art + MusicBrainz community
+    /// ratings for every track in the current playlist.
     pub(crate) fn download_all_meta(&mut self) {
         let pl = self.state.playlist.clone();
         if pl.is_empty() {
@@ -962,7 +1037,10 @@ video_ended: false,
             return;
         }
         if self.meta_all_active {
-            let n = self.meta_all_pending.len() + self.art_all_pending.len() + self.web_all_pending.len();
+            let n = self.meta_all_pending.len()
+                + self.art_all_pending.len()
+                + self.web_all_pending.len()
+                + self.rating_pending.len();
             self.set_status(format!("Meta All still running: {} items queued...", n));
             return;
         }
@@ -974,6 +1052,51 @@ video_ended: false,
         let have_meta = pl.len() - need_meta.len();
         self.meta_all_active = true;
         self.meta_all_art_scanning = true;
+        self.meta_all_started = Some(Instant::now());
+        self.meta_all_done = 0;
+        self.meta_all_total = need_meta.len() as u64;
+        self.cover_groups_total = 0;
+        self.cover_groups_done = 0;
+        self.cover_group_remaining.clear();
+        self.meta_all_phase = "tags + covers".to_string();
+        self.rating_cancel
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        let meta_gen = self
+            .rating_gen
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+        self.meta_gen = meta_gen;
+        self.rating_pending.clear();
+        self.rating_done = 0;
+        self.meta_all_pending.clear();
+        self.art_all_pending.clear();
+        self.web_all_pending.clear();
+        // Group unrated songs by album folder. One MusicBrainz lookup covers
+        // the whole album, and the result is a real community rating (1-5).
+        let groups = {
+            let mut groups = self.rating_groups();
+            // Dev/automation hook: limit the number of albums for a quick
+            // smoke test without waiting for the whole library.
+            if let Some(n) = std::env::var("MPDOOM_META_ALL_LIMIT")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+            {
+                groups.truncate(n);
+            }
+            groups
+        };
+        self.rating_total = groups.len();
+        self.meta_all_total += groups.len() as u64;
+        for (key, artist, album, paths) in groups {
+            self.rating_pending.insert(key.clone());
+            let _ = self.rating_tx.send(RatingCmd::Album {
+                gen: meta_gen,
+                key,
+                artist,
+                album,
+                paths,
+            });
+        }
         const CHUNK: usize = 200;
         for chunk in need_meta.chunks(CHUNK) {
             self.meta_all_pending.extend(chunk.iter().cloned());
@@ -984,18 +1107,153 @@ video_ended: false,
         let tx = self.msg_tx.clone();
         let playlist = pl.clone();
         let no_art = self.no_art.clone();
+        let cover_limit = std::env::var("MPDOOM_META_ALL_COVER_LIMIT")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok());
         std::thread::spawn(move || {
-            let need_art: Vec<String> = playlist
+            let mut need_art: Vec<String> = playlist
                 .iter()
                 .filter(|p| !no_art.contains(*p) && !crate::library::art_cache_ok(p))
                 .cloned()
                 .collect();
+            // Dev/automation hook: cap the cover phase for a smoke test. Normal
+            // launches have no limit and fetch every missing album.
+            if let Some(n) = cover_limit {
+                need_art.truncate(n);
+            }
             let _ = tx.send(Msg::MetaAllArtScan { need_art, total: playlist.len() });
         });
         self.set_status(format!(
-            "Meta All: {} tags already cached, checking cover cache in the background...",
-            have_meta
+            "Meta All: {} tags cached, {} album ratings queued, checking cover cache...",
+            have_meta, self.rating_total
         ));
+    }
+
+    /// Group unrated playlist entries by album folder. Ratings are applied per
+    /// song, but one MusicBrainz request per album is enough to rate them all.
+    fn rating_groups(&self) -> Vec<(String, String, String, Vec<String>)> {
+        let mut map: HashMap<String, (String, String, Vec<String>)> = HashMap::new();
+        for p in &self.state.playlist {
+            if self.ratings.contains_key(p) || self.manual_ratings.contains(p) {
+                continue;
+            }
+            let parent = Path::new(p)
+                .parent()
+                .map(|x| x.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let mut artist = self.meta_cache.get(p).map(|e| e.artist.clone()).unwrap_or_default();
+            let mut album = self.meta_cache.get(p).map(|e| e.album.clone()).unwrap_or_default();
+            merge_folder_meta(&mut artist, &mut album, p);
+            let key = format!("{}|{}", parent, crate::network::rating_title_key(&album));
+            let e = map.entry(key).or_insert_with(|| (artist, album, Vec::new()));
+            e.2.push(p.clone());
+        }
+        map.into_iter()
+            .map(|(k, (a, al, paths))| (k, a, al, paths))
+            .collect()
+    }
+
+    /// Folder + normalized album identity, shared by the local-art, web-art and
+    /// progress paths so one album is one cover unit.
+    fn cover_group_key(&self, p: &str) -> String {
+        let parent = Path::new(p)
+            .parent()
+            .map(|x| x.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let mut artist = self.meta_cache.get(p).map(|e| e.artist.clone()).unwrap_or_default();
+        let mut album = self.meta_cache.get(p).map(|e| e.album.clone()).unwrap_or_default();
+        merge_folder_meta(&mut artist, &mut album, p);
+        // Ignore the track artist: compilations have a different artist per
+        // track but still share one folder/album cover. Keeping the artist in
+        // the key would turn a 20-track compilation into 20 web lookups.
+        format!("{}|{}", parent, crate::network::rating_title_key(&album))
+    }
+
+    fn cover_path_done(&mut self, p: &str) {
+        let key = self.cover_group_key(p);
+        let mut finished = false;
+        if let Some(n) = self.cover_group_remaining.get_mut(&key) {
+            if *n > 0 {
+                *n -= 1;
+                finished = *n == 0;
+            }
+        }
+        if finished {
+            self.cover_groups_done += 1;
+            if self.meta_all_active {
+                self.meta_all_done += 1;
+            }
+        }
+    }
+
+    pub(crate) fn cancel_meta_all(&mut self) {
+        self.meta_all_active = false;
+        self.meta_all_art_scanning = false;
+        self.rating_cancel
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        self.rating_gen
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.meta_all_pending.clear();
+        self.art_all_pending.clear();
+        self.web_all_pending.clear();
+        self.rating_pending.clear();
+        self.meta_all_total = 0;
+        self.meta_all_done = 0;
+        self.cover_groups_total = 0;
+        self.cover_groups_done = 0;
+        self.cover_group_remaining.clear();
+        self.meta_all_phase.clear();
+        // Keep whatever was fetched before the cancel.
+        self.save_settings_now();
+        self.save_meta_cache();
+        self.save_no_art();
+        self.set_status("Meta All cancelled");
+    }
+
+    pub(crate) fn meta_all_frac(&self) -> f32 {
+        if self.meta_all_total == 0 {
+            0.0
+        } else {
+            (self.meta_all_done as f32 / self.meta_all_total as f32).clamp(0.0, 1.0)
+        }
+    }
+
+    pub(crate) fn meta_all_eta_text(&self) -> String {
+        if self.meta_all_art_scanning {
+            return "checking cover cache...".into();
+        }
+        if self.meta_all_total == 0 || self.meta_all_done == 0 {
+            return "estimating...".into();
+        }
+        let done = self.meta_all_done.min(self.meta_all_total) as f32;
+        let total = self.meta_all_total as f32;
+        if done >= total {
+            return "finishing...".into();
+        }
+        let elapsed = self.meta_all_started.map(|t| t.elapsed().as_secs_f32()).unwrap_or(0.0);
+        let secs = (elapsed / done * (total - done)).max(0.0) as u64;
+        let left = if secs >= 3600 {
+            format!("{}h {:02}m", secs / 3600, (secs % 3600) / 60)
+        } else if secs >= 60 {
+            format!("{}m {:02}s", secs / 60, secs % 60)
+        } else {
+            format!("{}s", secs)
+        };
+        format!("~{} left", left)
+    }
+
+    pub(crate) fn meta_all_detail_text(&self) -> String {
+        if self.meta_all_art_scanning {
+            return "validating cached covers...".into();
+        }
+        format!(
+            "tags {} | covers {}/{} | ratings {}/{}",
+            self.meta_all_pending.len(),
+            self.cover_groups_done,
+            self.cover_groups_total,
+            self.rating_done,
+            self.rating_total
+        )
     }
 
     fn meta_all_tick(&mut self, msg: String) {
@@ -1007,22 +1265,25 @@ video_ended: false,
             && self.meta_all_pending.is_empty()
             && self.art_all_pending.is_empty()
             && self.web_all_pending.is_empty()
+            && self.rating_pending.is_empty()
         {
             self.meta_all_active = false;
             let total = self.state.playlist.len();
+            let rated = self.state.playlist.iter().filter(|p| self.ratings.contains_key(*p)).count();
             let no_art_cnt = self.state.playlist
                 .iter()
                 .filter(|p| self.no_art.contains(*p) && !art_cache_path(p).is_file())
                 .count();
             let tail = if no_art_cnt > 0 {
-                format!(" ({} found no art - remembered so they're skipped next time)", no_art_cnt)
+                format!(" ({} found no art)", no_art_cnt)
             } else {
                 String::new()
             };
             self.set_status(format!(
-                "All done here! Tags + covers cached for {} tracks{} - add more music and hit Meta All again to download more meta.",
-                total, tail
+                "Meta All complete: {} tracks, {} rated from MusicBrainz{}.",
+                total, rated, tail
             ));
+            self.save_settings_now();
             self.save_meta_cache();
             self.save_no_art();
         }
@@ -1031,14 +1292,23 @@ video_ended: false,
     /// Ask the library thread for tag metadata of playlist entries we do not
     /// have yet (async, so the list keeps working with fallback names meanwhile).
     pub(crate) fn request_playlist_tags(&mut self) {
+        if self.auto_tag_budget == 0 {
+            return;
+        }
         let need: Vec<String> = self
             .state
             .playlist
             .iter()
-            .filter(|p| !self.tag_names.contains_key(*p) && !self.tags_pending.contains(*p))
+            .filter(|p| {
+                !self.tag_names.contains_key(*p)
+                    && !self.meta_cache.contains_key(*p)
+                    && !self.tags_pending.contains(*p)
+            })
+            .take(self.auto_tag_budget)
             .cloned()
             .collect();
         if !need.is_empty() {
+            self.auto_tag_budget = self.auto_tag_budget.saturating_sub(need.len());
             for p in &need {
                 self.tags_pending.insert(p.clone());
             }
@@ -1092,12 +1362,13 @@ video_ended: false,
             self.handle_msg(f);
         }
 
-        // Debounced persist of the local tag cache while a big Meta All or
-        // automatic tag batch streams in.
-        if self.meta_cache_dirty && self.meta_cache_last_save.elapsed() > Duration::from_secs(3) {
+        // Debounced persist of the local tag cache. It is a multi-MB JSON
+        // file; writing it every 3 s while batches streamed in caused
+        // constant disk writes. The final state is saved on exit/Meta All.
+        if self.meta_cache_dirty && self.meta_cache_last_save.elapsed() > Duration::from_secs(30) {
             self.save_meta_cache();
         }
-        if self.no_art_dirty && self.meta_cache_last_save.elapsed() > Duration::from_secs(3) {
+        if self.no_art_dirty && self.meta_cache_last_save.elapsed() > Duration::from_secs(30) {
             self.save_no_art();
         }
         // Coalesce tag/art label updates into one rebuild instead of rebuilding
@@ -1291,6 +1562,9 @@ video_ended: false,
                 let mut changed = false;
                 for (path, title, artist, album, secs) in entries {
                     self.meta_all_pending.remove(&path);
+                    if self.meta_all_active {
+                        self.meta_all_done += 1;
+                    }
                     self.meta_cache.insert(path.clone(), MetaCacheEntry { title, artist, album, secs });
                     self.meta_cache_dirty = true;
                     if !self.tag_names.contains_key(&path) {
@@ -1307,6 +1581,20 @@ video_ended: false,
             }
             Msg::MetaAllArtScan { need_art, total } => {
                 self.meta_all_art_scanning = false;
+                if !self.meta_all_active {
+                    return;
+                }
+                if self.meta_all_active {
+                    let mut remaining: HashMap<String, usize> = HashMap::new();
+                    for p in &need_art {
+                        *remaining.entry(self.cover_group_key(p)).or_insert(0) += 1;
+                    }
+                    self.cover_groups_total = remaining.len();
+                    self.cover_groups_done = 0;
+                    self.cover_group_remaining = remaining;
+                    self.meta_all_total += self.cover_groups_total as u64;
+                    self.meta_all_phase = "covers".to_string();
+                }
                 let have_art = total.saturating_sub(need_art.len());
                 const CHUNK: usize = 200;
                 for chunk in need_art.chunks(CHUNK) {
@@ -1362,37 +1650,61 @@ video_ended: false,
                     }
                 }
             }
-            Msg::ArtAll { missing } => {
-                let mut web: Vec<(String, String, String)> = Vec::new();
+            Msg::ArtAll { done, missing } => {
+                for p in done {
+                    if self.art_all_pending.remove(&p) {
+                        self.cover_path_done(&p);
+                    }
+                }
+                let mut groups: HashMap<String, (String, String, Vec<String>)> = HashMap::new();
                 for p in missing {
                     self.art_all_pending.remove(&p);
                     if art_cache_ok(&p) {
+                        self.cover_path_done(&p);
                         continue;
                     }
-                    if let Some(e) = self.meta_cache.get(&p) {
-                        let mut artist = e.artist.clone();
-                        let mut album = e.album.clone();
-                        merge_folder_meta(&mut artist, &mut album, &p);
-                        if !is_placeholder_meta(&artist) && !is_placeholder_meta(&album) && !self.web_all_pending.contains(&p) {
-                            self.web_all_pending.insert(p.clone());
-                            web.push((p, artist, album));
-                        } else if artist == "Unknown" || album == "Unknown" {
-                            // Tags are known but there's nothing to web-search
-                            // with - and no local art was found. Remember this
-                            // track as art-less so Meta All skips it next run.
-                            if self.no_art.insert(p.clone()) {
-                                self.no_art_dirty = true;
-                            }
+                    let mut artist = self
+                        .meta_cache
+                        .get(&p)
+                        .map(|e| e.artist.clone())
+                        .unwrap_or_default();
+                    let mut album = self
+                        .meta_cache
+                        .get(&p)
+                        .map(|e| e.album.clone())
+                        .unwrap_or_default();
+                    merge_folder_meta(&mut artist, &mut album, &p);
+                    if !is_placeholder_meta(&album)
+                        && !self.web_all_pending.contains(&p)
+                    {
+                        let key = self.cover_group_key(&p);
+                        groups
+                            .entry(key)
+                            .or_insert_with(|| (artist, album, Vec::new()))
+                            .2
+                            .push(p);
+                    } else {
+                        if self.no_art.insert(p.clone()) {
+                            self.no_art_dirty = true;
                         }
+                        self.cover_path_done(&p);
                     }
                 }
-                for (p, a, al) in web {
-                    let _ = self.web_tx.send(NetCmd::WebArtFor { path: p, artist: a, album: al });
+                // One web lookup per album, written to every track at once.
+                let gen = self.meta_gen;
+                for (_, (artist, album, paths)) in groups {
+                    for p in &paths {
+                        self.web_all_pending.insert(p.clone());
+                    }
+                    let _ = self.web_tx.send(NetCmd::WebArtGroup { gen, paths, artist, album });
                 }
                 self.meta_all_tick(format!("Meta All: {} covers, {} web left", self.art_all_pending.len(), self.web_all_pending.len()));
             }
             Msg::ArtWebFor { path, bytes } => {
-                self.web_all_pending.remove(&path);
+                let was_pending = self.web_all_pending.remove(&path);
+                if was_pending {
+                    self.cover_path_done(&path);
+                }
                 if let Some(b) = bytes {
                     if write_art_cache(&path, &b) {
                         if self.no_art.remove(&path) {
@@ -1405,6 +1717,66 @@ video_ended: false,
                     self.no_art_dirty = true;
                 }
                 self.meta_all_tick(format!("Meta All: {} web art left", self.web_all_pending.len()));
+            }
+            Msg::ArtWebGroup { paths, bytes } => {
+                for p in &paths {
+                    if self.web_all_pending.remove(p) {
+                        self.cover_path_done(p);
+                    }
+                    if let Some(b) = &bytes {
+                        if write_art_cache(p, b) {
+                            if self.no_art.remove(p) {
+                                self.no_art_dirty = true;
+                            }
+                        } else if self.no_art.insert(p.clone()) {
+                            self.no_art_dirty = true;
+                        }
+                    } else if self.no_art.insert(p.clone()) {
+                        self.no_art_dirty = true;
+                    }
+                }
+                self.meta_all_tick(format!("Meta All: {} web art left", self.web_all_pending.len()));
+            }
+            Msg::RatingsAlbum { gen, key, paths, album_stars, tracks } => {
+                if gen == self.rating_gen.load(std::sync::atomic::Ordering::Relaxed)
+                    && self.rating_pending.remove(&key)
+                {
+                    for p in paths {
+                        if self.manual_ratings.contains(&p) {
+                            continue;
+                        }
+                        let title = self
+                            .meta_cache
+                            .get(&p)
+                            .map(|e| e.title.clone())
+                            .unwrap_or_else(|| crate::util::stem(&p));
+                        let title = crate::library::strip_track_no(&title).unwrap_or(title);
+                        let tkey = crate::network::rating_title_key(&title);
+                        let mut stars = 0u8;
+                        if !tkey.is_empty() {
+                            if let Some((_, s)) = tracks.iter().find(|(t, _)| *t == tkey) {
+                                stars = *s;
+                            } else if let Some((_, s)) = tracks.iter().find(|(t, _)| {
+                                (!t.is_empty() && tkey.contains(t.as_str()))
+                                    || (!tkey.is_empty() && t.contains(&tkey))
+                            }) {
+                                stars = *s;
+                            }
+                        }
+                        if stars == 0 {
+                            stars = album_stars;
+                        }
+                        if stars > 0 {
+                            self.ratings.insert(p, stars);
+                        }
+                    }
+                    self.rating_done += 1;
+                    if self.meta_all_active {
+                        self.meta_all_done += 1;
+                    }
+                    self.meta_all_phase = "ratings".to_string();
+                    self.meta_all_tick(format!("Meta All: {} ratings left", self.rating_pending.len()));
+                }
             }
             Msg::Lyrics { artist, title, text } => {
                 if self.lyrics_for.as_deref() == self.state.current_song.as_deref() {
