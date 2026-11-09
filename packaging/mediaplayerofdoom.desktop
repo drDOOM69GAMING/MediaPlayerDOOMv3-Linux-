@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=MediaPlayerDOOM
+GenericName=Media Player
+Comment=Retro DOOM-styled music and video player
+Exec=mediaplayerofdoom %F
+TryExec=mediaplayerofdoom
+Icon=mediaplayerofdoom
+Terminal=false
+Categories=AudioVideo;Audio;Video;Player;
+MimeType=audio/mpeg;audio/flac;audio/x-flac;audio/x-wav;audio/ogg;audio/opus;audio/mp4;audio/x-m4a;video/mp4;video/x-matroska;video/x-msvideo;video/webm;
+Keywords=music;audio;video;player;doom;retro;mp3;flac;mkv;
+StartupNotify=true
+StartupWMClass=mediaplayerofdoom

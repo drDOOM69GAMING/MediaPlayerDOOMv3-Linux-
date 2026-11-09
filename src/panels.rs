@@ -52,6 +52,9 @@ impl PlayerApp {
             paint_title_gradient(&ui.painter().with_clip_rect(rect), rect, th.accent, th.bg);
             ui.add_space(2.0);
             ui.horizontal(|ui| {
+                if let Some(tex) = &self.app_icon_tex {
+                    ui.add(egui::Image::new((tex.id(), egui::vec2(18.0, 18.0))));
+                }
                 ui.label(RichText::new(APP_NAME).color(Color32::from_rgb(255, 240, 160)).monospace().strong().size(14.0));
                 ui.separator();
                 let w = (ui.available_width() - 12.0).max(160.0);

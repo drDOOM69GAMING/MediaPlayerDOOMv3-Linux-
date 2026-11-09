@@ -93,6 +93,7 @@ pub(crate) struct PlayerApp {
     pub(crate) error_until: Option<Instant>,
     pub(crate) meta: (String, String, String),
     pub(crate) playing: String,
+    pub(crate) app_icon_tex: Option<TextureHandle>,
     pub(crate) art_tex: Option<TextureHandle>,
     pub(crate) art_state: u8,
     pub(crate) art_local_valid: bool,
@@ -302,7 +303,7 @@ impl PlayerApp {
             .unwrap_or_default()
     }
 
-    pub(crate) fn new(cc: &eframe::CreationContext<'_>, startup_video: Option<String>) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    pub(crate) fn new(cc: &eframe::CreationContext<'_>, startup_video: Option<String>, windowed: bool) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         #[cfg(target_os = "windows")]
         apply_taskbar_icon(cc);
         let ctx = cc.egui_ctx.clone();
@@ -486,6 +487,10 @@ impl PlayerApp {
             .flatten();
         let (show_id, quit_id) = hotkeys.as_ref().map(|(_, s, q)| (*s, *q)).unwrap_or((0, 0));
 
+        let app_icon_tex = crate::windows::app_icon_rgba(32).map(|(rgba, w, h)| {
+            let ci = ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba);
+            ctx.load_texture("app_icon", ci, TextureOptions::LINEAR)
+        });
         let mut app = Self {
             ctx: ctx.clone(),
             _stream: stream,
@@ -505,6 +510,7 @@ impl PlayerApp {
             error_until: None,
             meta: (String::new(), "Unknown".to_string(), "Unknown".to_string()),
             playing: String::new(),
+            app_icon_tex,
             art_tex: None,
             art_state: 0,
             art_local_valid: false,
@@ -554,7 +560,7 @@ impl PlayerApp {
             scanning: true,
             scan_found: 0,
             scan_tick: std::time::Instant::now(),
-            fullscreen: true,
+            fullscreen: !windowed,
             fs_asserted: false,
             video_fs_restore_app: false,
             tape_anim: 0.0,
@@ -1655,7 +1661,7 @@ impl eframe::App for PlayerApp {
     }
 }
 
-pub fn run(startup_video: Option<String>) -> eframe::Result {
+pub fn run(startup_video: Option<String>, windowed: bool) -> eframe::Result {
 std::panic::set_hook(Box::new(|info| {
         // Expected, caught decode panics (rodio symphonia init-seek bug) are
         // muted here; open_decoder logs a clean decode-skip line instead.
@@ -1675,7 +1681,8 @@ std::panic::set_hook(Box::new(|info| {
     }));
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_fullscreen(true)
+            .with_app_id("mediaplayerofdoom")
+            .with_fullscreen(!windowed)
             .with_icon(window_icon_data().unwrap_or_else(|| egui::IconData {
                 rgba: build_icon_fallback_rgba(),
                 width: 32,
@@ -1688,7 +1695,7 @@ std::panic::set_hook(Box::new(|info| {
         APP_NAME,
         options,
         Box::new(|cc| {
-            let app = PlayerApp::new(cc, startup_video.clone())?;
+            let app = PlayerApp::new(cc, startup_video.clone(), windowed)?;
             Ok(Box::new(app) as Box<dyn eframe::App>)
         }),
     )

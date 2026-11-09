@@ -203,7 +203,7 @@ pub fn app_icon_rgba(size: u32) -> Option<(Vec<u8>, u32, u32)> {
 }
 
 pub fn window_icon_data() -> Option<egui::IconData> {
-    if let Some((rgba, w, h)) = app_icon_rgba(64) {
+    if let Some((rgba, w, h)) = app_icon_rgba(256) {
         let data = egui::IconData { rgba, width: w, height: h };
         return Some(data);
     }

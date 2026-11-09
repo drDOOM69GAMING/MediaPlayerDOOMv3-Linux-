@@ -40,8 +40,14 @@ fn main() -> eframe::Result {
     // straight from a file manager.
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut video: Option<String> = None;
+    let mut windowed = false;
     let mut i = 0;
     while i < args.len() {
+        if args[i] == "--windowed" || args[i] == "-w" {
+            windowed = true;
+            i += 1;
+            continue;
+        }
         if args[i] == "--video" {
             if let Some(p) = args.get(i + 1) {
                 video = Some(p.clone());
@@ -53,5 +59,5 @@ fn main() -> eframe::Result {
         }
         i += 1;
     }
-    app::run(video)
+    app::run(video, windowed)
 }

@@ -74,6 +74,19 @@ Open a video directly (handy for episodes or testing) with:
 ./target/release/mediaplayerofdoom --video "/path/episode.mkv"
 ```
 
+### Install with icon and launcher (Linux)
+
+```bash
+./install.sh
+```
+
+This builds the release binary, installs it to `~/.local/bin/mediaplayerofdoom`,
+adds the app icon under `~/.local/share/icons/hicolor/.../apps`, and registers
+`~/.local/share/applications/mediaplayerofdoom.desktop`. The app window uses the
+`mediaplayerofdoom` app-id, so KDE/GNOME can match the launcher/taskbar icon.
+On Windows, the same artwork is embedded into the exe as a multi-resolution
+`.ico` at build time.
+
 ### Where files live on Linux
 
 - Data/tools/cache: `~/.local/share/mediaplayerofdoom/`
@@ -115,6 +128,19 @@ This app is built on the work of some incredible open-source projects, and it wo
 - The **Rust** language and its crate ecosystem.
 
 Full details, license texts, and donation links are in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). If you can, consider donating to FFmpeg, yt-dlp, and MKVToolNix - they give this all away for free.
+
+## v3.2.1 changelog
+
+- **Proper application icon everywhere**
+  - Generated a square, multi-resolution icon from the original artwork (center crop, so it is no longer squashed) and replaced the old 256x140 `.ico`
+  - Windows embeds the new icon in the exe via `build.rs`
+  - Linux gets a real launcher/taskbar entry: `mediaplayerofdoom.desktop`, a 512x512 icon in the hicolor theme, and `StartupWMClass=mediaplayerofdoom`
+  - The window now sets the Wayland app-id (`mediaplayerofdoom`) so the desktop can associate the running window with that icon
+  - New `install.sh` installs the binary, icon and desktop entry for the current user (`~/.local`)
+  - Tray icons continue to use the same artwork at several sizes, and the artwork also appears beside the app name in the player's title bar
+  - If KDE still shows the old generic taskbar icon after installing, log out/in once or run `systemctl --user restart plasma-plasmashell` - Plasma caches taskbar icons
+  - New `--windowed` / `-w` flag for opening in a normal window instead of fullscreen
+- Version bump to **v3.2.1**
 
 ## v3.2.0 changelog
 
