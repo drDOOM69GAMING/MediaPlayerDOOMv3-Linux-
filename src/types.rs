@@ -116,6 +116,10 @@ pub enum Msg {
     DiscDumpDone(String),
     DiscDumpFail(String),
     DiscDumpCancelled,
+    ConvertProgress { done: usize, total: usize, text: String },
+    ConvertDone { folder: String, converted: usize, failed: usize },
+    ConvertFail(String),
+    ConvertCancelled,
 }
 
 pub enum LibCmd {

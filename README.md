@@ -189,6 +189,19 @@ This app is built on the work of some incredible open-source projects, and it wo
 
 Full details, license texts, and donation links are in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). If you can, consider donating to FFmpeg, yt-dlp, and MKVToolNix - they give this all away for free.
 
+## v3.2.20 changelog
+
+- **New CONVERT MUSIC mode**
+  - The **Convert** button in the deck toolbar opens a conversion window
+  - Pick any folder of music; audio files are found recursively
+  - Output formats: **Same as source, MP3, AAC (M4A), FLAC, OGG Vorbis, Opus, WAV, AIFF, ALAC (M4A), WMA**
+  - One **1–10 quality/compression slider**: lossy formats map to bitrate/quality, FLAC maps to compression level, WAV/AIFF/ALAC map to 16/24/32-bit
+  - Output goes to the OS music folder (`$XDG_MUSIC_DIR`, normally `~/Music`) under `Converted <format>`; subfolders and file names are preserved and collisions get `(2)`, `(3)` suffixes
+  - Tags are copied; embedded cover art is preserved for MP3/AAC/FLAC/ALAC. Artwork is stripped for containers that cannot carry it
+  - Live per-file progress and **CANCEL CONVERSION**; cancelling or exiting kills the active ffmpeg and removes the partial output
+  - “Same as source” resolves by extension, with ffprobe used to distinguish AAC vs ALAC in `.m4a`
+- Version bump to **v3.2.20**
+
 ## v3.2.19 changelog
 
 - **Fix DVD seeking (green frames / stutter)**

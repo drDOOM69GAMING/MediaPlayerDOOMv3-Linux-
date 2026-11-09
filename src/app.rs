@@ -275,6 +275,17 @@ pub(crate) struct PlayerApp {
     pub(crate) disc_dump_text: String,
     pub(crate) disc_dump_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub(crate) disc_dump_thread: Option<std::thread::JoinHandle<()>>,
+    pub(crate) convert_open: bool,
+    pub(crate) convert_src: Option<String>,
+    pub(crate) convert_format: crate::convert::ConvertFormat,
+    pub(crate) convert_quality: u8,
+    pub(crate) convert_active: bool,
+    pub(crate) convert_done: usize,
+    pub(crate) convert_total: usize,
+    pub(crate) convert_text: String,
+    pub(crate) convert_dest: Option<String>,
+    pub(crate) convert_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub(crate) convert_thread: Option<std::thread::JoinHandle<()>>,
     pub(crate) msg_tx: Sender<Msg>,
     pub(crate) last_cd_dir: Option<String>,
     /// Remembered library root, so startup doesn't re-walk every drive.
@@ -721,6 +732,17 @@ impl PlayerApp {
             disc_dump_text: String::new(),
             disc_dump_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             disc_dump_thread: None,
+            convert_open: false,
+            convert_src: None,
+            convert_format: crate::convert::ConvertFormat::Same,
+            convert_quality: 8,
+            convert_active: false,
+            convert_done: 0,
+            convert_total: 0,
+            convert_text: String::new(),
+            convert_dest: None,
+            convert_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            convert_thread: None,
             msg_tx: msg_tx.clone(),
             last_cd_dir,
             music_root,
@@ -865,6 +887,16 @@ video_ended: false,
         // mouse click. Undocumented; normal launches never set this.
         if std::env::var_os("MPDOOM_META_ALL").is_some() {
             app.download_all_meta();
+        }
+        // Dev/automation hook for the conversion window and worker.
+        if std::env::var_os("MPDOOM_CONVERT_UI").is_some() {
+            app.convert_open = true;
+            if let Ok(src) = std::env::var("MPDOOM_CONVERT_SRC") {
+                app.convert_src = Some(src);
+            }
+            if std::env::var_os("MPDOOM_CONVERT_START").is_some() {
+                app.start_convert();
+            }
         }
         Ok(app)
     }
@@ -2212,6 +2244,31 @@ video_ended: false,
                 self.finish_disc_dump();
                 self.set_status("Disc dump cancelled");
             }
+            Msg::ConvertProgress { done, total, text } => {
+                self.convert_active = true;
+                self.convert_done = done;
+                self.convert_total = total;
+                self.convert_text = text.clone();
+                self.set_status(text);
+            }
+            Msg::ConvertDone { folder, converted, failed } => {
+                self.finish_convert();
+                self.convert_dest = Some(folder.clone());
+                self.set_status(format!(
+                    "Converted {} file(s){} to {}",
+                    converted,
+                    if failed > 0 { format!(" ({} failed)", failed) } else { String::new() },
+                    folder
+                ));
+            }
+            Msg::ConvertFail(e) => {
+                self.finish_convert();
+                self.set_error(format!("Conversion failed: {}", e));
+            }
+            Msg::ConvertCancelled => {
+                self.finish_convert();
+                self.set_status("Conversion cancelled");
+            }
             Msg::VideoCutDone { gen, path, cut, err } => {
                 if gen == self.video_gen {
                     self.video_cut_inflight.remove(&path);
@@ -2265,8 +2322,78 @@ impl std::ops::Drop for PlayerApp {
     }
 }
 
+impl PlayerApp {
+    pub(crate) fn start_convert(&mut self) {
+        if self.convert_active {
+            return;
+        }
+        let Some(src) = self.convert_src.clone() else {
+            self.set_error("Choose a music folder first");
+            return;
+        };
+        if let Some(h) = self.convert_thread.take() {
+            let _ = h.join();
+        }
+        self.convert_cancel
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.convert_active = true;
+        self.convert_done = 0;
+        self.convert_total = 0;
+        self.convert_text = format!("Scanning {}...", src);
+        let fmt = self.convert_format;
+        let quality = self.convert_quality;
+        self.convert_dest = Some(crate::convert::destination(fmt).display().to_string());
+        let tx = self.msg_tx.clone();
+        let cancel = self.convert_cancel.clone();
+        self.convert_thread = Some(std::thread::spawn(move || {
+            match crate::convert::convert_folder(&src, fmt, quality, &tx, &cancel) {
+                Ok(r) => {
+                    let _ = tx.send(Msg::ConvertDone {
+                        folder: r.folder.display().to_string(),
+                        converted: r.converted,
+                        failed: r.failed,
+                    });
+                }
+                Err(_) if cancel.load(std::sync::atomic::Ordering::Relaxed) => {
+                    let _ = tx.send(Msg::ConvertCancelled);
+                }
+                Err(e) => {
+                    let _ = tx.send(Msg::ConvertFail(e));
+                }
+            }
+        }));
+        self.set_status("Converting music...");
+    }
+
+    pub(crate) fn cancel_convert(&mut self) {
+        if !self.convert_active && self.convert_thread.is_none() {
+            return;
+        }
+        self.convert_cancel
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(h) = self.convert_thread.take() {
+            let _ = h.join();
+        }
+        self.convert_active = false;
+        self.set_status("Conversion cancelled");
+    }
+
+    fn finish_convert(&mut self) {
+        self.convert_active = false;
+        if let Some(h) = self.convert_thread.take() {
+            let _ = h.join();
+        }
+    }
+}
+
 impl eframe::App for PlayerApp {
     fn on_exit(&mut self) {
+        // Stop any active music conversion before the process goes away.
+        self.convert_cancel
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(h) = self.convert_thread.take() {
+            let _ = h.join();
+        }
         // Stop dd before the process goes away. Without this the orphaned
         // child kept reading the disc after the window closed.
         self.disc_dump_cancel
@@ -2359,6 +2486,9 @@ impl eframe::App for PlayerApp {
 
         if self.show_help {
             self.show_help_window(&ctx);
+        }
+        if self.convert_open {
+            self.show_convert_window(&ctx);
         }
         if self.show_add_radio {
             self.show_add_radio_window(&ctx);

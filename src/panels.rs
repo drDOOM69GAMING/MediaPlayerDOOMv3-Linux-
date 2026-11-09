@@ -999,6 +999,12 @@ impl PlayerApp {
                         let _ = self.lib_tx.send(LibCmd::AddMany(entries));
                     }
                 }
+                if retro_btn(ui, "Convert", th.fg, th.btn_bg)
+                    .on_hover_text("Convert a folder of music to MP3/AAC/FLAC/OGG/Opus/WAV/AIFF/ALAC/WMA")
+                    .clicked()
+                {
+                    self.convert_open = true;
+                }
                 if self.meta_all_active {
                     let scanning = self.meta_all_art_scanning;
                     let frac = if scanning { 0.0 } else { self.meta_all_frac() };
@@ -1614,6 +1620,115 @@ impl PlayerApp {
         self.show_radio = open;
     }
 
+    pub(crate) fn show_convert_window(&mut self, ctx: &egui::Context) {
+        let th = self.theme_colors();
+        let mut open = self.convert_open;
+        egui::Window::new("CONVERT MUSIC")
+            .resizable(false)
+            .collapsible(false)
+            .default_width(600.0)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("SOURCE FOLDER").color(th.accent).monospace().size(11.0));
+                    if retro_btn(ui, "CHOOSE FOLDER...", th.btn_fg, th.btn_bg).clicked() {
+                        if let Some(p) = rfd::FileDialog::new().pick_folder() {
+                            self.convert_src = Some(p.to_string_lossy().to_string());
+                        }
+                    }
+                });
+                ui.label(
+                    RichText::new(
+                        self.convert_src
+                            .as_deref()
+                            .unwrap_or("No folder selected"),
+                    )
+                    .color(Color32::from_gray(170))
+                    .monospace()
+                    .size(10.0),
+                );
+                ui.add_space(6.0);
+
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("OUTPUT FORMAT").color(th.accent).monospace().size(11.0));
+                    egui::ComboBox::from_id_salt("convert_output_format")
+                        .selected_text(self.convert_format.label())
+                        .show_ui(ui, |ui| {
+                            for f in crate::convert::ConvertFormat::ALL {
+                                ui.selectable_value(&mut self.convert_format, f, f.label());
+                            }
+                        });
+                });
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("QUALITY 1-10").color(th.accent).monospace().size(11.0));
+                    let label = self.convert_format.quality_label(self.convert_quality);
+                    ui.add(
+                        egui::Slider::new(&mut self.convert_quality, 1..=10)
+                            .text(label)
+                            .clamping(egui::SliderClamping::Always),
+                    );
+                });
+                let dest = crate::convert::destination(self.convert_format);
+                ui.label(
+                    RichText::new(format!("SAVE TO  {}", dest.display()))
+                        .color(Color32::from_gray(150))
+                        .monospace()
+                        .size(9.0),
+                );
+                ui.label(
+                    RichText::new("1 = smallest/fastest, 10 = best quality. Tags and embedded cover art (MP3/AAC/FLAC/ALAC) are preserved.")
+                        .color(Color32::from_gray(115))
+                        .monospace()
+                        .size(9.0),
+                );
+                ui.add_space(8.0);
+
+                if self.convert_active {
+                    let frac = if self.convert_total > 0 {
+                        self.convert_done as f32 / self.convert_total as f32
+                    } else {
+                        0.0
+                    };
+                    ui.add(
+                        egui::ProgressBar::new(frac.clamp(0.0, 1.0))
+                            .desired_width(440.0)
+                            .text(format!("{}/{}", self.convert_done, self.convert_total)),
+                    );
+                    ui.label(
+                        RichText::new(&self.convert_text)
+                            .color(th.fg)
+                            .monospace()
+                            .size(9.0),
+                    );
+                    if retro_btn(
+                        ui,
+                        "CANCEL CONVERSION",
+                        Color32::from_rgb(255, 120, 120),
+                        th.btn_bg,
+                    )
+                    .clicked()
+                    {
+                        self.cancel_convert();
+                    }
+                } else {
+                    ui.horizontal(|ui| {
+                        if retro_btn(ui, "START CONVERSION", th.playing_fg, th.btn_bg).clicked() {
+                            self.start_convert();
+                        }
+                        if let Some(d) = &self.convert_dest {
+                            if retro_btn(ui, "OPEN FOLDER", th.btn_fg, th.btn_bg).clicked() {
+                                open_in_explorer(d);
+                            }
+                        }
+                        if retro_btn(ui, "CLOSE", th.btn_fg, th.btn_bg).clicked() {
+                            self.convert_open = false;
+                        }
+                    });
+                }
+            });
+        self.convert_open = open;
+    }
+
     pub(crate) fn show_help_window(&mut self, ctx: &egui::Context) {
         egui::Window::new("SYSTEM MANUAL")
             .resizable(true)
@@ -1681,6 +1796,7 @@ impl PlayerApp {
                 ui.label(RichText::new("Look Up ............. Open song folder in explorer").color(dim).monospace());
                 ui.label(RichText::new("EQ .................. Equalizer presets").color(dim).monospace());
                 ui.label(RichText::new("YouTube Download ..... Paste URL in status bar").color(dim).monospace());
+                ui.label(RichText::new("Convert .............. Convert a folder of music to another format").color(dim).monospace());
                 ui.label(RichText::new("Video Player ......... Double-click video in playlist").color(dim).monospace());
                 ui.add_space(8.0);
 
