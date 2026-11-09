@@ -84,7 +84,7 @@ where
 
 impl PlayerApp {
     pub(crate) fn play_song(&mut self, path: &str) {
-        if path.is_empty() || !Path::new(path).is_file() {
+        if path.is_empty() || !crate::cue::exists(path) {
             self.set_error("File not found");
             return;
         }
@@ -427,14 +427,14 @@ impl PlayerApp {
         }
         if self.state.current_song.is_none() {
             if let Some((path, pos)) = self.deck_resume.take() {
-                if Path::new(&path).is_file() {
+                if crate::cue::exists(&path) {
                     self.resume_tape(&path, pos);
                     return;
                 }
             }
         }
         if let Some(cur) = self.state.current_song.clone() {
-            if Path::new(&cur).is_file() {
+            if crate::cue::exists(&cur) {
                 self.resume_tape(&cur, self.pos.max(0.0));
                 return;
             }
@@ -555,7 +555,7 @@ impl PlayerApp {
     /// longer than the track itself.
     fn seek_via_pipe(&mut self, secs: f32) -> bool {
         let Some(path) = self.state.current_song.clone() else { return false };
-        if !Path::new(&path).is_file() {
+        if !crate::cue::exists(&path) {
             return false;
         }
         let src = self.transcodes.get(&path).cloned().unwrap_or(path);
@@ -597,7 +597,7 @@ impl PlayerApp {
     /// the EQ + visualizer pipeline intact.
     fn reopen_at(&mut self, secs: f32) {
         let Some(path) = self.state.current_song.clone() else { return };
-        if !Path::new(&path).is_file() {
+        if !crate::cue::exists(&path) {
             return;
         }
         let src_path = self.transcodes.get(&path).cloned().unwrap_or_else(|| path.clone());

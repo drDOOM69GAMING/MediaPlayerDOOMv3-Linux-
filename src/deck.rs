@@ -63,13 +63,13 @@ impl PlayerApp {
             if self.play_started.is_none() && !self.radio_on {
                 self.stop_radio();
                 if let Some((path, pos)) = self.deck_resume.take() {
-                    if Path::new(&path).is_file() {
+                    if crate::cue::exists(&path) {
                         self.resume_tape(&path, pos);
                         return;
                     }
                 }
                 if let Some(cur) = self.state.current_song.clone() {
-                    if Path::new(&cur).is_file() {
+                    if crate::cue::exists(&cur) {
                         self.resume_tape(&cur, 0.0);
                     }
                 }
@@ -89,7 +89,7 @@ impl PlayerApp {
                 self.save_settings();
             }
             if let Some((path, pos)) = self.deck_resume.take() {
-                if Path::new(&path).is_file() {
+                if crate::cue::exists(&path) {
                     self.resume_tape(&path, pos);
                 }
             }
@@ -97,7 +97,7 @@ impl PlayerApp {
         }
         if self.deck_mode == DeckMode::Tape {
             if let Some(cur) = self.state.current_song.clone() {
-                if Path::new(&cur).is_file() {
+                if crate::cue::exists(&cur) {
                     self.deck_resume = Some((cur, self.pos.max(0.0)));
                 }
             }
@@ -364,7 +364,13 @@ impl PlayerApp {
     pub(crate) fn ingest_dir(&mut self, dir: &str, files: &[String]) {
         let root = Path::new(dir);
         let root_name = root.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
-        let nested_cnt = files.iter().filter(|f| Path::new(f).parent() != Some(root)).count();
+        let nested_cnt = files
+            .iter()
+            .filter(|f| {
+                let disk = crate::cue::disk_path(f);
+                Path::new(&disk).parent() != Some(root)
+            })
+            .count();
         let library_mode = nested_cnt > 0 && nested_cnt > files.len() - nested_cnt;
         // Membership used to be tested with `Vec::contains`, which is O(n) per
         // file. On a library this size that is O(n^2) string comparisons - tens
@@ -380,12 +386,13 @@ impl PlayerApp {
             .collect();
         let mut changed = false;
         for f in files {
-            let p = Path::new(f);
+            let disk = crate::cue::disk_path(f);
+            let dp = Path::new(&disk);
             let band = if library_mode {
-                if p.parent() == Some(root) {
+                if dp.parent() == Some(root) {
                     band_of_file(f)
                 } else {
-                    p.strip_prefix(root)
+                    dp.strip_prefix(root)
                         .ok()
                         .and_then(|rel| rel.components().next())
                         .map(|c| c.as_os_str().to_string_lossy().to_string())
@@ -638,7 +645,7 @@ impl PlayerApp {
             return;
         }
         let Some(s) = self.state.current_song.clone() else { return };
-        if !Path::new(&s).is_file() {
+        if !crate::cue::exists(&s) {
             self.set_error("Nothing to record");
             return;
         }

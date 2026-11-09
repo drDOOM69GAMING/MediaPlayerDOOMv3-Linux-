@@ -54,7 +54,12 @@ pub fn lib_loop(rx: Receiver<LibCmd>, tx: Sender<Msg>, clock: std::sync::Arc<std
                     let mut artist = String::new();
                     let mut album = String::new();
                     let mut secs = 0.0f32;
-                    if let Some(probed) = load_tagged(&p) {
+                    if let Some(t) = crate::cue::track_for(&p) {
+                        secs = t.secs();
+                        title = t.title;
+                        artist = t.artist;
+                        album = t.album;
+                    } else if let Some(probed) = load_tagged(&p) {
                         secs = probed.properties().duration().as_secs_f32();
                         if let Some(tag) = probed.primary_tag().or_else(|| probed.first_tag()) {
                             if let Some(t) = tag.title() { title = t.to_string(); }
@@ -212,6 +217,12 @@ LibCmd::Scan(dir) => {
                             if !added.contains(&e) {
                                 added.push(e);
                             }
+                        } else if crate::cue::is_cue_file(&e) {
+                            for f in crate::cue::expand_one(&e) {
+                                if !added.contains(&f) {
+                                    added.push(f);
+                                }
+                            }
                         }
                         let _ = tx2.send(Msg::ScanProgress { found: added.len() });
                     }
@@ -245,7 +256,12 @@ LibCmd::Scan(dir) => {
                 let mut artist = "Unknown".to_string();
                 let mut album = "Unknown".to_string();
                 let mut duration = Duration::ZERO;
-                if let Some(probed) = load_tagged(&path) {
+                if let Some(t) = crate::cue::track_for(&path) {
+                    duration = Duration::from_secs_f32(t.secs());
+                    title = t.title;
+                    artist = t.artist;
+                    album = t.album;
+                } else if let Some(probed) = load_tagged(&path) {
                     duration = probed.properties().duration();
                     if let Some(tag) = probed.primary_tag().or_else(|| probed.first_tag()) {
                         if let Some(t) = tag.title() { title = t.to_string(); }

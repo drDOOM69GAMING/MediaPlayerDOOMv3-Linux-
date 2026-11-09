@@ -14,7 +14,7 @@ A retro DOOM-styled media player rendered in egui. Tape, CD, and Radio faces on 
   - **BLU-RAY**: play a Blu-ray movie from the optical drive or an `.iso`/`.img` using ffmpeg's `bluray` protocol. AACS keys are read from the user's own `~/.config/aacs/KEYDB.cfg` (or `$XDG_CONFIG_HOME/aacs/KEYDB.cfg`); no keys are shipped with the app. English audio is preferred and subtitles are disabled by default for DVD/Blu-ray
   - **Disc dumping**: both the DVD and Blu-ray decks have **DUMP TO MKV**, which decrypts and remuxes every title to clean MKV files with MakeMKV (from the open image or the physical disc). The DVD deck also has **DUMP TO ISO**, a decrypted, directly playable image built with the bundled `dvdbackup` + `genisoimage` (MakeMKV is the fallback). No encrypted video output is ever produced
 - **Bands catalog**: songs grouped by artist folder (A-Z, scrollable), rebuilt from whatever folder you add
-- **Supported audio**: MP3, FLAC, WAV, M4A/AAC/ALAC, APE (Monkey's Audio), AIFF, OGG/Vorbis, Opus, WMA, WavPack, Musepack and WebM audio. Formats the built-in decoder cannot open (notably M4A and APE) are converted to a cached WAV with ffmpeg on first play, so they seek and play like any other track
+- **Supported audio**: MP3, FLAC, WAV, M4A/AAC/ALAC, APE (Monkey's Audio), AIFF, OGG/Vorbis, Opus, WMA, WavPack, Musepack and WebM audio. Formats the built-in decoder cannot open (notably M4A and APE) are converted to a cached WAV with ffmpeg on first play, so they seek and play like any other track. Single-file albums described by a **CUE sheet** are expanded into individual tracks
 - **Play order switch**: flip the retro wall switch under BANDS. ON = random shuffle, OFF = normal in-order playback
 - **Smart shuffle**: weighted by your listening history, or plain shuffle
 - **Live visualizer**: a real-time 12-band spectrum with peak caps in the NOW panel, synced to whatever is playing (music or radio). The deck's bass woofers pump with the volume, rattle on heavy bass, shove downward on beats, and pulse an expanding ring on loud hits
@@ -202,6 +202,18 @@ This app is built on the work of some incredible open-source projects, and it wo
 - The **Rust** language and its crate ecosystem.
 
 Full details, license texts, and donation links are in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). If you can, consider donating to FFmpeg, yt-dlp, and MKVToolNix - they give this all away for free.
+
+## v3.2.31 changelog
+
+- **Full CUE sheet support for single-file albums**
+  - Albums stored as one `.ape`/`.flac`/`.wav` image plus a `.cue` sheet are now expanded into individual tracks instead of appearing as one long song
+  - The scanned library now yields **54 CUE tracks** from 4 albums (3 APE and 1 FLAC); the other 168 CUE files reference missing WAVs or one-file-per-track layouts and are left alone
+  - Playback seeks to each track's start and stops at its end, using the normal cached-WAV path, so seeking, EQ and the visualizer work
+  - CUE titles, track numbers, artist, album and duration feed the playlist, NOW panel, ratings, cover grouping and metadata cache
+  - Local folder art and embedded pictures resolve through the image file; band grouping and sorting use the real album folder
+  - Folder conversion and REC now extract the selected CUE track, name it `NN - Title`, and write correct track/artist/album tags
+  - Help documents CUE support; rescan/Refresh the Music folder to replace the old image entry with its tracks
+- Version bump to **v3.2.31**
 
 ## v3.2.30 changelog
 

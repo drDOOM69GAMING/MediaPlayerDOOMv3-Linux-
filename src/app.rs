@@ -420,7 +420,7 @@ impl PlayerApp {
         if let Ok(text) = std::fs::read_to_string(&settings_path) {
             if let Ok(s) = serde_json::from_str::<Settings>(&text) {
                 state.volume = s.volume.clamp(0, 100);
-                state.current_song = s.last_played.filter(|p| Path::new(p).is_file());
+                state.current_song = s.last_played.filter(|p| crate::cue::exists(p));
                 state.playlist = s.playlist;
                 state.playlist.sort_by_cached_key(|p| song_sort_key(p));
                 if !s.theme.is_empty() { state.theme = s.theme; }
@@ -907,7 +907,7 @@ video_ended: false,
         // exercised without navigating the 18k-row playlist.
         if let Some(p) = std::env::var_os("MPDOOM_PLAY_SONG") {
             let p = p.to_string_lossy().to_string();
-            if Path::new(&p).is_file() {
+            if crate::cue::exists(&p) {
                 app.play_song(&p);
             }
         }
@@ -1242,9 +1242,13 @@ video_ended: false,
             if self.ratings.contains_key(p) || self.manual_ratings.contains(p) {
                 continue;
             }
-            let parent = Path::new(p)
-                .parent()
+            let parent = crate::cue::parent_dir(p)
                 .map(|x| x.to_string_lossy().to_string())
+                .or_else(|| {
+                    Path::new(p)
+                        .parent()
+                        .map(|x| x.to_string_lossy().to_string())
+                })
                 .unwrap_or_default();
             let mut artist = self.meta_cache.get(p).map(|e| e.artist.clone()).unwrap_or_default();
             let mut album = self.meta_cache.get(p).map(|e| e.album.clone()).unwrap_or_default();
@@ -1273,9 +1277,13 @@ video_ended: false,
     /// Folder + normalized album identity, shared by the local-art, web-art and
     /// progress paths so one album is one cover unit.
     fn cover_group_key(&self, p: &str) -> String {
-        let parent = Path::new(p)
-            .parent()
+        let parent = crate::cue::parent_dir(p)
             .map(|x| x.to_string_lossy().to_string())
+            .or_else(|| {
+                Path::new(p)
+                    .parent()
+                    .map(|x| x.to_string_lossy().to_string())
+            })
             .unwrap_or_default();
         let mut artist = self.meta_cache.get(p).map(|e| e.artist.clone()).unwrap_or_default();
         let mut album = self.meta_cache.get(p).map(|e| e.album.clone()).unwrap_or_default();
@@ -1514,6 +1522,9 @@ video_ended: false,
     }
 
     pub(crate) fn playing_display(path: &str) -> String {
+        if let Some(t) = crate::cue::track_for(path) {
+            return format!("{} > {:02} {}", t.album, t.number, t.title);
+        }
         let p = Path::new(path);
         let folder = p.parent().and_then(|x| x.file_name()).map(|f| f.to_string_lossy().to_string()).unwrap_or_else(|| "?".to_string());
         format!("{} > {}", folder, beautify_name(&stem(path)))

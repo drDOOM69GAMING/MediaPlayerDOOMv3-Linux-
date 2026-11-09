@@ -132,6 +132,9 @@ pub fn write_art_cache(path: &str, bytes: &[u8]) -> bool {
 }
 
 pub fn make_display(path: &str) -> String {
+    if let Some(d) = crate::cue::display(path) {
+        return d;
+    }
     let folder = Path::new(path)
         .parent()
         .and_then(|p| p.file_name())
@@ -158,6 +161,7 @@ pub fn playlist_display(artist: &str, title: &str, path: &str) -> String {
 }
 
 pub fn song_sort_key(path: &str) -> (String, String) {
+    let disk = crate::cue::disk_path(path);
     let s = stem(path);
     if let Some(pos) = s.find(" - ") {
         let after = &s[pos + 3..];
@@ -173,7 +177,7 @@ pub fn song_sort_key(path: &str) -> (String, String) {
         let artist = if !artist.is_empty() {
             artist.to_string()
         } else {
-            Path::new(path)
+            Path::new(&disk)
                 .parent()
                 .and_then(|p| p.file_name())
                 .map(|f| f.to_string_lossy().to_string())
@@ -184,7 +188,7 @@ pub fn song_sort_key(path: &str) -> (String, String) {
             title.trim().to_lowercase(),
         )
     } else {
-        let folder = Path::new(path)
+        let folder = Path::new(&disk)
             .parent()
             .and_then(|p| p.file_name())
             .map(|f| f.to_string_lossy().to_string())
@@ -194,7 +198,13 @@ pub fn song_sort_key(path: &str) -> (String, String) {
 }
 
 pub fn band_of(path: &str) -> String {
-    let parent = Path::new(path)
+    if let Some(t) = crate::cue::track_for(path) {
+        if !crate::util::is_placeholder_meta(&t.artist) {
+            return t.artist;
+        }
+    }
+    let disk = crate::cue::disk_path(path);
+    let parent = Path::new(&disk)
         .parent()
         .and_then(|p| p.file_name())
         .map(|f| f.to_string_lossy().to_string())
@@ -237,7 +247,13 @@ pub fn band_of_file(path: &str) -> String {
 }
 
 pub fn folder_artist_album(path: &str) -> Option<(String, String)> {
-    let mut dir = Path::new(path).parent()?;
+    if let Some(t) = crate::cue::track_for(path) {
+        if !crate::util::is_placeholder_meta(&t.artist) {
+            return Some((t.artist, t.album));
+        }
+    }
+    let disk = crate::cue::disk_path(path);
+    let mut dir = Path::new(&disk).parent()?;
     let mut name = dir.file_name()?.to_string_lossy().trim().to_string();
     if name.is_empty() {
         return None;

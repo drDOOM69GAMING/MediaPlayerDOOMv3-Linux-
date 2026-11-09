@@ -54,6 +54,9 @@ pub fn is_audio(path: &str) -> bool {
 }
 
 pub fn stem(path: &str) -> String {
+    if let Some(t) = crate::cue::stem_title(path) {
+        return t;
+    }
     Path::new(path)
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())

@@ -355,19 +355,37 @@ pub fn convert_folder_to(
         if cancel.load(Ordering::Relaxed) {
             return Err("cancelled".into());
         }
-        let resolved = format.resolved(file);
-        let rel = Path::new(file)
-            .strip_prefix(Path::new(src))
-            .ok()
-            .filter(|p| !p.as_os_str().is_empty())
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| {
-                PathBuf::from(
-                    Path::new(file)
-                        .file_name()
-                        .unwrap_or_else(|| std::ffi::OsStr::new("track")),
-                )
-            });
+        let cue = crate::cue::track_for(file);
+        let source_disk = crate::cue::disk_path(file);
+        let resolved = format.resolved(&source_disk);
+        let rel = if let Some(track) = &cue {
+            // Keep the album folder, but name each output after its CUE track.
+            let base = Path::new(&source_disk);
+            let parent_rel = base
+                .strip_prefix(Path::new(src))
+                .ok()
+                .and_then(|p| p.parent())
+                .map(|p| p.to_path_buf())
+                .unwrap_or_default();
+            parent_rel.join(format!(
+                "{:02} - {}",
+                track.number,
+                crate::util::sanitize_win(&track.title)
+            ))
+        } else {
+            Path::new(file)
+                .strip_prefix(Path::new(src))
+                .ok()
+                .filter(|p| !p.as_os_str().is_empty())
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| {
+                    PathBuf::from(
+                        Path::new(file)
+                            .file_name()
+                            .unwrap_or_else(|| std::ffi::OsStr::new("track")),
+                    )
+                })
+        };
         let mut out = dest_root.join(rel);
         out.set_extension(resolved.extension());
         let out = unique_path(out);
@@ -379,10 +397,15 @@ pub fn convert_folder_to(
             Err(e) if cancel.load(Ordering::Relaxed) => return Err(e),
             Err(_) => failed += 1,
         }
-        let name = Path::new(file)
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default();
+        let name = cue
+            .as_ref()
+            .map(|t| format!("{:02} - {}", t.number, t.title))
+            .unwrap_or_else(|| {
+                Path::new(file)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default()
+            });
         let _ = tx.send(Msg::ConvertProgress {
             done: i + 1,
             total,
@@ -448,9 +471,22 @@ fn convert_one(
     cancel: &AtomicBool,
 ) -> Result<(), String> {
     let tmp = temp_output(dst);
+    let cue = crate::cue::track_for(src);
+    let input = crate::cue::base_audio(src).unwrap_or_else(|| src.to_string());
     let mut cmd = Command::new(ffmpeg_path());
-    cmd.args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
-        .arg(src);
+    cmd.args(["-hide_banner", "-loglevel", "error", "-y"]);
+    if let Some(fmt) = crate::files::input_format_hint(&input) {
+        cmd.args(["-f", fmt]);
+    }
+    if let Some(t) = &cue {
+        if t.start > 0.0 {
+            cmd.args(["-ss", &format!("{:.3}", t.start)]);
+        }
+        if t.end > t.start {
+            cmd.args(["-t", &format!("{:.3}", t.end - t.start)]);
+        }
+    }
+    cmd.args(["-i", &input]);
     if format.supports_art() {
         // Keep embedded cover art where the output container supports it.
         cmd.args([
@@ -467,6 +503,12 @@ fn convert_one(
         cmd.args(["-map", "0:a:0", "-vn"]);
     }
     cmd.args(["-map_metadata", "0", "-sn", "-dn"]);
+    if let Some(t) = &cue {
+        cmd.args(["-metadata", &format!("title={}", t.title)])
+            .args(["-metadata", &format!("artist={}", t.artist)])
+            .args(["-metadata", &format!("album={}", t.album)])
+            .args(["-metadata", &format!("track={}", t.number)]);
+    }
     cmd.args(format.codec_args(quality));
     cmd.arg(&tmp)
         .stdout(Stdio::null())
@@ -672,6 +714,51 @@ mod tests {
         assert!(ConvertFormat::Mp3.quality_label(10).contains("312"));
         assert!(ConvertFormat::Flac.quality_label(10).contains("12"));
         assert!(ConvertFormat::Wav.quality_label(10).contains("32-bit"));
+    }
+
+    #[test]
+    fn converts_cue_tracks_to_individual_files() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("mpdoom-convert-cue-{}", stamp));
+        let src = root.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let wav = src.join("image.wav");
+        let st = Command::new(ffmpeg_path())
+            .args([
+                "-hide_banner", "-loglevel", "error", "-y",
+                "-f", "lavfi", "-i", "sine=frequency=440:duration=2",
+                "-c:a", "pcm_s16le",
+            ])
+            .arg(&wav)
+            .status()
+            .expect("generate wav");
+        assert!(st.success());
+        std::fs::write(
+            src.join("album.cue"),
+            "PERFORMER \"Artist\"\nTITLE \"Album\"\nFILE \"image.wav\" WAVE\n  TRACK 01 AUDIO\n    TITLE \"One\"\n    INDEX 01 00:00:00\n  TRACK 02 AUDIO\n    TITLE \"Two\"\n    INDEX 01 00:01:00\n",
+        )
+        .unwrap();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let cancel = AtomicBool::new(false);
+        let out = root.join("out");
+        let r = convert_folder_to(&src.to_string_lossy(), ConvertFormat::Flac, 5, &out, &tx, &cancel)
+            .expect("cue conversion should work");
+        assert_eq!(r.converted, 2, "failed={}", r.failed);
+        for (name, want) in [("01 - One.flac", 1.0f32), ("02 - Two.flac", 1.0)] {
+            let p = out.join(name);
+            assert!(p.is_file(), "missing {}", p.display());
+            let probe = Command::new(ffprobe_path())
+                .args(["-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1"])
+                .arg(&p)
+                .output()
+                .expect("ffprobe");
+            let secs: f32 = String::from_utf8_lossy(&probe.stdout).trim().parse().unwrap_or(0.0);
+            assert!((secs - want).abs() < 0.25, "{} duration {}", name, secs);
+        }
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

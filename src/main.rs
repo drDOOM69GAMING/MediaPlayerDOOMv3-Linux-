@@ -13,6 +13,7 @@ pub(crate) mod audio;
 pub(crate) mod bdstream;
 pub(crate) mod consts;
 pub(crate) mod convert;
+pub(crate) mod cue;
 pub(crate) mod bluray;
 pub(crate) mod disc;
 pub(crate) mod dvd;

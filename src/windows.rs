@@ -10,7 +10,8 @@ use crate::consts::APP_NAME;
 use crate::log::av_log;
 use crate::util::data_dir;
 pub fn open_in_explorer(path: &str) {
-    let dir = Path::new(path).parent().unwrap_or(Path::new("."));
+    let disk = crate::cue::disk_path(path);
+    let dir = Path::new(&disk).parent().unwrap_or(Path::new("."));
     #[cfg(windows)]
     {
         let _ = std::process::Command::new("explorer.exe").arg(dir.to_string_lossy().as_ref()).spawn();

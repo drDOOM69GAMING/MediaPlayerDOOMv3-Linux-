@@ -33,6 +33,7 @@ fn skip_scan_dir(name: &str) -> bool {
 fn walk_audio<F: FnMut(usize)>(
     dir: &Path,
     out: &mut Vec<String>,
+    cues: &mut Vec<String>,
     progress: &mut F,
     visited: &mut HashSet<PathBuf>,
 ) {
@@ -54,18 +55,20 @@ fn walk_audio<F: FnMut(usize)>(
                     continue;
                 }
             }
-            walk_audio(&p, out, progress, visited);
+            walk_audio(&p, out, cues, progress, visited);
         } else if ft.is_symlink() && p.is_dir() {
             if let Some(name) = p.file_name().map(|n| n.to_string_lossy().to_string()) {
                 if !skip_scan_dir(&name) {
-                    walk_audio(&p, out, progress, visited);
+                    walk_audio(&p, out, cues, progress, visited);
                 }
             }
         } else if ft.is_file() || (ft.is_symlink() && p.is_file()) {
             let s = p.to_string_lossy().to_string();
             if is_audio(&s) {
                 out.push(s);
-                progress(out.len());
+                progress(out.len() + cues.len());
+            } else if crate::cue::is_cue_file(&s) {
+                cues.push(s);
             }
         }
     }
@@ -73,8 +76,10 @@ fn walk_audio<F: FnMut(usize)>(
 
 pub fn collect_audio(dir: &str) -> Vec<String> {
     let mut out = Vec::new();
+    let mut cues = Vec::new();
     let mut visited = HashSet::new();
-    walk_audio(Path::new(dir), &mut out, &mut |_| {}, &mut visited);
+    walk_audio(Path::new(dir), &mut out, &mut cues, &mut |_| {}, &mut visited);
+    expand_cues(&mut out, cues);
     out.sort();
     out
 }
@@ -87,8 +92,10 @@ pub fn collect_audio_cancellable(
     cancel: &std::sync::atomic::AtomicBool,
 ) -> Vec<String> {
     let mut out = Vec::new();
+    let mut cues = Vec::new();
     let mut visited = HashSet::new();
-    walk_audio_cancellable(Path::new(dir), &mut out, &mut visited, cancel);
+    walk_audio_cancellable(Path::new(dir), &mut out, &mut cues, &mut visited, cancel);
+    expand_cues(&mut out, cues);
     out.sort();
     out
 }
@@ -96,6 +103,7 @@ pub fn collect_audio_cancellable(
 fn walk_audio_cancellable(
     dir: &Path,
     out: &mut Vec<String>,
+    cues: &mut Vec<String>,
     visited: &mut HashSet<PathBuf>,
     cancel: &std::sync::atomic::AtomicBool,
 ) {
@@ -122,17 +130,19 @@ fn walk_audio_cancellable(
                     continue;
                 }
             }
-            walk_audio_cancellable(&p, out, visited, cancel);
+            walk_audio_cancellable(&p, out, cues, visited, cancel);
         } else if ft.is_symlink() && p.is_dir() {
             if let Some(name) = p.file_name().map(|n| n.to_string_lossy().to_string()) {
                 if !skip_scan_dir(&name) {
-                    walk_audio_cancellable(&p, out, visited, cancel);
+                    walk_audio_cancellable(&p, out, cues, visited, cancel);
                 }
             }
         } else if ft.is_file() || (ft.is_symlink() && p.is_file()) {
             let s = p.to_string_lossy().to_string();
             if is_audio(&s) {
                 out.push(s);
+            } else if crate::cue::is_cue_file(&s) {
+                cues.push(s);
             }
         }
     }
@@ -140,6 +150,7 @@ fn walk_audio_cancellable(
 
 pub fn collect_audio_report(dir: &str, tx: &Sender<Msg>) -> Vec<String> {
     let mut out = Vec::new();
+    let mut cues = Vec::new();
     let mut last = std::time::Instant::now();
     let mut progress = |found: usize| {
         if last.elapsed().as_millis() >= 300 {
@@ -148,15 +159,42 @@ pub fn collect_audio_report(dir: &str, tx: &Sender<Msg>) -> Vec<String> {
         }
     };
     let mut visited = HashSet::new();
-    walk_audio(Path::new(dir), &mut out, &mut progress, &mut visited);
+    walk_audio(Path::new(dir), &mut out, &mut cues, &mut progress, &mut visited);
+    expand_cues(&mut out, cues);
     out.sort();
     out
+}
+
+fn normalized_path_key(path: &str) -> String {
+    path.replace('\\', "/").replace("/./", "/")
+}
+
+/// Replace a single-file image with its CUE tracks. Multi-FILE sheets and
+/// sheets whose image is missing are ignored; those folders already contain
+/// one file per track.
+fn expand_cues(files: &mut Vec<String>, cues: Vec<String>) {
+    let mut done: HashSet<String> = HashSet::new();
+    for cue in cues {
+        let Some(sheet) = crate::cue::sheet(&cue) else { continue };
+        let base = normalized_path_key(&sheet.audio_path);
+        if !done.insert(base.clone()) {
+            continue;
+        }
+        let before = files.len();
+        files.retain(|p| normalized_path_key(p) != base);
+        if files.len() == before {
+            continue;
+        }
+        for t in &sheet.tracks {
+            files.push(crate::cue::make_path(&cue, t.number));
+        }
+    }
 }
 
 /// Some files carry ID3 tags with bytes that make ffmpeg's content probe pick
 /// the wrong demuxer (two MP3s in the scanned library were mistaken for WAV).
 /// Hint the demuxer from the extension so those files still decode.
-fn input_format_hint(audio: &str) -> Option<&'static str> {
+pub(crate) fn input_format_hint(audio: &str) -> Option<&'static str> {
     let ext = Path::new(audio)
         .extension()
         .and_then(|e| e.to_str())
@@ -194,17 +232,27 @@ pub fn transcode_with_ffmpeg(audio: &str, ffmpeg: &Path) -> Result<PathBuf, Stri
     let _ = std::fs::remove_file(&part);
     let ff = ffmpeg.to_string_lossy().to_string();
     let po = part.to_string_lossy().to_string();
+    let cue = crate::cue::track_for(audio);
+    let input = crate::cue::base_audio(audio).unwrap_or_else(|| audio.to_string());
     let mut cmd = std::process::Command::new(ff);
     cmd.args(["-hide_banner", "-loglevel", "error", "-y"]);
-    if let Some(fmt) = input_format_hint(audio) {
+    if let Some(fmt) = input_format_hint(&input) {
         cmd.args(["-f", fmt]);
     }
+    if let Some(t) = &cue {
+        if t.start > 0.0 {
+            cmd.args(["-ss", &format!("{:.3}", t.start)]);
+        }
+        if t.end > t.start {
+            cmd.args(["-t", &format!("{:.3}", t.end - t.start)]);
+        }
+    }
     let st = cmd
-        .args(["-i", audio, "-vn", "-ac", "2", "-ar", "44100", "-f", "wav", &po])
+        .args(["-i", &input, "-vn", "-ac", "2", "-ar", "44100", "-f", "wav", &po])
         .no_window()
-        .status()
+        .output()
         .map_err(|e| format!("ffmpeg failed to start: {}", e))?;
-    if st.success() && part.exists() {
+    if st.status.success() && part.exists() {
         if let Err(e) = std::fs::rename(&part, &out) {
             let _ = std::fs::remove_file(&part);
             return Err(format!("could not cache converted audio: {}", e));
@@ -212,7 +260,17 @@ pub fn transcode_with_ffmpeg(audio: &str, ffmpeg: &Path) -> Result<PathBuf, Stri
         Ok(out)
     } else {
         let _ = std::fs::remove_file(&part);
-        Err("ffmpeg could not convert this file".into())
+        let tail = String::from_utf8_lossy(&st.stderr)
+            .lines()
+            .rev()
+            .take(3)
+            .collect::<Vec<_>>()
+            .join(" | ");
+        Err(if tail.is_empty() {
+            "ffmpeg could not convert this file".to_string()
+        } else {
+            format!("ffmpeg could not convert this file: {}", tail)
+        })
     }
 }
 
@@ -222,8 +280,23 @@ pub fn record_with_ffmpeg(audio: &str, ffmpeg: &Path, dest: &Path) -> Result<Pat
     }
     let po = dest.to_string_lossy().to_string();
     let _ = std::fs::remove_file(dest);
-    let st = std::process::Command::new(ffmpeg.to_string_lossy().to_string())
-        .args(["-hide_banner", "-loglevel", "error", "-y", "-i", audio, "-vn", "-ac", "2", "-ar", "44100", "-f", "wav", &po])
+    let cue = crate::cue::track_for(audio);
+    let input = crate::cue::base_audio(audio).unwrap_or_else(|| audio.to_string());
+    let mut cmd = std::process::Command::new(ffmpeg.to_string_lossy().to_string());
+    cmd.args(["-hide_banner", "-loglevel", "error", "-y"]);
+    if let Some(fmt) = input_format_hint(&input) {
+        cmd.args(["-f", fmt]);
+    }
+    if let Some(t) = &cue {
+        if t.start > 0.0 {
+            cmd.args(["-ss", &format!("{:.3}", t.start)]);
+        }
+        if t.end > t.start {
+            cmd.args(["-t", &format!("{:.3}", t.end - t.start)]);
+        }
+    }
+    let st = cmd
+        .args(["-i", &input, "-vn", "-ac", "2", "-ar", "44100", "-f", "wav", &po])
         .no_window()
         .status()
         .map_err(|e| format!("ffmpeg failed to start: {}", e))?;
@@ -323,13 +396,14 @@ pub fn existing_drive_roots() -> Vec<PathBuf> {
 }
 
 pub fn find_local_art(song_path: &str) -> Option<Vec<u8>> {
-    let p = Path::new(song_path);
+    let disk = crate::cue::disk_path(song_path);
+    let p = Path::new(&disk);
     if let Some(dir) = p.parent() {
         if let Some(b) = find_dir_art(dir) {
             return Some(b);
         }
     }
-    if let Some(probed) = load_tagged(song_path) {
+    if let Some(probed) = load_tagged(&disk) {
         if let Some(tag) = probed.primary_tag().or_else(|| probed.first_tag()) {
             for pic in tag.pictures() {
                 let data = pic.data();
@@ -439,11 +513,19 @@ mod file_pipeline_tests {
             return;
         };
         let files = collect_audio(&dir.to_string_lossy());
+        let cue_tracks = files.iter().filter(|p| crate::cue::is_cue(p)).count();
+        println!("total={} cue_tracks={}", files.len(), cue_tracks);
+        if let Some(p) = files.iter().find(|p| crate::cue::is_cue(p)) {
+            println!(
+                "sample={} stem={} display={} base={:?}",
+                p,
+                stem(p),
+                crate::library::make_display(p),
+                crate::cue::base_audio(p)
+            );
+        }
         assert!(files.len() >= 18_000, "only found {} files", files.len());
-        assert!(
-            files.iter().any(|p| p.to_ascii_lowercase().ends_with(".ape")),
-            "APE files were not collected"
-        );
+        assert!(cue_tracks >= 40, "CUE sheets were not expanded: {}", cue_tracks);
     }
 
     #[test]
