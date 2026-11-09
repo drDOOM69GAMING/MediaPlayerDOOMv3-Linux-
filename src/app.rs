@@ -258,6 +258,9 @@ pub(crate) struct PlayerApp {
     pub(crate) video_open_at: f64,
     pub(crate) video_clock: std::sync::Arc<std::sync::atomic::AtomicU64>,
     pub(crate) video_seek_base: f32,
+    /// Display-time offset when a Blu-ray starts at a chapter (ffmpeg reports
+    /// positions relative to that chapter).
+    pub(crate) video_time_offset: f32,
     pub(crate) video_deferred_open: bool,
     /// When the current open/seek started waiting for its first frame, and
     /// whether we already gave up on it. Used to turn a permanent black
@@ -651,6 +654,7 @@ impl PlayerApp {
             video_open_at: 0.0,
             video_clock,
             video_seek_base: 0.0,
+            video_time_offset: 0.0,
             video_deferred_open: false,
             video_loading_since: None,
             video_load_timed_out: false,
@@ -1570,7 +1574,9 @@ video_ended: false,
             }
             Msg::VideoPos { gen, secs } => {
                 if gen == self.video_gen {
-                    self.video_cur_secs = secs;
+                    let abs = self.video_time_offset + secs;
+                    self.video_cur_secs = abs;
+                    let secs = abs;
                     let apos = self.video_sink.as_ref().map(|s| s.get_pos().as_secs_f32()).unwrap_or(-1.0);
                     if apos >= 0.0 && self.video_seek_base <= secs {
                         let audio_file = self.video_seek_base + apos;

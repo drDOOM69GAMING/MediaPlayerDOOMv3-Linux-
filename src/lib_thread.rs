@@ -125,6 +125,37 @@ pub fn lib_loop(rx: Receiver<LibCmd>, tx: Sender<Msg>, clock: std::sync::Arc<std
     }
 }
 
+fn hwaccel_args() -> Vec<&'static str> {
+    let vendor = std::fs::read_dir("/sys/class/drm")
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().starts_with("renderD"))
+        .filter_map(|e| std::fs::read_to_string(e.path().join("device/vendor")).ok())
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    let render = std::fs::read_dir("/sys/class/drm")
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok())
+        .find(|e| e.file_name().to_string_lossy().starts_with("renderD"))
+        .map(|e| format!("/dev/dri/{}", e.file_name().to_string_lossy()))
+        .filter(|p| std::path::Path::new(p).exists());
+    if vendor == "0x10de" && std::path::Path::new("/dev/nvidia0").exists() {
+        // NVIDIA proprietary. If NVDEC isn't available ffmpeg falls back itself.
+        return vec!["-hwaccel", "cuda"];
+    }
+    if (vendor == "0x1002" || vendor == "0x8086") && render.is_some() {
+        // AMD or Intel through Mesa VAAPI - avoids ffmpeg trying CUDA first.
+        return vec!["-hwaccel", "vaapi", "-hwaccel_device", "/dev/dri/renderD128"];
+    }
+    vec!["-hwaccel", "auto"]
+}
+
 pub fn handle_lib(cmd: LibCmd, tx: &Sender<Msg>, tag_tx: &Sender<Vec<String>>, art_tx: &Sender<Vec<String>>, video_pause: &std::sync::Arc<std::sync::atomic::AtomicBool>, video_child: &mut Option<Child>, video_thread: &mut Option<std::thread::JoinHandle<()>>, clock: &std::sync::Arc<std::sync::atomic::AtomicU64>) {
         av_log(match &cmd {
             LibCmd::Scan(_) => "lib: Scan",
@@ -280,31 +311,55 @@ LibCmd::Scan(dir) => {
                 if let Some(mut c) = video_child.take() { let _ = c.kill(); let _ = c.wait(); }
                 if let Some(t) = video_thread.take() { let _ = t.join(); }
                 av_log("open: old video killed+joined");
+                let dvd = crate::dvd::is_dvd(&path);
+                let bd = crate::bluray::is_bluray(&path);
                 let t_open = std::time::Instant::now();
-                let (sw, sh, sfps) = probe_video_info(&path);
+                // Optical discs are slow to open and every ffprobe pass makes
+                // the drive seek. Use known broadcast/BD dimensions for the
+                // first frame; local files still get a real probe.
+                let (sw, sh, sfps) = if bd {
+                    (1920, 1080, 23.976)
+                } else if dvd {
+                    (720, 480, 29.97)
+                } else {
+                    probe_video_info(&path)
+                };
                 av_log(&format!("open: probe_info {}x{} fps={} took {}ms", sw, sh, sfps, t_open.elapsed().as_millis()));
                 let (tw, th) = fit_video_dims(sw, sh, 1920, 1080);
                 let fps = if sfps > 0.0 { sfps } else { 24.0 };
-                let dvd = crate::dvd::is_dvd(&path);
-                let input = if dvd { crate::dvd::source(&path) } else { path.as_str() };
+                let input = if dvd {
+                    crate::dvd::source(&path).to_string()
+                } else if bd {
+                    format!("bluray:{}", crate::bluray::source(&path))
+                } else {
+                    path.clone()
+                };
                 let mut cmd = std::process::Command::new(ffmpeg_path());
                 cmd.args(["-hide_banner", "-loglevel", "error"]);
-                // Hardware decode (VAAPI/CUDA/VDPAU...) when the driver and
-                // ffmpeg support it; "auto" falls back to software. Users can
-                // disable it with MPDOOM_NO_HWACCEL=1 if a driver misbehaves.
+                // Pick the GPU backend explicitly instead of letting ffmpeg
+                // probe CUDA first on an AMD machine. Users can disable it with
+                // MPDOOM_NO_HWACCEL=1 if a driver misbehaves.
                 if std::env::var_os("MPDOOM_NO_HWACCEL").is_none() {
-                    cmd.args(["-hwaccel", "auto"]);
+                    let hw = hwaccel_args();
+                    av_log(&format!("video hwaccel: {:?}", hw));
+                    cmd.args(hw);
                 }
                 if dvd {
                     cmd.args(["-f", "dvdvideo"]);
                 }
-                if crate::bluray::is_bluray(&path) {
+                if bd {
+                    if let Some(pl) = crate::bluray::playlist(&path) {
+                        cmd.args(["-playlist"]).arg(pl.to_string());
+                    }
+                    if let Some(ch) = crate::bluray::chapter(&path) {
+                        cmd.args(["-chapter"]).arg(ch.to_string());
+                    }
                     crate::bluray::configure_command(&mut cmd);
                 }
                 if seek > 0.0 {
                     cmd.args(["-ss"]).arg(format!("{:.3}", seek));
                 }
-                cmd.arg("-i").arg(input)
+                cmd.arg("-i").arg(&input)
                     .args(["-an", "-sn", "-vf", &format!("scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2", tw, th, tw, th), "-pix_fmt", "rgba", "-f", "rawvideo", "-"])
                     .stdout(std::process::Stdio::piped())
                     .stderr(std::process::Stdio::piped())
@@ -317,7 +372,7 @@ LibCmd::Scan(dir) => {
                     }
                 };
                 av_log(&format!("open: ffmpeg spawned at {}ms", t_open.elapsed().as_millis()));
-                {
+                if !bd {
                     let tx2 = tx.clone();
                     let p = path.clone();
                     std::thread::spawn(move || {

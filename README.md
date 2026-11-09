@@ -189,6 +189,20 @@ This app is built on the work of some incredible open-source projects, and it wo
 
 Full details, license texts, and donation links are in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). If you can, consider donating to FFmpeg, yt-dlp, and MKVToolNix - they give this all away for free.
 
+## v3.2.12 changelog
+
+- **Blu-ray playback fixes**
+  - Resolve the disc's real main-title playlist via libbluray instead of letting ffmpeg auto-pick one that cannot seek (the Jumanji disc's main title is playlist `00001.mpls`)
+  - Do not resume a Blu-ray from a saved timestamp; that was the change that made the disc "stop reading" and hang on launch
+  - Seeking on Blu-ray now jumps by **chapter** (ffmpeg/libbluray cannot time-seek these titles reliably); the UI reports the chapter instead of freezing the player
+  - Blu-ray audio language is taken from libbluray's own title/language list, preferring English; subtitles stay off
+  - Blu-ray startup no longer runs extra ffprobe passes against the drive, so the first frame arrives sooner and the drive is not thrashed
+  - STOP now actually closes optical playback and clears the DVD/Blu-ray NOW state; a STOP button is also present in the fullscreen movie bar
+- **GPU vendor detection**
+  - AMD/Intel are detected from `/sys/class/drm/*/device/vendor` and use VAAPI directly (`-hwaccel vaapi`); NVIDIA with the proprietary driver uses CUDA. This removes the failed CUDA probe on your AMD RX 6800
+  - `MPDOOM_NO_HWACCEL=1` still forces software decoding
+- Version bump to **v3.2.12**
+
 ## v3.2.11 changelog
 
 - **Whole-disc ISO dumping for DVD and Blu-ray**

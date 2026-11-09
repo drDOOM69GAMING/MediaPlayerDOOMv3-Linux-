@@ -14,15 +14,18 @@ pub fn probe_video_duration(path: &str) -> f32 {
     }
     let dvd = crate::dvd::is_dvd(path);
     let bd = crate::bluray::is_bluray(path);
-    let input = if dvd { crate::dvd::source(path) } else { path };
     let mut cmd = std::process::Command::new(fp);
     cmd.args(["-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1"]);
     if dvd {
         cmd.args(["-f", "dvdvideo"]);
     }
     if bd {
+        if let Some(pl) = crate::bluray::playlist(path) {
+            cmd.args(["-playlist"]).arg(pl.to_string());
+        }
         crate::bluray::configure_command(&mut cmd);
     }
+    let input = if dvd { crate::dvd::source(path).to_string() } else if bd { format!("bluray:{}", crate::bluray::source(path)) } else { path.to_string() };
     let out = cmd.arg(input).no_window().output();
     match out {
         Ok(o) => std::str::from_utf8(&o.stdout).ok()
@@ -38,15 +41,19 @@ pub fn probe_video_info(path: &str) -> (u32, u32, f32) {
         return (0, 0, 0.0);
     }
     let dvd = crate::dvd::is_dvd(path);
-    let input = if dvd { crate::dvd::source(path) } else { path };
+    let bd = crate::bluray::is_bluray(path);
     let mut cmd = std::process::Command::new(fp);
     cmd.args(["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height,avg_frame_rate", "-of", "default=noprint_wrappers=1:nokey=1"]);
     if dvd {
         cmd.args(["-f", "dvdvideo"]);
     }
-    if crate::bluray::is_bluray(path) {
+    if bd {
+        if let Some(pl) = crate::bluray::playlist(path) {
+            cmd.args(["-playlist"]).arg(pl.to_string());
+        }
         crate::bluray::configure_command(&mut cmd);
     }
+    let input = if dvd { crate::dvd::source(path).to_string() } else if bd { format!("bluray:{}", crate::bluray::source(path)) } else { path.to_string() };
     let out = cmd.arg(input).no_window().output();
     match out {
         Ok(o) => {
@@ -458,15 +465,18 @@ pub fn preferred_audio_map(path: &str) -> Option<String> {
     if !fp.is_file() {
         return None;
     }
-    let input = if dvd { crate::dvd::source(path) } else { path };
     let mut cmd = std::process::Command::new(fp);
     cmd.args(["-v", "error", "-select_streams", "a", "-show_entries", "stream_tags=language", "-of", "json"]);
     if dvd {
         cmd.args(["-f", "dvdvideo"]);
     }
     if bd {
+        if let Some(pl) = crate::bluray::playlist(path) {
+            cmd.args(["-playlist"]).arg(pl.to_string());
+        }
         crate::bluray::configure_command(&mut cmd);
     }
+    let input = if dvd { crate::dvd::source(path).to_string() } else if bd { format!("bluray:{}", crate::bluray::source(path)) } else { path.to_string() };
     let out = cmd.arg(input).no_window().output().ok()?;
     if !out.status.success() {
         return None;

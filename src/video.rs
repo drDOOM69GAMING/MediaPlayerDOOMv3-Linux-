@@ -43,11 +43,22 @@ impl PlayerApp {
             self.set_error("No Blu-ray source");
             return;
         }
-        let wrapped = crate::bluray::wrap(source);
+        let info = crate::bluray::main_title_info(source);
+        let playlist = info.map(|i| i.playlist);
+        let wrapped = crate::bluray::wrap_playlist(source, playlist);
+        if playlist.is_none() {
+            // No reliable main-title playlist: do not resume from a saved
+            // timestamp, because time seeking in that auto-selected title is
+            // what used to hang.
+            self.video_positions.remove(&wrapped);
+        }
         self.video_queue = vec![wrapped.clone()];
         self.video_queue_idx = 0;
         self.play_video_item(wrapped);
-        self.set_status(format!("BLU-RAY: {}", crate::bluray::display_name(&crate::bluray::wrap(source))));
+        if let Some(i) = info {
+            self.video_dur_secs = i.secs;
+        }
+        self.set_status(format!("BLU-RAY: {}", crate::bluray::display_name(&crate::bluray::wrap_playlist(source, playlist))));
     }
 
     pub(crate) fn play_bluray_drive(&mut self) {
@@ -187,6 +198,42 @@ impl PlayerApp {
 
     pub(crate) fn seek_video(&mut self, tsecs: f32) {
         let Some(path) = self.video_current.clone() else { return };
+        if crate::bluray::is_bluray(&path) {
+            // Time seeking through libbluray is unreliable and could stop disc
+            // reads. Chapters are seekable, so jump to the nearest chapter.
+            let source = crate::bluray::source(&path).to_string();
+            let Some(info) = crate::bluray::main_title_info(&source) else {
+                self.set_status("Blu-ray chapter information unavailable");
+                return;
+            };
+            if info.chapters < 2 || info.secs <= 1.0 {
+                self.set_status("This Blu-ray title has no seekable chapters");
+                return;
+            }
+            let per = info.secs / info.chapters as f32;
+            let ch = ((tsecs.max(0.0) / per).floor() as u32 + 1).clamp(1, info.chapters);
+            let offset = (ch - 1) as f32 * per;
+            if let Some(mut c) = self.video_audio_proc.take() {
+                let _ = c.kill();
+                let _ = c.wait();
+            }
+            if let Some(s) = self.video_sink.take() {
+                s.stop();
+            }
+            let next = crate::bluray::wrap_chapter(&source, Some(info.playlist), ch);
+            self.play_video_item(next);
+            self.video_time_offset = offset;
+            self.video_cur_secs = offset;
+            self.video_dur_secs = info.secs;
+            self.set_status(format!(
+                "Blu-ray chapter {} / {} (~{})",
+                ch,
+                info.chapters,
+                fmt_time(offset)
+            ));
+            return;
+        }
+        self.video_time_offset = 0.0;
         let was_paused = self.video_paused;
         let mut tsecs = tsecs.max(0.0);
         if self.video_dur_secs > 0.0 {
@@ -230,6 +277,7 @@ impl PlayerApp {
 
     pub(crate) fn play_video_item(&mut self, path: String) {
         self.video_closing = false;
+        self.video_time_offset = 0.0;
         if let Some(mut c) = self.video_audio_proc.take() {
             let _ = c.kill();
             let _ = c.wait();
@@ -471,10 +519,19 @@ impl PlayerApp {
         let _ = self.lib_tx.send(LibCmd::VideoClose);
         self.video_on = false;
         self.video_ended = false;
+        self.video_paused = false;
+        self.video_ended = false;
+        self.video_current = None;
+        self.video_queue.clear();
+        self.video_queue_idx = 0;
         self.video_tex = None;
         self.video_loading_since = None;
         self.video_load_timed_out = false;
         self.video_decode_error.clear();
+        self.video_audio_pending = false;
+        self.video_time_offset = 0.0;
+        self.video_cur_secs = 0.0;
+        self.video_dur_secs = 0.0;
         self.set_video_fs(false);
         if let Some(mut c) = self.video_audio_proc.take() {
             let _ = c.kill();
@@ -557,6 +614,7 @@ impl PlayerApp {
             let mut prev = false;
             let mut add = false;
             let mut aspect_cycle = false;
+            let mut stop_video = false;
             let mut play_idx: Option<usize> = None;
             let mut del_idx: Option<usize> = None;
             let mut clearq = false;
@@ -770,6 +828,10 @@ impl PlayerApp {
                         togg = true;
                     }
                 });
+            if stop_video {
+                self.close_video();
+                return;
+            }
             if fs_off { self.set_video_fs(false); }
             if let Some(i) = play_idx { self.play_queue_idx(i); }
             if let Some(i) = del_idx { self.remove_queue_item(i); }

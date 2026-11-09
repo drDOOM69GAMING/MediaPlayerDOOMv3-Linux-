@@ -901,6 +901,9 @@ impl PlayerApp {
                     }
                 }
                 if deck_key(ui, "STOP", th.btn_fg, th.btn_bg).clicked() {
+                    if self.video_on || self.video_current.is_some() {
+                        self.close_video();
+                    }
                     self.stop_music();
                     if self.radio_on {
                         self.stop_radio();

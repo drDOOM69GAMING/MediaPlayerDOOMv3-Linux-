@@ -76,11 +76,30 @@ pub fn spawn_radio_stream(url: &str, ffmpeg: &Path) -> Result<(Child, PipeSource
 pub fn spawn_video_audio(path: &str, ffmpeg: &Path, seek: f32) -> Result<(Child, PipeSource), String> {
     let dvd = crate::dvd::is_dvd(path);
     let bd = crate::bluray::is_bluray(path);
-    let input = if dvd { crate::dvd::source(path) } else { path };
+    let bd_playlist = if bd { crate::bluray::playlist(path) } else { None };
+    let bd_url;
+    let input = if dvd {
+        crate::dvd::source(path)
+    } else if bd {
+        bd_url = format!("bluray:{}", crate::bluray::source(path));
+        bd_url.as_str()
+    } else {
+        path
+    };
     let mut args: Vec<String> = vec!["-hide_banner".to_string(), "-loglevel".to_string(), "error".to_string()];
     if dvd {
         args.push("-f".into());
         args.push("dvdvideo".into());
+    }
+    if let Some(pl) = bd_playlist {
+        args.push("-playlist".into());
+        args.push(pl.to_string());
+    }
+    if bd {
+        if let Some(ch) = crate::bluray::chapter(path) {
+            args.push("-chapter".into());
+            args.push(ch.to_string());
+        }
     }
     args.push("-re".into());
     if seek > 0.0 {
@@ -89,8 +108,13 @@ pub fn spawn_video_audio(path: &str, ffmpeg: &Path, seek: f32) -> Result<(Child,
     }
     args.push("-i".into());
     args.push(input.to_string());
-    if dvd || bd {
+    if dvd {
         if let Some(map) = crate::ffmpeg::preferred_audio_map(path) {
+            args.push("-map".into());
+            args.push(map);
+        }
+    } else if bd {
+        if let Some(map) = crate::bluray::english_audio_map(crate::bluray::source(path)) {
             args.push("-map".into());
             args.push(map);
         }
