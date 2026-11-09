@@ -6,7 +6,7 @@ set -euo pipefail
 if command -v pacman >/dev/null 2>&1; then
     echo "Detected Arch/CachyOS (pacman)"
     sudo pacman -S --needed --noconfirm \
-        base-devel rust ffmpeg mkvtoolnix-cli \
+        base-devel rust ffmpeg mkvtoolnix-cli cdparanoia \
         alsa-lib openssl libxkbcommon libxkbcommon-x11 wayland libx11 xdg-utils
 elif command -v apt >/dev/null 2>&1; then
     echo "Detected Debian/Ubuntu/Mint (apt)"
@@ -14,18 +14,18 @@ elif command -v apt >/dev/null 2>&1; then
     sudo apt install -y \
         build-essential pkg-config libasound2-dev \
         libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-dev \
-        libssl-dev ffmpeg mkvtoolnix xdg-utils \
+        libssl-dev ffmpeg mkvtoolnix cdparanoia xdg-utils \
         xdg-desktop-portal xdg-desktop-portal-gtk
 elif command -v dnf >/dev/null 2>&1; then
     echo "Detected Fedora (dnf)"
     sudo dnf install -y gcc gcc-c++ make pkgconf-pkg-config alsa-lib-devel \
         libxkbcommon-devel libxkbcommon-x11-devel wayland-devel libX11-devel \
-        openssl-devel ffmpeg mkvtoolnix xdg-utils xdg-desktop-portal
+        openssl-devel ffmpeg mkvtoolnix cdparanoia xdg-utils xdg-desktop-portal
 elif command -v zypper >/dev/null 2>&1; then
     echo "Detected openSUSE (zypper)"
     sudo zypper install -y gcc gcc-c++ make pkg-config alsa-devel \
         libxkbcommon-devel libxkbcommon-x11-devel wayland-devel libX11-devel \
-        libopenssl-devel ffmpeg mkvtoolnix xdg-utils xdg-desktop-portal
+        libopenssl-devel ffmpeg mkvtoolnix cdparanoia xdg-utils xdg-desktop-portal
 else
     echo "Unknown package manager. Install the packages listed in README.md." >&2
     exit 1

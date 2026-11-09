@@ -8,7 +8,7 @@ A retro DOOM-styled media player rendered in egui. Tape, CD, and Radio faces on 
 
 - **Deck modes**: switch the central deck between TAPE / CD / RADIO faces
   - **TAPE**: auto-reverse cassette with counters, winding, and tune slider
-  - **CD**: spinning disc tray with track counter, LCDs, and in-order playback
+  - **CD**: spinning disc tray with track counter, LCDs, in-order playback, and **physical audio CD** support on Linux: discs in the optical tray are detected automatically and can be ripped as lossless FLAC (tags, cover art and correct `Artist/Album/01 - Title.flac` naming)
   - **RADIO**: FM/AM dial with click-and-drag tuning, presets, SCAN, live web streams, and an **ADD STATION** dialog to save your own FM/AM stream presets
 - **Bands catalog**: songs grouped by artist folder (A-Z, scrollable), rebuilt from whatever folder you add
 - **Play order switch**: flip the retro wall switch under BANDS. ON = random shuffle, OFF = normal in-order playback
@@ -37,7 +37,7 @@ A retro DOOM-styled media player rendered in egui. Tape, CD, and Radio faces on 
 
 **Linux (tested on CachyOS/KDE Plasma on both Wayland and X11)**
 - Rust toolchain (`rustup` recommended, or the distro's `rust`)
-- Runtime tools: `ffmpeg` (includes ffprobe) and `mkvmerge` (MKVToolNix)
+- Runtime tools: `ffmpeg` (includes ffprobe), `mkvmerge` (MKVToolNix), and `cdparanoia` for CD ripping
 - ALSA (PipeWire/PulseAudio provide it), plus X11 or Wayland libraries
 - An XDG desktop portal and backend for the file pickers (KDE/GNOME/XFCE provide one)
 - `xdg-utils` for "show in folder" (the app falls back to `gio`, `kioclient`, `thunar`, `nautilus`)
@@ -110,6 +110,12 @@ Open a video directly (handy for episodes or testing) with:
 ./target/release/mediaplayerofdoom --video "/path/episode.mkv"
 ```
 
+Start on the CD deck directly (useful with a disc in the tray):
+
+```bash
+./target/release/mediaplayerofdoom --mode cd
+```
+
 ### Install with icon and launcher (Linux)
 
 ```bash
@@ -165,12 +171,28 @@ This app is built on the work of some incredible open-source projects, and it wo
 - **FFmpeg / FFprobe** (GPL v3) - audio/video decoding, transcoding, metadata, and analysis. <https://ffmpeg.org/> - <https://www.gyan.dev/ffmpeg/builds/>
 - **yt-dlp** (Unlicense) - YouTube downloads. <https://github.com/yt-dlp/yt-dlp>
 - **MKVToolNix / mkvmerge** (GPL v2) - real lossless video cuts at INTRO/CREDS markers. <https://mkvtoolnix.download/>
+- **cdparanoia** (GPL v2) - bit-perfect CDDA extraction for lossless CD ripping. <https://xiph.org/paranoia/>
 - **egui / eframe** (MIT/Apache-2.0) - the immediate-mode GUI toolkit that renders the whole DOOM-styled interface. <https://github.com/emilk/egui>
 - **rodio / cpal** (MIT/Apache-2.0, Apache-2.0) - audio playback and device access.
 - **symphonia** (MPL-2.0) - pure-Rust media demuxing/decoding.
 - The **Rust** language and its crate ecosystem.
 
 Full details, license texts, and donation links are in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). If you can, consider donating to FFmpeg, yt-dlp, and MKVToolNix - they give this all away for free.
+
+## v3.2.5 changelog
+
+- **Audio CD detection and lossless ripping**
+  - CD mode now watches the optical drive and shows `AUDIO CD • N TRACKS • time` as soon as a music CD is inserted
+  - **RIP CD → MUSIC** extracts the whole disc and writes `Music/Artist/Album (Year)/NN - Title.flac`
+  - FLAC encoding is done by ffmpeg; CD audio is 16-bit/44.1 kHz PCM, so the FLAC is sample-for-sample lossless (verified: 16-bit/44.1 kHz stereo, correctly tagged)
+  - Metadata comes from the MusicBrainz disc ID (computed from the kernel TOC), including artist, album, year and per-track titles; cover art is fetched from Cover Art Archive or the normal art sources
+  - `cdparanoia` performs the bit-perfect CDDA extraction (ffmpeg on CachyOS/Arch lacks libcdio, so it cannot read a CD directly); ffmpeg then encodes/tags the FLAC
+  - Existing rips of the same disc are recognised by a `.cddiscid` marker instead of being duplicated
+  - Per-track artists are tagged correctly on compilations/soundtracks
+  - Switching into CD mode now stops the previously playing music and resets the spectrum/speakers instead of leaving a frozen visualizer
+  - Verified live on a real 13-track CD: correct metadata, filenames, tags and artwork (86 tests + live disc checks)
+- `cdparanoia` added to all dependency installers
+- Version bump to **v3.2.5**
 
 ## v3.2.4 changelog
 

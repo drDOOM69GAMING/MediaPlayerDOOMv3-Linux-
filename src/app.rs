@@ -221,6 +221,10 @@ pub(crate) struct PlayerApp {
     pub(crate) add_url: String,
     pub(crate) disc_in: bool,
     pub(crate) disc_label: String,
+    /// Physical audio CD detected in an optical drive.
+    pub(crate) cd_physical: Option<CdInfo>,
+    pub(crate) cd_ripping: bool,
+    pub(crate) msg_tx: Sender<Msg>,
     pub(crate) last_cd_dir: Option<String>,
     /// Remembered library root, so startup doesn't re-walk every drive.
     pub(crate) music_root: Option<String>,
@@ -303,7 +307,7 @@ impl PlayerApp {
             .unwrap_or_default()
     }
 
-    pub(crate) fn new(cc: &eframe::CreationContext<'_>, startup_video: Option<String>, windowed: bool) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    pub(crate) fn new(cc: &eframe::CreationContext<'_>, startup_video: Option<String>, windowed: bool, startup_mode: Option<String>) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         #[cfg(target_os = "windows")]
         apply_taskbar_icon(cc);
         let ctx = cc.egui_ctx.clone();
@@ -457,6 +461,10 @@ impl PlayerApp {
             let tx = msg_tx.clone();
             thread::spawn(move || yt_loop(yt_rx, tx, std::sync::Arc::clone(&yt_album_index)));
         }
+        {
+            let tx = msg_tx.clone();
+            thread::spawn(move || crate::cd::monitor(tx));
+        }
 
         let display_cache: Vec<String> = state.playlist.iter().map(|p| make_display(p)).collect();
 
@@ -601,6 +609,9 @@ impl PlayerApp {
             add_url: String::new(),
             disc_in: false,
             disc_label: String::new(),
+            cd_physical: None,
+            cd_ripping: false,
+            msg_tx: msg_tx.clone(),
             last_cd_dir,
             music_root,
             disc_saved: Vec::new(),
@@ -691,6 +702,12 @@ video_ended: false,
             muted_volume: 50,
         };
         app.apply_eq_live();
+        match startup_mode.as_deref() {
+            Some("cd") | Some("disc") => app.set_deck_mode(DeckMode::Disc),
+            Some("radio") => app.set_deck_mode(DeckMode::Radio),
+            Some("tape") => app.set_deck_mode(DeckMode::Tape),
+            _ => {}
+        }
         if let Some(v) = startup_video {
             if Path::new(&v).is_file() {
                 app.enqueue_videos(vec![v]);
@@ -1071,7 +1088,11 @@ video_ended: false,
                     self.set_status(format!("Loaded {} songs", self.state.playlist.len()));
                 }
                 self.save_settings();
-                if !self.state.playlist.is_empty() && !self.state.is_paused && !self.video_on {
+                if !self.state.playlist.is_empty()
+                    && !self.state.is_paused
+                    && !self.video_on
+                    && self.deck_mode == DeckMode::Tape
+                {
                     self.skip_song();
                 }
             }
@@ -1516,6 +1537,50 @@ video_ended: false,
                     ));
                 }
             }
+            Msg::CdDetected(info) => {
+                let new_id = info.as_ref().map(|i| i.disc_id.clone());
+                let old_id = self.cd_physical.as_ref().map(|i| i.disc_id.clone());
+                if new_id != old_id {
+                    self.cd_physical = info;
+                    if self.cd_physical.is_none() {
+                        self.cd_ripping = false;
+                    } else if let Some(cd) = &self.cd_physical {
+                        self.set_status(format!(
+                            "Audio CD detected: {} tracks, {}",
+                            cd.tracks.len(),
+                            fmt_secs(cd.total_secs)
+                        ));
+                    }
+                }
+            }
+            Msg::CdProgress { track, total, text } => {
+                self.cd_ripping = true;
+                self.set_status(format!("CD {}/{}: {}", track, total, text));
+            }
+            Msg::CdDone { folder, files, label } => {
+                self.cd_ripping = false;
+                if files.is_empty() {
+                    self.set_error("CD rip produced no files");
+                } else {
+                    self.disc_saved = self.state.playlist.clone();
+                    self.state.playlist = files.clone();
+                    self.rebuild_display_cache();
+                    self.disc_in = true;
+                    self.disc_label = label.clone();
+                    let first = files[0].clone();
+                    self.ingest_bands(&files, Some(label));
+                    self.save_settings();
+                    self.set_status(format!("CD ripped to {} ({} tracks)", folder, files.len()));
+                    if self.state.is_paused {
+                        self.unpause_music();
+                    }
+                    self.play_song(&first);
+                }
+            }
+            Msg::CdFail(e) => {
+                self.cd_ripping = false;
+                self.set_error(format!("CD rip failed: {}", e));
+            }
             Msg::VideoCutDone { gen, path, cut, err } => {
                 if gen == self.video_gen {
                     self.video_cut_inflight.remove(&path);
@@ -1669,7 +1734,7 @@ impl eframe::App for PlayerApp {
     }
 }
 
-pub fn run(startup_video: Option<String>, windowed: bool) -> eframe::Result {
+pub fn run(startup_video: Option<String>, windowed: bool, startup_mode: Option<String>) -> eframe::Result {
 std::panic::set_hook(Box::new(|info| {
         // Expected, caught decode panics (rodio symphonia init-seek bug) are
         // muted here; open_decoder logs a clean decode-skip line instead.
@@ -1690,6 +1755,7 @@ std::panic::set_hook(Box::new(|info| {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_app_id("mediaplayerofdoom")
+            .with_inner_size(if windowed { egui::vec2(1280.0, 800.0) } else { egui::vec2(1280.0, 720.0) })
             .with_fullscreen(!windowed)
             .with_icon(window_icon_data().unwrap_or_else(|| egui::IconData {
                 rgba: build_icon_fallback_rgba(),
@@ -1703,7 +1769,7 @@ std::panic::set_hook(Box::new(|info| {
         APP_NAME,
         options,
         Box::new(|cc| {
-            let app = PlayerApp::new(cc, startup_video.clone(), windowed)?;
+            let app = PlayerApp::new(cc, startup_video.clone(), windowed, startup_mode.clone())?;
             Ok(Box::new(app) as Box<dyn eframe::App>)
         }),
     )

@@ -1,6 +1,6 @@
 [package]
 name = "mediaplayerofdoom"
-version = "3.2.4"
+version = "3.2.5"
 edition = "2021"
 
 [dependencies]
@@ -32,6 +32,8 @@ windows-sys = { version = "0.61", features = [
 # needs no GTK/libappindicator/libxdo at build or run time.
 [target.'cfg(target_os = "linux")'.dependencies]
 ksni = { version = "0.3", features = ["blocking"] }
+libc = "0.2"
+sha1 = "0.10"
 
 [build-dependencies]
 embed-resource = "2"

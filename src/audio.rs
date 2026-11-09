@@ -469,7 +469,14 @@ impl PlayerApp {
             self.viz_peaks[i] = 0.0;
         }
         self.viz_rms = 0.0;
+        self.viz_rms_prev = 0.0;
         self.viz_pop = 0.0;
+        self.viz_bpm = 0.0;
+        // The shared spectrum state is read by the deck; clearing it stops the
+        // "frozen bars" look immediately instead of waiting for the decay.
+        if let Ok(mut st) = self.viz_lock.lock() {
+            *st = crate::viz::VizState::default();
+        }
     }
 
     pub(crate) fn set_volume(&mut self, level: u32) {

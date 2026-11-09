@@ -44,6 +44,19 @@ impl Default for VideoAspect {
     }
 }
 
+/// A physical audio CD found in an optical drive.
+#[derive(Clone, Debug)]
+pub struct CdInfo {
+    pub drive: String,
+    /// Audio track numbers, in disc order.
+    pub tracks: Vec<u8>,
+    /// Absolute frame offsets (LBA + 150) matching `tracks`.
+    pub offsets: Vec<u32>,
+    pub leadout: u32,
+    pub disc_id: String,
+    pub total_secs: f32,
+}
+
 pub enum Msg {
     Error(String),
     DirScanned { dir: String, files: Vec<String> },
@@ -86,6 +99,10 @@ pub enum Msg {
     VideoMeta { gen: u64, dur: f32 },
     VideoBounds { gen: u64, path: String, intro_end: f32, credits_start: f32 },
     VideoCutDone { gen: u64, path: String, cut: Option<String>, err: Option<String> },
+    CdDetected(Option<CdInfo>),
+    CdProgress { track: usize, total: usize, text: String },
+    CdDone { folder: String, files: Vec<String>, label: String },
+    CdFail(String),
 }
 
 pub enum LibCmd {

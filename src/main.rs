@@ -12,6 +12,19 @@ pub(crate) mod app;
 pub(crate) mod audio;
 pub(crate) mod consts;
 #[cfg(target_os = "linux")]
+pub(crate) mod cd;
+#[cfg(not(target_os = "linux"))]
+pub(crate) mod cd {
+    use crate::types::{CdInfo, Msg};
+    use std::path::PathBuf;
+    use std::sync::mpsc::Sender;
+    pub fn monitor(_tx: Sender<Msg>) {}
+    pub fn eject(_drive: &str) -> bool { false }
+    pub fn rip(_info: &CdInfo, _tx: &Sender<Msg>) -> Result<(PathBuf, Vec<String>, String), String> {
+        Err("CD ripping is only supported on Linux".into())
+    }
+}
+#[cfg(target_os = "linux")]
 pub(crate) mod desktop;
 #[cfg(not(target_os = "linux"))]
 pub(crate) mod desktop {
@@ -63,12 +76,20 @@ fn main() -> eframe::Result {
     }
     let mut video: Option<String> = None;
     let mut windowed = false;
+    let mut mode: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         if args[i] == "--windowed" || args[i] == "-w" {
             windowed = true;
             i += 1;
             continue;
+        }
+        if args[i] == "--mode" {
+            if let Some(m) = args.get(i + 1) {
+                mode = Some(m.to_ascii_lowercase());
+                i += 2;
+                continue;
+            }
         }
         if args[i] == "--video" {
             if let Some(p) = args.get(i + 1) {
@@ -81,5 +102,5 @@ fn main() -> eframe::Result {
         }
         i += 1;
     }
-    app::run(video, windowed)
+    app::run(video, windowed, mode)
 }

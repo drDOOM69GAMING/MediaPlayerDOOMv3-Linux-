@@ -388,6 +388,8 @@ impl PlayerApp {
 
             match self.deck_mode {
                 DeckMode::Disc => {
+                    let cd = self.cd_physical.clone();
+                    let cd_ripping = self.cd_ripping;
                     ui.horizontal(|ui| {
                         let (tray, _) = ui.allocate_exact_size(egui::vec2(300.0, 108.0), egui::Sense::hover());
                         let p = ui.painter().with_clip_rect(tray);
@@ -450,6 +452,41 @@ impl PlayerApp {
                             ui.add_space(7.0);
                             if retro_btn(ui, if self.disc_in { "⏏ EJECT DISC" } else { "▼ INSERT DISC" }, if self.disc_in { th.playing_fg } else { th.fg }, th.btn_bg).clicked() {
                                 if self.disc_in { self.eject_disc(); } else { self.insert_disc(); }
+                            }
+                            ui.add_space(6.0);
+                            if let Some(cd) = &cd {
+                                ui.label(
+                                    RichText::new(format!(
+                                        "AUDIO CD  •  {} TRACKS  •  {}",
+                                        cd.tracks.len(),
+                                        fmt_secs(cd.total_secs)
+                                    ))
+                                    .color(th.playing_fg)
+                                    .monospace()
+                                    .size(10.0),
+                                );
+                                ui.horizontal(|ui| {
+                                    let rip_lbl = if cd_ripping { "RIPPING CD..." } else { "RIP CD → MUSIC" };
+                                    if retro_btn(ui, rip_lbl, Color32::from_rgb(120, 255, 120), th.btn_bg).clicked() && !cd_ripping {
+                                        self.start_cd_rip();
+                                    }
+                                    if retro_btn(ui, "⏏ EJECT TRAY", th.fg, th.btn_bg).clicked() {
+                                        self.eject_cd_tray();
+                                    }
+                                });
+                                ui.label(
+                                    RichText::new("FLAC • lossless 16-bit / 44.1 kHz")
+                                        .color(Color32::from_gray(135))
+                                        .monospace()
+                                        .size(9.0),
+                                );
+                            } else {
+                                ui.label(
+                                    RichText::new("NO AUDIO CD IN TRAY")
+                                        .color(Color32::from_gray(110))
+                                        .monospace()
+                                        .size(10.0),
+                                );
                             }
                         });
                     });

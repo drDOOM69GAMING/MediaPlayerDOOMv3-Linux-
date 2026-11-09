@@ -98,6 +98,10 @@ impl PlayerApp {
             }
         }
         self.stop_radio();
+        // Leaving the tape/library deck must actually stop the music and let
+        // the visualizer fall to rest. Previously the song kept playing and the
+        // spectrum/speakers froze at their last frame.
+        self.stop_music();
         self.deck_mode = m;
     }
 
@@ -707,5 +711,41 @@ impl PlayerApp {
         self.viz_pop = kick.max(self.viz_pop * (1.0 - (-dt * 14.0).exp()));
         let tr = if active { rms } else { 0.0 };
         self.viz_rms += (tr - self.viz_rms) * (1.0 - (-dt * 15.0).exp());
+    }
+}
+
+impl PlayerApp {
+    /// start_cd_rip ---------------------------------------------------------
+    pub(crate) fn start_cd_rip(&mut self) {
+        if self.cd_ripping {
+            return;
+        }
+        let Some(info) = self.cd_physical.clone() else {
+            self.set_error("No audio CD detected in the tray");
+            return;
+        };
+        self.cd_ripping = true;
+        self.set_status(format!("Ripping CD ({} tracks) to FLAC...", info.tracks.len()));
+        let tx = self.msg_tx.clone();
+        std::thread::spawn(move || match crate::cd::rip(&info, &tx) {
+            Ok((dir, files, label)) => {
+                let _ = tx.send(Msg::CdDone {
+                    folder: dir.to_string_lossy().to_string(),
+                    files,
+                    label,
+                });
+            }
+            Err(e) => {
+                let _ = tx.send(Msg::CdFail(e));
+            }
+        });
+    }
+
+    pub(crate) fn eject_cd_tray(&mut self) {
+        let Some(info) = self.cd_physical.clone() else { return };
+        let _ = crate::cd::eject(&info.drive);
+        self.cd_physical = None;
+        self.cd_ripping = false;
+        self.set_status("CD tray ejected");
     }
 }

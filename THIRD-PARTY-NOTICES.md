@@ -30,6 +30,13 @@ Thank you to the entire FFmpeg team and the gyan.dev build maintainers for makin
 
 Thank you to the yt-dlp team for maintaining the best open-source YouTube downloader.
 
+### cdparanoia
+
+- **Used for:** bit-perfect CDDA extraction from audio CDs before ffmpeg encodes FLAC.
+- **License:** GNU GPL v2 (or later) - see <https://www.gnu.org/licenses/old-licenses/gpl-2.0.html>
+- **Project:** <https://xiph.org/paranoia/>
+- **Note:** invoked as an external program, not linked into this app.
+
 ### MKVToolNix (`mkvmerge` / `mkvmerge` cut tool)
 
 - **Used for:** cutting video at INTRO/CREDS markers to produce real, lossless cut files.
