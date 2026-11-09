@@ -11,6 +11,16 @@ include!(concat!(env!("OUT_DIR"), "/embedded_tools.rs"));
 pub(crate) mod app;
 pub(crate) mod audio;
 pub(crate) mod consts;
+#[cfg(target_os = "linux")]
+pub(crate) mod desktop;
+#[cfg(not(target_os = "linux"))]
+pub(crate) mod desktop {
+    /// Desktop shortcuts are a freedesktop/Linux concept; other platforms
+    /// provide their own integration (and Windows embeds the icon in the exe).
+    pub fn ensure_desktop_shortcut() -> bool {
+        false
+    }
+}
 pub(crate) mod deck;
 pub(crate) mod deck_widgets;
 pub(crate) mod download;

@@ -102,7 +102,7 @@ pub fn music_dir() -> Option<PathBuf> {
 
 /// Read an XDG user directory (e.g. `XDG_MUSIC_DIR` from user-dirs.dirs).
 #[cfg(not(windows))]
-fn xdg_user_dir(key: &str) -> Option<PathBuf> {
+pub fn xdg_user_dir(key: &str) -> Option<PathBuf> {
     let cfg = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| home_dir().map(|h| h.join(".config")))?;

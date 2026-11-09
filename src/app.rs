@@ -307,6 +307,8 @@ impl PlayerApp {
         #[cfg(target_os = "windows")]
         apply_taskbar_icon(cc);
         let ctx = cc.egui_ctx.clone();
+        // Keep the icon-bearing launchers in sync with this executable.
+        crate::desktop::ensure_desktop_shortcut();
 
         let (stream, handle) = OutputStream::try_default()?;
         let sink = Sink::try_new(&handle)?;

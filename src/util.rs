@@ -83,6 +83,21 @@ pub fn fmt_run(d: Duration) -> String {
 /// Windows keeps `%APPDATA%\MediaPlayerOFDOOM` (unchanged from v3).
 /// Linux follows the XDG spec: `$XDG_DATA_HOME/MediaPlayerOFDOOM`, falling
 /// back to `~/.local/share/MediaPlayerOFDOOM`.
+pub fn data_home() -> PathBuf {
+    #[cfg(windows)]
+    let base = std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("."));
+    #[cfg(not(windows))]
+    let base = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
+        .unwrap_or_else(|| PathBuf::from("."));
+    base
+}
+
 pub fn data_dir() -> PathBuf {
     #[cfg(windows)]
     let base = std::env::var_os("APPDATA")

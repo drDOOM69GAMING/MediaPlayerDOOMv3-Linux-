@@ -35,20 +35,49 @@ A retro DOOM-styled media player rendered in egui. Tape, CD, and Radio faces on 
 **Windows 10/11 x64**
 - Rust toolchain to build from source
 
-**Linux (tested on CachyOS, Arch-based, KDE Plasma/Wayland)**
-- Rust toolchain (`rustup` or the distro's `rust`)
-- Runtime tools: `ffmpeg` (includes ffprobe) and `mkvmerge` (MKVToolNix) from your distro
-- An XDG desktop portal for the file pickers (KDE/GNOME provide one)
-- PipeWire or PulseAudio for sound
+**Linux (tested on CachyOS/KDE Plasma on both Wayland and X11)**
+- Rust toolchain (`rustup` recommended, or the distro's `rust`)
+- Runtime tools: `ffmpeg` (includes ffprobe) and `mkvmerge` (MKVToolNix)
+- ALSA (PipeWire/PulseAudio provide it), plus X11 or Wayland libraries
+- An XDG desktop portal and backend for the file pickers (KDE/GNOME/XFCE provide one)
+- `xdg-utils` for "show in folder" (the app falls back to `gio`, `kioclient`, `thunar`, `nautilus`)
+
+The app follows the XDG Base Directory spec and runs on any freedesktop desktop.
+Install the build dependencies for your distro:
 
 ```bash
+# Arch / CachyOS / Manjaro
 sudo pacman -S --needed base-devel rust ffmpeg mkvtoolnix-cli \
-  alsa-lib openssl libxkbcommon wayland libx11
+  alsa-lib openssl libxkbcommon wayland libx11 xdg-utils
+
+# Debian / Ubuntu / Mint / Pop!_OS
+sudo apt update
+sudo apt install build-essential pkg-config libasound2-dev libxkbcommon-dev \
+  libwayland-dev libx11-dev libssl-dev ffmpeg mkvtoolnix xdg-utils \
+  xdg-desktop-portal
+
+# Fedora
+sudo dnf install gcc gcc-c++ make pkgconf-pkg-config alsa-lib-devel \
+  libxkbcommon-devel wayland-devel libX11-devel openssl-devel ffmpeg \
+  mkvtoolnix xdg-utils xdg-desktop-portal
+
+# openSUSE
+sudo zypper install gcc gcc-c++ make pkg-config alsa-devel \
+  libxkbcommon-devel wayland-devel libX11-devel libopenssl-devel ffmpeg \
+  mkvtoolnix xdg-utils xdg-desktop-portal
 ```
 
-yt-dlp is downloaded automatically into the app data folder on first run if it
-is not already on `PATH`. The Linux tray uses the pure-Rust StatusNotifierItem
-implementation, so no GTK/libappindicator/libxdo packages are needed.
+`cargo build --release` produces a binary linked against your distro's glibc.
+For an older distro, build there (or in a matching container) rather than
+copying a binary built on a newer distro.
+
+yt-dlp is taken from `PATH` or downloaded into the app data folder on first run
+(glibc systems); if you use musl/Alpine, install the distro yt-dlp package.
+The Linux tray uses the pure-Rust StatusNotifierItem implementation, so no
+GTK/libappindicator/libxdo packages are needed. On GNOME, the optional tray
+needs the AppIndicator/KStatusNotifierItem extension; playback and the rest of
+the app work without it. Global media keys depend on the desktop (X11 usually
+allows them; Wayland often reserves them), and the in-app shortcuts always work.
 
 **Windows builds** are self-contained (single file). ffmpeg, ffprobe, and yt-dlp
 are embedded at build time. On first run they self-extract to
@@ -136,6 +165,20 @@ This app is built on the work of some incredible open-source projects, and it wo
 
 Full details, license texts, and donation links are in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). If you can, consider donating to FFmpeg, yt-dlp, and MKVToolNix - they give this all away for free.
 
+## v3.2.3 changelog
+
+- Desktop shortcut behaviour is now exactly "make sure it's there": on launch the release build checks `Desktop/MediaPlayerDOOM.desktop` and creates it (with the artwork icon) only when missing. If it already exists, it does not rewrite it and creates no other launchers on that path
+- The application-menu entry and theme icon are installed by `install.sh`; after that the runtime only guards the desktop shortcut
+- **Cross-distro portability**: documented build dependencies for Arch/CachyOS, Debian/Ubuntu/Mint, Fedora, and openSUSE; XDG paths throughout; X11 and Wayland both tested; opener fallbacks (`gio`, `kioclient`, `thunar`, `nautilus`) when `xdg-open` is absent; Linux-only desktop code is compile-gated so Windows/macOS builds still work
+- Version bump to **v3.2.3**
+
+## v3.2.2 changelog
+
+- **Self-healing desktop integration**: every launch of the release build writes/updates `~/.local/share/applications/mediaplayerofdoom.desktop`, the hicolor icon, and `Desktop/MediaPlayerDOOM.desktop`, all pointing at the running executable and using the artwork. If a shortcut is deleted, the next start puts it back
+- Debug builds are deliberately excluded so `cargo run` does not create menu entries for `target/debug`
+- Cache refreshes run in the background (`kbuildsycoca6`, `gtk-update-icon-cache`) and never delay startup
+- Version bump to **v3.2.2**
+
 ## v3.2.1 changelog
 
 - **Proper application icon everywhere**
@@ -148,6 +191,7 @@ Full details, license texts, and donation links are in [THIRD-PARTY-NOTICES.md](
   - If KDE still shows the old generic taskbar icon after installing, log out/in once or run `systemctl --user restart plasma-plasmashell` - Plasma caches taskbar icons
   - New `--windowed` / `-w` flag for opening in a normal window instead of fullscreen
   - `install.sh` also creates `MediaPlayerDOOM.desktop` in the project folder and on the desktop, so the artwork is visible in Dolphin/launchers (a bare Linux executable always gets a generic file-manager icon)
+  - The release app checks for `Desktop/MediaPlayerDOOM.desktop` when it opens. If the shortcut is missing it creates it with the icon; if it is already there it does nothing at all (no rewrite, no extra launchers)
   - The installer refreshes KDE's icon cache/sycoca and adds rustup's cargo path if needed
 - Version bump to **v3.2.1**
 

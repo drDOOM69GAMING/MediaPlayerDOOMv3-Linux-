@@ -2742,7 +2742,7 @@ dependencies = [
 
 [[package]]
 name = "mediaplayerofdoom"
-version = "3.2.1"
+version = "3.2.3"
 dependencies = [
  "cpal",
  "eframe",
