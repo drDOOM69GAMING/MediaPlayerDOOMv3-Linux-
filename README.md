@@ -14,6 +14,7 @@ A retro DOOM-styled media player rendered in egui. Tape, CD, and Radio faces on 
   - **BLU-RAY**: play a Blu-ray movie from the optical drive or an `.iso`/`.img` using ffmpeg's `bluray` protocol. AACS keys are read from the user's own `~/.config/aacs/KEYDB.cfg` (or `$XDG_CONFIG_HOME/aacs/KEYDB.cfg`); no keys are shipped with the app. English audio is preferred and subtitles are disabled by default for DVD/Blu-ray
   - **Disc dumping**: both the DVD and Blu-ray decks have **DUMP TO MKV**, which decrypts and remuxes every title to clean MKV files with MakeMKV (from the open image or the physical disc). The DVD deck also has **DUMP TO ISO**, a decrypted, directly playable image built with the bundled `dvdbackup` + `genisoimage` (MakeMKV is the fallback). No encrypted video output is ever produced
 - **Bands catalog**: songs grouped by artist folder (A-Z, scrollable), rebuilt from whatever folder you add
+- **Supported audio**: MP3, FLAC, WAV, M4A/AAC/ALAC, APE (Monkey's Audio), AIFF, OGG/Vorbis, Opus, WMA, WavPack, Musepack and WebM audio. Formats the built-in decoder cannot open (notably M4A and APE) are converted to a cached WAV with ffmpeg on first play, so they seek and play like any other track
 - **Play order switch**: flip the retro wall switch under BANDS. ON = random shuffle, OFF = normal in-order playback
 - **Smart shuffle**: weighted by your listening history, or plain shuffle
 - **Live visualizer**: a real-time 12-band spectrum with peak caps in the NOW panel, synced to whatever is playing (music or radio). The deck's bass woofers pump with the volume, rattle on heavy bass, shove downward on beats, and pulse an expanding ring on loud hits
@@ -201,6 +202,17 @@ This app is built on the work of some incredible open-source projects, and it wo
 - The **Rust** language and its crate ecosystem.
 
 Full details, license texts, and donation links are in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). If you can, consider donating to FFmpeg, yt-dlp, and MKVToolNix - they give this all away for free.
+
+## v3.2.30 changelog
+
+- **Music format scan and APE support**
+  - Scanned the 18,400-track library: 12,815 MP3, 5,455 FLAC, 128 M4A, 3 APE and 2 WAV files
+  - Added **Monkey's Audio (`.ape`)** to the library scan and file picker; previously the three APE albums were skipped entirely
+  - APE, M4A, WMA, WavPack and Musepack decode through the existing ffmpeg → cached-WAV fallback, so seeking and the visualizer work normally
+  - Verified APE playback by decoding the start, middle and end of all three albums with zero ffmpeg errors
+  - Two unusual MP3s whose ID3 tags made ffmpeg's probe choose the WAV demuxer now decode correctly via an extension-based demuxer hint
+  - Help now lists the supported playback formats and the single-file CUE limitation (a `.ape`/`.flac` image plus `.cue` still appears as one album track)
+- Version bump to **v3.2.30**
 
 ## v3.2.29 changelog
 

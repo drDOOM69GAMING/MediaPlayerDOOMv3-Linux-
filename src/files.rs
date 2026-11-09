@@ -153,6 +153,29 @@ pub fn collect_audio_report(dir: &str, tx: &Sender<Msg>) -> Vec<String> {
     out
 }
 
+/// Some files carry ID3 tags with bytes that make ffmpeg's content probe pick
+/// the wrong demuxer (two MP3s in the scanned library were mistaken for WAV).
+/// Hint the demuxer from the extension so those files still decode.
+fn input_format_hint(audio: &str) -> Option<&'static str> {
+    let ext = Path::new(audio)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "mp3" => Some("mp3"),
+        "flac" => Some("flac"),
+        "m4a" | "m4b" | "m4p" => Some("mov"),
+        "ape" => Some("ape"),
+        "wav" | "wave" => Some("wav"),
+        "aif" | "aiff" | "aifc" => Some("aiff"),
+        "wma" | "asf" => Some("asf"),
+        "wv" => Some("wv"),
+        "mpc" => Some("mpc"),
+        _ => None,
+    }
+}
+
 pub fn transcode_with_ffmpeg(audio: &str, ffmpeg: &Path) -> Result<PathBuf, String> {
     use std::hash::{DefaultHasher, Hash, Hasher};
     let mut h = DefaultHasher::new();
@@ -164,16 +187,31 @@ pub fn transcode_with_ffmpeg(audio: &str, ffmpeg: &Path) -> Result<PathBuf, Stri
     if out.exists() && out.metadata().map(|m| m.len() > 4096).unwrap_or(false) {
         return Ok(out);
     }
+    // Write to a partial name and rename only after ffmpeg succeeds. A large
+    // APE album can take a minute to convert; quitting midway must never leave
+    // something that the next run treats as a complete cached WAV.
+    let part = dir.join(format!("{}.wav.part", slug));
+    let _ = std::fs::remove_file(&part);
     let ff = ffmpeg.to_string_lossy().to_string();
-    let po = out.to_string_lossy().to_string();
-    let st = std::process::Command::new(ff)
-        .args(["-hide_banner", "-loglevel", "error", "-y", "-i", audio, "-vn", "-ac", "2", "-ar", "44100", "-f", "wav", &po])
+    let po = part.to_string_lossy().to_string();
+    let mut cmd = std::process::Command::new(ff);
+    cmd.args(["-hide_banner", "-loglevel", "error", "-y"]);
+    if let Some(fmt) = input_format_hint(audio) {
+        cmd.args(["-f", fmt]);
+    }
+    let st = cmd
+        .args(["-i", audio, "-vn", "-ac", "2", "-ar", "44100", "-f", "wav", &po])
         .no_window()
         .status()
         .map_err(|e| format!("ffmpeg failed to start: {}", e))?;
-    if st.success() && out.exists() {
+    if st.success() && part.exists() {
+        if let Err(e) = std::fs::rename(&part, &out) {
+            let _ = std::fs::remove_file(&part);
+            return Err(format!("could not cache converted audio: {}", e));
+        }
         Ok(out)
     } else {
+        let _ = std::fs::remove_file(&part);
         Err("ffmpeg could not convert this file".into())
     }
 }
@@ -392,6 +430,60 @@ mod file_pipeline_tests {
             .expect("ffmpeg should start");
         assert!(st.success(), "could not create test mp3");
         out
+    }
+
+    #[test]
+    #[ignore]
+    fn scan_real_music_from_env() {
+        let Some(dir) = std::env::var_os("MPDOOM_TEST_MUSIC") else {
+            return;
+        };
+        let files = collect_audio(&dir.to_string_lossy());
+        assert!(files.len() >= 18_000, "only found {} files", files.len());
+        assert!(
+            files.iter().any(|p| p.to_ascii_lowercase().ends_with(".ape")),
+            "APE files were not collected"
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn transcode_real_file_from_env() {
+        let Some(p) = std::env::var_os("MPDOOM_TEST_AUDIO") else {
+            return;
+        };
+        let path = PathBuf::from(p);
+        let wav = transcode_with_ffmpeg(&path.to_string_lossy(), &ffmpeg_path())
+            .expect("real file should transcode");
+        assert!(wav.metadata().unwrap().len() > 4096);
+        let _ = std::fs::remove_file(&wav);
+    }
+
+    #[test]
+    fn transcode_hints_demuxer_from_extension() {
+        assert_eq!(input_format_hint("a.mp3"), Some("mp3"));
+        assert_eq!(input_format_hint("a.MP3"), Some("mp3"));
+        assert_eq!(input_format_hint("a.ape"), Some("ape"));
+        assert_eq!(input_format_hint("a.m4a"), Some("mov"));
+        assert_eq!(input_format_hint("a.flac"), Some("flac"));
+        assert_eq!(input_format_hint("a.unknown"), None);
+    }
+
+    #[test]
+    fn transcode_writes_complete_cached_wav() {
+        let dir = scratch();
+        let mp3 = make_audio(&dir);
+        let wav = transcode_with_ffmpeg(&mp3.to_string_lossy(), &ffmpeg_path())
+            .expect("mp3 should transcode");
+        assert!(wav.is_file());
+        assert!(wav.metadata().unwrap().len() > 4096);
+        let part = wav.with_extension("wav.part");
+        assert!(!part.exists(), "partial cache file must not remain");
+        let again = transcode_with_ffmpeg(&mp3.to_string_lossy(), &ffmpeg_path())
+            .expect("cached transcode should return");
+        assert_eq!(wav, again);
+        let _ = std::fs::remove_file(&wav);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

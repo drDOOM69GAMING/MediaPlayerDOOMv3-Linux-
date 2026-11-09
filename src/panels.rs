@@ -1813,6 +1813,12 @@ impl PlayerApp {
                 );
                 ui.add_space(6.0);
 
+                ui.label(RichText::new("PLAYBACK FORMATS").color(acc).monospace().strong());
+                ui.label(RichText::new("Plays ............... MP3, FLAC, M4A/AAC/ALAC, WAV, APE, AIFF, OGG/Vorbis, Opus, WMA, WavPack, Musepack, WebM audio").color(dim).monospace());
+                ui.label(RichText::new("ffmpeg fallback ..... Formats rodio cannot open directly (M4A, APE, WMA, WavPack, Musepack) are converted to a cached WAV on first play").color(dim).monospace());
+                ui.label(RichText::new("CUE images .......... A single .ape/.flac file plus a .cue sheet is shown as one album track; per-track CUE splitting is not implemented").color(dim).monospace());
+                ui.add_space(6.0);
+
                 ui.label(RichText::new("CONVERT MUSIC").color(acc).monospace().strong());
                 ui.label(RichText::new("Convert button ...... Convert a folder recursively (MP3, AAC, FLAC, OGG, Opus, WAV, AIFF, ALAC, WMA, or same as source)").color(dim).monospace());
                 ui.label(RichText::new("Quality 1-10 ........ Lossy: bitrate; FLAC: compression level; WAV/AIFF/ALAC: bit depth").color(dim).monospace());

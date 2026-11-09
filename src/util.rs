@@ -295,6 +295,24 @@ mod portability_tests {
     }
 
     #[test]
+    fn audio_extensions_include_ape_and_ignore_case() {
+        for p in [
+            "album.ape",
+            "album.APE",
+            "album.flac",
+            "album.FLAC",
+            "album.m4a",
+            "album.mp3",
+            "album.wav",
+        ] {
+            assert!(is_audio(p), "{p} should be collected as audio");
+        }
+        for p in ["album.jpg", "album.cue", "album.log", "album"] {
+            assert!(!is_audio(p), "{p} should not be collected as audio");
+        }
+    }
+
+    #[test]
     fn placeholder_metadata_is_rejected() {
         for s in ["", "Unknown", "Unknown Artist", "unknown album", "Untitled", "N/A", "none"] {
             assert!(is_placeholder_meta(s), "{s:?} should be treated as unknown");
