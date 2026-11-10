@@ -18,6 +18,7 @@
 - Library scans run at lower CPU and I/O priority and yield to playback and the UI.
 - The first song after launch gets a 5-second quiet read window before the next track is pre-opened, so a cold drive is not forced to seek away from the song that is still starting. Later tracks pre-open immediately, so normal track changes stay seamless.
 - `MPDOOM_AV_LOG=1` now records startup phase timings.
+- The bottom-left play-order label now shows drDOOM69GAMING.
 
 ## v3.2.39
 

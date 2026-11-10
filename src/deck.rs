@@ -549,8 +549,12 @@ impl PlayerApp {
         painter.hline(knob.min.x + 6.0..=knob.max.x - 6.0, knob.center().y, egui::Stroke::new(2.0, darken(knob_col, 0.35)));
         ui.add_space(2.0);
         ui.vertical_centered(|ui| {
-            let (txt, col) = if self.random_on { ("RANDOM SHUFFLE", th.accent) } else { ("NORMAL ORDER", th.playing_fg) };
-            ui.label(RichText::new(txt).color(col).monospace().size(9.0));
+            ui.label(
+                RichText::new("drDOOM69GAMING")
+                    .color(th.accent)
+                    .monospace()
+                    .size(9.0),
+            );
         });
     }
 
