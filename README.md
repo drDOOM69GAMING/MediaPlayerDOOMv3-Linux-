@@ -28,9 +28,9 @@ This repository is the Linux port. It is tested on CachyOS and Arch with KDE Pla
 
 - Meta All fills tags, and cover art for the whole playlist
 - Local cover and folder art wins over online results
-- Cover sources include iTunes, Deezer, Cover Art Archive and TheAudioDB
+- Cover sources include iTunes, Deezer, Cover Art Archive, TheAudioDB and Discogs
 - Song title fallback for tracks whose album is unknown
-- MusicBrainz community star ratings with album fallback
+- MusicBrainz community star ratings with Discogs and TheAudioDB fallbacks
 - Manual star ratings are never overwritten
 - Metadata repair from the filename and folder for missing title, artist, album and track numbers
 - Persistent XDG metadata cache and art cache

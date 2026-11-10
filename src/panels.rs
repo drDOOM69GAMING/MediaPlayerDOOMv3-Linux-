@@ -1241,7 +1241,7 @@ impl PlayerApp {
                         self.cancel_meta_all();
                     }
                 } else if retro_btn(ui, "Meta All", th.playing_fg, th.btn_bg)
-                    .on_hover_text("Fetch tags, cover art (iTunes/Deezer/Cover Art Archive/TheAudioDB) and MusicBrainz community ratings for every playlist track")
+                    .on_hover_text("Fetch tags, cover art (iTunes/Deezer/Cover Art Archive/TheAudioDB/Discogs) and MusicBrainz/Discogs community ratings for every playlist track")
                     .clicked()
                 {
                     self.download_all_meta();
@@ -2063,7 +2063,7 @@ impl PlayerApp {
 
                 ui.label(RichText::new("META ALL (TAGS, COVERS, RATINGS)").color(acc).monospace().strong());
                 ui.label(RichText::new("Meta All ............ Fetch tags, covers and MusicBrainz ratings; progress bar, ETA and CANCEL").color(dim).monospace());
-                ui.label(RichText::new("Covers .............. local folder art, iTunes, Deezer, Cover Art Archive, TheAudioDB; one lookup per album").color(dim).monospace());
+                ui.label(RichText::new("Covers .............. local folder art, iTunes, Deezer, Cover Art Archive, TheAudioDB, Discogs; one lookup per album").color(dim).monospace());
                 ui.label(RichText::new("Song fallback ....... If the album is unknown, search by artist + song title (iTunes/Deezer)").color(dim).monospace());
                 ui.label(RichText::new("Ratings ............. MusicBrainz community 1-5 stars; current album auto-fetched; album fallback").color(dim).monospace());
                 ui.label(RichText::new("Your stars .......... Clicking stars sets a manual rating that Meta All never overwrites").color(dim).monospace());
@@ -2106,7 +2106,7 @@ impl PlayerApp {
                 ui.label(RichText::new("Blu-ray BD+ ......... MakeMKV handles BD+ and AACS; DUMP TO ISO is the fallback when libaacs has no matching key").color(dim).monospace());
                 ui.label(RichText::new("Blu-ray BD+ ......... MakeMKV handles BD+ and AACS; DUMP TO ISO is the fallback for discs where libaacs has no key").color(dim).monospace());
                 ui.label(RichText::new("Check DVD tools ..... Run `mediaplayerofdoom --check-dvd` to list dvdbackup, genisoimage and the DVD libraries").color(dim).monospace());
-                ui.label(RichText::new("Ratings missing ..... MusicBrainz has no community rating for that track/album; no public star feed covers everything").color(dim).monospace());
+                ui.label(RichText::new("Ratings missing ..... MusicBrainz, Discogs and TheAudioDB have no rating for that track/album; no public star feed covers everything").color(dim).monospace());
                 ui.label(RichText::new("Covers missing ...... No local/web match; Meta All retries every run and reports the count without art").color(dim).monospace());
                 ui.label(RichText::new("Dump slow ........... Optical CAV/riplock; check the live MB/s and ETA; dirty discs are slower").color(dim).monospace());
                 ui.add_space(8.0);

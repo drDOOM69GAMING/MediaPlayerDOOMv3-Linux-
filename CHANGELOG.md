@@ -8,6 +8,12 @@
 - The image is staged beside the destination and published atomically; cancelling removes the partial image.
 - Full-disc backup with menus and extras is unchanged.
 
+## Metadata
+
+- Cover art now falls back to the Cover Art Archive release-group image and Discogs, with TheAudioDB high-resolution art when available.
+- Album ratings now fall back to Discogs community ratings and TheAudioDB scores when MusicBrainz has no community rating.
+- Discogs requests are throttled to the public API limit and cached per album for the session.
+
 ## Startup
 
 - Startup auto-play no longer waits for the deferred library scan; the cached song starts right after the window appears.

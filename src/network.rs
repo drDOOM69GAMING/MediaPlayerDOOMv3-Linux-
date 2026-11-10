@@ -182,11 +182,16 @@ pub fn fetch_web_art(artist: &str, album: &str) -> Option<Vec<u8>> {
     if let Some(u) = deezer_art_url(&client, search_artist, album) {
         urls.push(u);
     }
-    if let Some(u) = cover_art_archive_url(&client, search_artist, album) {
+    for u in cover_art_archive_urls(&client, search_artist, album) {
         urls.push(u);
     }
     if let Some(u) = theaudiodb_art_url(&client, search_artist, album) {
         urls.push(u);
+    }
+    if let Some(info) = discogs_info(search_artist, album) {
+        if let Some(u) = info.art_url {
+            urls.push(u);
+        }
     }
     for url in urls {
         if let Some(bytes) = download_art(&client, &url) {
@@ -420,13 +425,20 @@ fn mb_get_json(
     None
 }
 
-fn cover_art_archive_url(client: &reqwest::blocking::Client, artist: &str, album: &str) -> Option<String> {
+/// Cover Art Archive URLs for the best matching release. The release-specific
+/// front image is tried first; when that release has no art, the release-group
+/// front often does. Both come from the same MusicBrainz search.
+fn cover_art_archive_urls(
+    client: &reqwest::blocking::Client,
+    artist: &str,
+    album: &str,
+) -> Vec<String> {
     let query = if is_placeholder_meta(artist) {
         format!("release:\"{}\"", album)
     } else {
         format!("release:\"{}\" AND artist:\"{}\"", album, artist)
     };
-    let json = mb_get_json(
+    let Some(json) = mb_get_json(
         client,
         "https://musicbrainz.org/ws/2/release/",
         &[
@@ -435,14 +447,30 @@ fn cover_art_archive_url(client: &reqwest::blocking::Client, artist: &str, album
             ("limit", "8".to_string()),
         ],
         1,
-    )?;
-    let id = parse_musicbrainz_id(&json, artist, album)?;
-    Some(format!("https://coverartarchive.org/release/{}/front-500", id))
+    ) else {
+        return Vec::new();
+    };
+    let Some((release, group)) = parse_musicbrainz_ids(&json, artist, album) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    if let Some(id) = release {
+        out.push(format!("https://coverartarchive.org/release/{}/front-500", id));
+    }
+    if let Some(id) = group {
+        out.push(format!("https://coverartarchive.org/release-group/{}/front-500", id));
+    }
+    out
 }
 
-pub fn parse_musicbrainz_id(json: &serde_json::Value, artist: &str, album: &str) -> Option<String> {
+/// Release and release-group IDs for the best matching MusicBrainz release.
+pub fn parse_musicbrainz_ids(
+    json: &serde_json::Value,
+    artist: &str,
+    album: &str,
+) -> Option<(Option<String>, Option<String>)> {
     let releases = json.get("releases")?.as_array()?;
-    let mut best: Option<(i32, String)> = None;
+    let mut best: Option<(i32, Option<String>, Option<String>)> = None;
     for r in releases {
         let al = r.get("title").and_then(|v| v.as_str()).unwrap_or("");
         let ca = r
@@ -452,17 +480,34 @@ pub fn parse_musicbrainz_id(json: &serde_json::Value, artist: &str, album: &str)
             .and_then(|a| a.get("name"))
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        let score = match_score(artist, album, ca, al);
+        let mut score = match_score(artist, album, ca, al);
         if score < 3 {
             continue;
         }
-        if let Some(id) = r.get("id").and_then(|v| v.as_str()) {
-            if best.as_ref().map_or(true, |(s, _)| score > *s) {
-                best = Some((score, id.to_string()));
-            }
+        if r.get("status").and_then(|v| v.as_str()) == Some("Official") {
+            score += 1;
+        }
+        if r.get("country").and_then(|v| v.as_str()).is_some() {
+            score += 1;
+        }
+        let id = r.get("id").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let group = r
+            .get("release-group")
+            .and_then(|g| g.get("id"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        if id.is_none() && group.is_none() {
+            continue;
+        }
+        if best.as_ref().map_or(true, |(s, _, _)| score > *s) {
+            best = Some((score, id, group));
         }
     }
-    best.map(|(_, id)| id)
+    best.map(|(_, id, group)| (id, group))
+}
+
+pub fn parse_musicbrainz_id(json: &serde_json::Value, artist: &str, album: &str) -> Option<String> {
+    parse_musicbrainz_ids(json, artist, album).and_then(|(id, _)| id)
 }
 
 fn normalize_name(s: &str) -> String {
@@ -502,13 +547,285 @@ pub fn parse_theaudiodb_art(json: &serde_json::Value, artist: &str, album: &str)
         if score < 3 {
             continue;
         }
-        if let Some(url) = r.get("strAlbumThumb").and_then(|v| v.as_str()) {
-            if !url.is_empty() && best.as_ref().map_or(true, |(s, _)| score > *s) {
+        let url = r
+            .get("strAlbumThumbHQ")
+            .and_then(|v| v.as_str())
+            .filter(|u| !u.is_empty())
+            .or_else(|| {
+                r.get("strAlbumThumb")
+                    .and_then(|v| v.as_str())
+                    .filter(|u| !u.is_empty())
+            });
+        if let Some(url) = url {
+            if best.as_ref().map_or(true, |(s, _)| score > *s) {
                 best = Some((score, url.to_string()));
             }
         }
     }
     best.map(|(_, u)| u)
+}
+
+// ---------------------------------------------------------------------------
+// Discogs artwork/rating fallback
+//
+// Discogs has broad physical-release coverage, which fills a lot of the gaps
+// left by iTunes/Deezer/MusicBrainz. The public API allows 25 requests/minute
+// without a token, so every request is throttled and results are cached per
+// album for the session.
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Default)]
+struct DiscogsInfo {
+    art_url: Option<String>,
+    rating: Option<(f32, u32)>,
+}
+
+fn discogs_client() -> Option<reqwest::blocking::Client> {
+    reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .user_agent(format!(
+            "{}/{} +https://github.com/drDOOM69GAMING/MediaPlayerDOOMv3-Linux-",
+            APP_NAME, APP_VERSION
+        ))
+        .build()
+        .ok()
+}
+
+static DISCOGS_LAST: std::sync::OnceLock<std::sync::Mutex<Instant>> =
+    std::sync::OnceLock::new();
+
+fn discogs_throttle() {
+    let lock = DISCOGS_LAST
+        .get_or_init(|| std::sync::Mutex::new(Instant::now() - Duration::from_secs(10)));
+    if let Ok(mut last) = lock.lock() {
+        let since = last.elapsed();
+        if since < Duration::from_millis(2500) {
+            std::thread::sleep(Duration::from_millis(2500) - since);
+        }
+        *last = Instant::now();
+    }
+}
+
+static DISCOGS_CACHE: std::sync::OnceLock<
+    std::sync::Mutex<HashMap<String, Option<DiscogsInfo>>>,
+> = std::sync::OnceLock::new();
+
+fn discogs_info(artist: &str, album: &str) -> Option<DiscogsInfo> {
+    let key = format!("{}|{}", normalize_name(artist), normalize_name(album));
+    if key.trim_matches('|').is_empty() {
+        return None;
+    }
+    let cache = DISCOGS_CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    if let Ok(c) = cache.lock() {
+        if let Some(v) = c.get(&key) {
+            return v.clone();
+        }
+    }
+    let info = fetch_discogs_info(artist, album);
+    if let Ok(mut c) = cache.lock() {
+        c.insert(key, info.clone());
+    }
+    info
+}
+
+fn discogs_get_json(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    params: &[(&str, String)],
+) -> Option<serde_json::Value> {
+    for attempt in 0..3 {
+        discogs_throttle();
+        let res = client.get(url).query(params).send().ok()?;
+        if res.status().is_success() {
+            return res.json().ok();
+        }
+        let code = res.status().as_u16();
+        if code == 429 || code == 503 {
+            let wait = res
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(3 + attempt * 3)
+                .clamp(1, 20);
+            std::thread::sleep(Duration::from_secs(wait));
+            continue;
+        }
+        return None;
+    }
+    None
+}
+
+fn fetch_discogs_info(artist: &str, album: &str) -> Option<DiscogsInfo> {
+    let client = discogs_client()?;
+    let mut params: Vec<(&str, String)> = vec![
+        ("release_title", album.to_string()),
+        ("type", "release".to_string()),
+        ("per_page", "8".to_string()),
+    ];
+    if !is_placeholder_meta(artist) {
+        params.push(("artist", artist.to_string()));
+    }
+    let json = discogs_get_json(&client, "https://api.discogs.com/database/search", &params)?;
+    let (resource, cover) = parse_discogs_search(&json, artist, album)?;
+    let mut info = DiscogsInfo {
+        art_url: cover,
+        rating: None,
+    };
+    if !resource.is_empty() {
+        if let Some(detail) = discogs_get_json(&client, &resource, &[]) {
+            let (art, rating) = parse_discogs_release(&detail);
+            if art.is_some() {
+                info.art_url = art;
+            }
+            info.rating = rating;
+        }
+    }
+    Some(info)
+}
+
+pub fn parse_discogs_search(
+    json: &serde_json::Value,
+    artist: &str,
+    album: &str,
+) -> Option<(String, Option<String>)> {
+    let results = json.get("results")?.as_array()?;
+    let mut best: Option<(i32, String, Option<String>)> = None;
+    for r in results {
+        let title = r.get("title").and_then(|v| v.as_str()).unwrap_or("");
+        let (ca, al) = title.split_once(" - ").unwrap_or(("", title));
+        let ca = ca.split(" (").next().unwrap_or(ca).trim();
+        let mut score = match_score(artist, album, ca, al);
+        if score < 3 {
+            continue;
+        }
+        // A picture-disc release often has the disc photo as its primary
+        // image. Prefer a normal release when both match, and use the
+        // community have-count as a tie-breaker.
+        let picture_disc = r
+            .get("format")
+            .and_then(|v| v.as_array())
+            .map(|formats| {
+                formats.iter().any(|f| {
+                    f.as_str()
+                        .map(|s| s.eq_ignore_ascii_case("Picture Disc"))
+                        .unwrap_or(false)
+                })
+            })
+            .unwrap_or(false);
+        if picture_disc {
+            score -= 2;
+        }
+        let have = r
+            .get("community")
+            .and_then(|c| c.get("have"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        if have > 5000 {
+            score += 1;
+        }
+        let resource = r
+            .get("resource_url")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let cover = r
+            .get("cover_image")
+            .and_then(|v| v.as_str())
+            .filter(|u| !u.is_empty())
+            .map(|s| s.to_string());
+        if best.as_ref().map_or(true, |(s, _, _)| score > *s) {
+            best = Some((score, resource, cover));
+        }
+    }
+    best.map(|(_, resource, cover)| (resource, cover))
+}
+
+pub fn parse_discogs_release(json: &serde_json::Value) -> (Option<String>, Option<(f32, u32)>) {
+    let art = json
+        .get("images")
+        .and_then(|v| v.as_array())
+        .and_then(|images| {
+            images
+                .iter()
+                .find(|i| i.get("type").and_then(|v| v.as_str()) == Some("primary"))
+                .or_else(|| images.first())
+        })
+        .and_then(|img| img.get("uri"))
+        .and_then(|v| v.as_str())
+        .filter(|u| !u.is_empty())
+        .map(|s| s.to_string());
+    let rating = json
+        .get("community")
+        .and_then(|c| c.get("rating"))
+        .and_then(|r| {
+            let avg = r.get("average").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+            let count = r.get("count").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            if avg > 0.0 && count > 0 {
+                Some((avg, count))
+            } else {
+                None
+            }
+        });
+    (art, rating)
+}
+
+fn discogs_album_rating(artist: &str, album: &str) -> Option<u8> {
+    let info = discogs_info(artist, album)?;
+    let (average, count) = info.rating?;
+    if count == 0 {
+        return None;
+    }
+    Some((average.round() as u8).clamp(1, 5))
+}
+
+fn theaudiodb_rating(artist: &str, album: &str) -> Option<u8> {
+    let client = http_client()?;
+    let mut req = client
+        .get("https://www.theaudiodb.com/api/v1/json/2/searchalbum.php")
+        .query(&[("a", album)]);
+    if !is_placeholder_meta(artist) {
+        req = req.query(&[("s", artist)]);
+    }
+    let res = req.send().ok()?;
+    if !res.status().is_success() {
+        return None;
+    }
+    let json: serde_json::Value = res.json().ok()?;
+    parse_theaudiodb_rating(&json, artist, album)
+}
+
+pub fn parse_theaudiodb_rating(
+    json: &serde_json::Value,
+    artist: &str,
+    album: &str,
+) -> Option<u8> {
+    let list = json.get("album")?.as_array()?;
+    let mut best: Option<(i32, u8)> = None;
+    for r in list {
+        let ca = r.get("strArtist").and_then(|v| v.as_str()).unwrap_or("");
+        let al = r.get("strAlbum").and_then(|v| v.as_str()).unwrap_or("");
+        let score = match_score(artist, album, ca, al);
+        if score < 3 {
+            continue;
+        }
+        let raw = r.get("intScore").and_then(|v| {
+            v.as_str()
+                .map(|s| s.to_string())
+                .or_else(|| v.as_f64().map(|f| f.to_string()))
+        });
+        let Some(score10) = raw.and_then(|s| s.parse::<f32>().ok()) else {
+            continue;
+        };
+        if score10 <= 0.0 {
+            continue;
+        }
+        let stars = (score10 / 2.0).round().clamp(1.0, 5.0) as u8;
+        if best.as_ref().map_or(true, |(s, _)| score > *s) {
+            best = Some((score, stars));
+        }
+    }
+    best.map(|(_, stars)| stars)
 }
 
 // ---------------------------------------------------------------------------
@@ -620,17 +937,35 @@ pub fn fetch_album_ratings(artist: &str, album: &str) -> Option<(u8, Vec<(String
         return None;
     }
     let client = http_client()?;
-    let id = mb_release_search(&client, author, album)?;
-    let json = mb_get_json(
-        &client,
-        &format!(
-            "https://musicbrainz.org/ws/2/release/{}?inc=recordings+ratings+release-groups&fmt=json",
-            id
-        ),
-        &[],
-        4,
-    )?;
-    Some(parse_album_ratings(&json))
+    let mb = mb_release_search(&client, author, album).and_then(|id| {
+        mb_get_json(
+            &client,
+            &format!(
+                "https://musicbrainz.org/ws/2/release/{}?inc=recordings+ratings+release-groups&fmt=json",
+                id
+            ),
+            &[],
+            4,
+        )
+    });
+    let (mut album_stars, tracks) = mb
+        .as_ref()
+        .map(parse_album_ratings)
+        .unwrap_or((0, Vec::new()));
+    // MusicBrainz ratings are sparse. TheAudioDB and Discogs both expose a
+    // community score; try them before giving the album up as unrated.
+    if album_stars == 0 {
+        if let Some(stars) =
+            theaudiodb_rating(author, album).or_else(|| discogs_album_rating(author, album))
+        {
+            album_stars = stars;
+        }
+    }
+    if album_stars == 0 && tracks.is_empty() {
+        None
+    } else {
+        Some((album_stars, tracks))
+    }
 }
 
 pub fn parse_album_ratings(json: &serde_json::Value) -> (u8, Vec<(String, u8)>) {
@@ -718,6 +1053,67 @@ mod art_tests {
     }
 
     #[test]
+    fn discogs_picks_matching_release_and_reads_rating() {
+        let search = serde_json::json!({
+          "results": [
+            {"title":"A Perfect Circle - Mer de Noms",
+             "resource_url":"https://api.discogs.com/releases/1",
+             "cover_image":"https://example/wrong.jpg"},
+            {"title":"Tool (2) - Lateralus",
+             "resource_url":"https://api.discogs.com/releases/513594",
+             "cover_image":""}
+          ]
+        });
+        let (resource, cover) = parse_discogs_search(&search, "Tool", "Lateralus").unwrap();
+        assert_eq!(resource, "https://api.discogs.com/releases/513594");
+        assert!(cover.is_none());
+
+        let release = serde_json::json!({
+          "images": [
+            {"type":"secondary","uri":"https://example/back.jpg"},
+            {"type":"primary","uri":"https://example/front.jpg"}
+          ],
+          "community": {"rating": {"average": 4.6, "count": 3272}}
+        });
+        let (art, rating) = parse_discogs_release(&release);
+        assert_eq!(art.as_deref(), Some("https://example/front.jpg"));
+        let (average, count) = rating.unwrap();
+        assert!((average - 4.6).abs() < 0.01);
+        assert_eq!(count, 3272);
+    }
+
+    #[test]
+    fn musicbrainz_extracts_release_group_id() {
+        let json = serde_json::json!({
+          "releases": [
+            {"id":"rel-1","title":"Lateralus","status":"Official","country":"US",
+             "artist-credit":[{"name":"Tool"}],
+             "release-group":{"id":"rg-1"}}
+          ]
+        });
+        let (release, group) = parse_musicbrainz_ids(&json, "Tool", "Lateralus").unwrap();
+        assert_eq!(release.as_deref(), Some("rel-1"));
+        assert_eq!(group.as_deref(), Some("rg-1"));
+        assert_eq!(
+            parse_musicbrainz_id(&json, "Tool", "Lateralus").as_deref(),
+            Some("rel-1")
+        );
+    }
+
+    #[test]
+    fn theaudiodb_parses_score_out_of_ten() {
+        let json = serde_json::json!({
+          "album": [
+            {"strArtist":"Tool","strAlbum":"Lateralus","intScore":"8.4"}
+          ]
+        });
+        assert_eq!(
+            parse_theaudiodb_rating(&json, "Tool", "Lateralus"),
+            Some(4)
+        );
+    }
+
+    #[test]
     fn itunes_picks_the_matching_album_not_the_first_result() {
         let json: serde_json::Value = serde_json::from_str(r#"{
           "resultCount": 2,
@@ -770,7 +1166,7 @@ mod art_tests {
             eprintln!("--- {artist} / {album}");
             eprintln!("  itunes: {:?}", itunes_art_url(&c, artist, album));
             eprintln!("  deezer: {:?}", deezer_art_url(&c, artist, album));
-            eprintln!("  caa:    {:?}", cover_art_archive_url(&c, artist, album));
+            eprintln!("  caa:    {:?}", cover_art_archive_urls(&c, artist, album));
             let bytes = fetch_web_art(artist, album);
             eprintln!("  result: {}", bytes.as_ref().map(|b| b.len()).unwrap_or(0));
             assert!(bytes.is_some(), "no art found for {artist} / {album}");
