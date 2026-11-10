@@ -1019,6 +1019,22 @@ video_ended: false,
             app.play_bluray_source(&b);
             app.set_video_fs(true);
         }
+        // Restore startup auto-play independently of the library scan. The
+        // scan is deferred on a cached library, and waiting for DirScanned
+        // left the app silent for the whole deferral.
+        if app.deck_mode == DeckMode::Tape
+            && !app.video_on
+            && !app.state.is_paused
+            && app.play_started.is_none()
+            && !app.song_starting
+            && !app.state.playlist.is_empty()
+        {
+            let tx = app.msg_tx.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(250));
+                let _ = tx.send(Msg::StartupPlay);
+            });
+        }
         // Reuse the remembered library root when it still exists. The full
         // search walks `Music` recursively on *every* logical drive, so paying
         // for that on each launch is what made startup take minutes before any
@@ -1912,6 +1928,17 @@ video_ended: false,
     pub(crate) fn handle_msg(&mut self, m: Msg) {
         match m {
             Msg::Error(s) => self.set_error(s),
+            Msg::StartupPlay => {
+                if self.deck_mode == DeckMode::Tape
+                    && !self.video_on
+                    && !self.state.is_paused
+                    && self.play_started.is_none()
+                    && !self.song_starting
+                    && !self.state.playlist.is_empty()
+                {
+                    self.skip_song();
+                }
+            }
             Msg::DirScanned { dir, files } => {
                 self.scanning = false;
                 av_log(&format!("scan: {} files complete", files.len()));

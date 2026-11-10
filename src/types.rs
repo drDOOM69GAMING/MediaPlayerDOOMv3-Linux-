@@ -61,6 +61,7 @@ pub struct CdInfo {
 
 pub enum Msg {
     Error(String),
+    StartupPlay,
     DirScanned { dir: String, files: Vec<String> },
     ScanProgress { found: usize },
     PlaylistSaved,
