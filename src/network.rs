@@ -20,6 +20,12 @@ pub fn net_loop(rx: Receiver<NetCmd>, tx: Sender<Msg>) {
                     let bytes = fetch_web_art(&artist, &album).and_then(|b| normalize_art(&b));
                     let _ = tx.send(Msg::ArtWeb { bytes });
                 }
+                NetCmd::WebArtExt(artist, album, title) => {
+                    let bytes = fetch_web_art(&artist, &album)
+                        .or_else(|| fetch_song_art(&artist, &title))
+                        .and_then(|b| normalize_art(&b));
+                    let _ = tx.send(Msg::ArtWeb { bytes });
+                }
                 NetCmd::WebArtFor { .. } => {
                     // "Meta All" web lookups are handled by the parallel
                     // web_art_loop pool, not the single net thread.
@@ -230,12 +236,104 @@ pub fn fetch_song_art(artist: &str, title: &str) -> Option<Vec<u8>> {
     if let Some(u) = deezer_song_art_url(&client, artist, title) {
         urls.push(u);
     }
+    for u in mb_song_art_urls(&client, artist, title) {
+        urls.push(u);
+    }
     for url in urls {
         if let Some(bytes) = download_art(&client, &url) {
             return Some(bytes);
         }
     }
     None
+}
+
+/// MusicBrainz recording search, then the release/release-group Cover Art
+/// Archive image. Useful for singles and live tracks whose album tag is
+/// missing or too generic for the album search.
+fn mb_song_art_urls(
+    client: &reqwest::blocking::Client,
+    artist: &str,
+    title: &str,
+) -> Vec<String> {
+    let query = if is_placeholder_meta(artist) {
+        format!("recording:\"{}\"", mb_escape(title))
+    } else {
+        format!(
+            "recording:\"{}\" AND artist:\"{}\"",
+            mb_escape(title),
+            mb_escape(artist)
+        )
+    };
+    let Some(json) = mb_get_json(
+        client,
+        "https://musicbrainz.org/ws/2/recording/",
+        &[
+            ("query", query),
+            ("fmt", "json".to_string()),
+            ("limit", "5".to_string()),
+            ("inc", "releases+release-groups".to_string()),
+        ],
+        1,
+    ) else {
+        return Vec::new();
+    };
+    let Some((release, group)) = parse_mb_song_ids(&json, artist, title) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    if let Some(id) = release {
+        out.push(format!("https://coverartarchive.org/release/{}/front-500", id));
+    }
+    if let Some(id) = group {
+        out.push(format!("https://coverartarchive.org/release-group/{}/front-500", id));
+    }
+    out
+}
+
+/// Best release/release-group for a recording match.
+pub fn parse_mb_song_ids(
+    json: &serde_json::Value,
+    artist: &str,
+    title: &str,
+) -> Option<(Option<String>, Option<String>)> {
+    let recordings = json.get("recordings")?.as_array()?;
+    let mut best: Option<(i32, Option<String>, Option<String>)> = None;
+    for r in recordings {
+        let rt = r.get("title").and_then(|v| v.as_str()).unwrap_or("");
+        let ra = r
+            .get("artist-credit")
+            .and_then(|v| v.as_array())
+            .and_then(|a| a.first())
+            .and_then(|c| c.get("name"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let score = match_score(artist, title, ra, rt);
+        if score < 3 {
+            continue;
+        }
+        let Some(releases) = r.get("releases").and_then(|v| v.as_array()) else {
+            continue;
+        };
+        for rel in releases {
+            let id = rel.get("id").and_then(|v| v.as_str()).map(|s| s.to_string());
+            let group = rel
+                .get("release-group")
+                .and_then(|g| g.get("id"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            if id.is_none() && group.is_none() {
+                continue;
+            }
+            let mut s = score;
+            if rel.get("status").and_then(|v| v.as_str()) == Some("Official") {
+                s += 1;
+            }
+            if best.as_ref().map_or(true, |(bs, _, _)| s > *bs) {
+                best = Some((s, id, group));
+            }
+        }
+    }
+    best.map(|(_, id, group)| (id, group))
 }
 
 fn itunes_song_art_url(client: &reqwest::blocking::Client, artist: &str, title: &str) -> Option<String> {
@@ -1098,6 +1196,64 @@ mod art_tests {
             parse_musicbrainz_id(&json, "Tool", "Lateralus").as_deref(),
             Some("rel-1")
         );
+    }
+
+    #[test]
+    #[ignore]
+    fn live_missing_art_sample() {
+        let path = crate::util::data_dir().join("metacache.json");
+        let Ok(text) = std::fs::read_to_string(path) else {
+            eprintln!("no metacache");
+            return;
+        };
+        let Ok(map) = serde_json::from_str::<HashMap<String, serde_json::Value>>(&text) else {
+            eprintln!("bad metacache");
+            return;
+        };
+        let mut seen = std::collections::HashSet::new();
+        let mut checked = 0;
+        for (p, e) in map {
+            if crate::library::art_cache_ok(&p) {
+                continue;
+            }
+            let artist = e.get("artist").and_then(|v| v.as_str()).unwrap_or("");
+            let album = e.get("album").and_then(|v| v.as_str()).unwrap_or("");
+            if album.is_empty() {
+                continue;
+            }
+            let key = format!("{}|{}", artist, album);
+            if !seen.insert(key) {
+                continue;
+            }
+            eprintln!("--- {artist} / {album}");
+            let art = fetch_web_art(artist, album);
+            eprintln!("  album art: {}", art.as_ref().map(|b| b.len()).unwrap_or(0));
+            let title = e.get("title").and_then(|v| v.as_str()).unwrap_or("");
+            if art.is_none() && !title.is_empty() {
+                let song = fetch_song_art(artist, title);
+                eprintln!("  song art: {}", song.as_ref().map(|b| b.len()).unwrap_or(0));
+            }
+            checked += 1;
+            if checked >= 8 {
+                break;
+            }
+        }
+        eprintln!("checked {checked} missing albums");
+    }
+
+    #[test]
+    fn musicbrainz_song_fallback_extracts_release_ids() {
+        let json = serde_json::json!({
+          "recordings": [
+            {"title":"Lateralus","artist-credit":[{"name":"Tool"}],
+             "releases":[
+               {"id":"rel-1","status":"Official","release-group":{"id":"rg-1"}}
+             ]}
+          ]
+        });
+        let (release, group) = parse_mb_song_ids(&json, "Tool", "Lateralus").unwrap();
+        assert_eq!(release.as_deref(), Some("rel-1"));
+        assert_eq!(group.as_deref(), Some("rg-1"));
     }
 
     #[test]

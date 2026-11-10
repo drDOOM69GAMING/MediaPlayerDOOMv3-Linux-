@@ -149,6 +149,8 @@ pub enum LibCmd {
 
 pub enum NetCmd {
     WebArt(String, String),
+    /// Current-track lookup: album art first, then a song-title fallback.
+    WebArtExt(String, String, String),
     WebArtFor { path: String, artist: String, album: String },
     /// One lookup shared by every track on an album; the image is written to
     /// all `paths` so a 12-track album needs one request, not twelve.

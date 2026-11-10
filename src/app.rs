@@ -669,12 +669,12 @@ impl PlayerApp {
         // Artwork now has three sources (iTunes, Deezer, Cover Art Archive)
         // and no longer caches blank images. Clear the old "no art" list once
         // so tracks written off by the single-source lookup get another try.
-        let art_sources_marker = data_dir().join("art_sources_v2");
+        let art_sources_marker = data_dir().join("art_sources_v3");
         let mut no_art_boot = Self::load_no_art();
         if !art_sources_marker.exists() {
             no_art_boot.clear();
             let _ = std::fs::remove_file(missing_art_path());
-            let _ = std::fs::write(&art_sources_marker, "2");
+            let _ = std::fs::write(&art_sources_marker, "3");
         }
         let full_library: Vec<String> = state.playlist.clone();
         av_log(&format!(
@@ -2057,7 +2057,8 @@ video_ended: false,
                     if d > 0.0 {
                         self.len_secs = d;
                     }
-                    self.want_web = !is_placeholder_meta(&artist) && !is_placeholder_meta(&album);
+                    self.want_web = !is_placeholder_meta(&artist)
+                        && (!is_placeholder_meta(&album) || !is_placeholder_meta(&title));
                     // ArtLocal may have finished before this tag probe did. If
                     // it found nothing and there was no web fallback yet, start
                     // one now instead of leaving a permanently blank cover.
@@ -2065,7 +2066,11 @@ video_ended: false,
                         && self.want_web && self.web_art_for.is_none()
                     {
                         self.web_art_for = Some(path.clone());
-                        let _ = self.net_tx.send(NetCmd::WebArt(artist.clone(), album.clone()));
+                        let _ = self.net_tx.send(NetCmd::WebArtExt(
+                            artist.clone(),
+                            album.clone(),
+                            title.clone(),
+                        ));
                     }
                     self.ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!("♪ {} - {}", artist, title)));
                     self.meta_cache.insert(path.clone(), MetaCacheEntry { title, artist, album, secs: duration.as_secs_f32() });
@@ -2158,9 +2163,13 @@ video_ended: false,
                         let _ = write_art_cache(&cur, &b);
                     }
                 } else if self.want_web {
-                    let (a, al) = (self.meta.1.clone(), self.meta.2.clone());
+                    let (a, al, title) = (
+                        self.meta.1.clone(),
+                        self.meta.2.clone(),
+                        self.meta.0.clone(),
+                    );
                     self.web_art_for = self.state.current_song.clone();
-                    let _ = self.net_tx.send(NetCmd::WebArt(a, al));
+                    let _ = self.net_tx.send(NetCmd::WebArtExt(a, al, title));
                 } else {
                     // No local art and no tags to search with: stop saying
                     // "Loading art..." forever and show "No Art".

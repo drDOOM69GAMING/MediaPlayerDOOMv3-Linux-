@@ -13,6 +13,8 @@
 - Cover art now falls back to the Cover Art Archive release-group image and Discogs, with TheAudioDB high-resolution art when available.
 - Album ratings now fall back to Discogs community ratings and TheAudioDB scores when MusicBrainz has no community rating.
 - Discogs requests are throttled to the public API limit and cached per album for the session.
+- On-demand art now falls back from an album lookup to a song-title and MusicBrainz recording lookup.
+- The old no-art cache is cleared once so tracks skipped by earlier source sets are retried with the new sources.
 
 ## Startup
 
