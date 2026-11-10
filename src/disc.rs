@@ -26,6 +26,20 @@ pub fn videos_dir() -> PathBuf {
     dir
 }
 
+/// Optional UDF 2.50 builder (the `udf250` wrapper from the DVDStyler
+/// AppImage). Blu-ray players prefer UDF 2.50, while genisoimage can only
+/// write UDF 1.02. The tool stays external so the MIT app does not bundle
+/// GPL code. Set MPDOOM_UDF250 to point at a specific copy.
+fn udf250_builder() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os("MPDOOM_UDF250") {
+        let p = PathBuf::from(p);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    crate::tools::which("udf250")
+}
+
 pub fn disc_label(device: &str) -> Option<String> {
     for args in [
         vec!["-s", "LABEL", "-o", "value", device],
@@ -1039,15 +1053,29 @@ pub fn dump_bluray_iso(
             total,
             text: format!("Building Blu-ray UDF ISO {}...", target.display()),
         });
-        let mut cmd = Command::new("genisoimage");
         let volume: String = label.chars().take(32).collect();
-        cmd.args(["-udf", "-iso-level", "3", "-quiet", "-V"])
-            .arg(&volume)
-            .arg("-o")
-            .arg(&partial)
-            .arg(&bdmv_root)
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped());
+        let udf250 = udf250_builder();
+        let tool_name = if udf250.is_some() { "udf250" } else { "genisoimage" };
+        let mut cmd = if let Some(tool) = &udf250 {
+            let mut c = Command::new(tool);
+            // Same arguments the DVDStyler build uses: exclude the AACS
+            // certificate tree, then source tree, ISO file and volume label.
+            c.arg("--exclude")
+                .arg("CERTIFICATE")
+                .arg(&bdmv_root)
+                .arg(&partial)
+                .arg(&volume);
+            c
+        } else {
+            let mut c = Command::new("genisoimage");
+            c.args(["-udf", "-iso-level", "3", "-quiet", "-V"])
+                .arg(&volume)
+                .arg("-o")
+                .arg(&partial)
+                .arg(&bdmv_root);
+            c
+        };
+        cmd.stdout(Stdio::null()).stderr(Stdio::piped());
         #[cfg(target_os = "linux")]
         {
             use std::os::unix::process::CommandExt;
@@ -1061,7 +1089,7 @@ pub fn dump_bluray_iso(
         let mut child = cmd.spawn().map_err(|e| {
             let _ = std::fs::remove_dir_all(&work);
             let _ = std::fs::remove_file(&partial);
-            format!("genisoimage failed to start: {}", e)
+            format!("{} failed to start: {}", tool_name, e)
         })?;
         let err_handle = child.stderr.take().map(|mut e| {
             std::thread::spawn(move || {
@@ -1087,7 +1115,8 @@ pub fn dump_bluray_iso(
                         let _ = std::fs::remove_file(&partial);
                         let tail = err.lines().rev().take(4).collect::<Vec<_>>().join(" | ");
                         return Err(format!(
-                            "genisoimage failed{}",
+                            "{} failed{}",
+                            tool_name,
                             if tail.is_empty() {
                                 String::new()
                             } else {
@@ -1103,7 +1132,7 @@ pub fn dump_bluray_iso(
                     let _ = child.wait();
                     let _ = std::fs::remove_dir_all(&work);
                     let _ = std::fs::remove_file(&partial);
-                    return Err(format!("genisoimage error: {}", e));
+                    return Err(format!("{} error: {}", tool_name, e));
                 }
             }
             let done = std::fs::metadata(&partial).map(|m| m.len()).unwrap_or(0);
@@ -1132,7 +1161,7 @@ pub fn dump_bluray_iso(
         if size == 0 {
             let _ = std::fs::remove_dir_all(&work);
             let _ = std::fs::remove_file(&partial);
-            return Err("genisoimage produced an empty Blu-ray image".into());
+            return Err("the Blu-ray ISO builder produced an empty image".into());
         }
         if let Err(e) = std::fs::rename(&partial, &target) {
             let _ = std::fs::remove_dir_all(&work);

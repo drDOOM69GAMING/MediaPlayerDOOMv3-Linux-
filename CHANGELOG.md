@@ -1,5 +1,13 @@
 # Changelog
 
+## v3.2.40
+
+- Blu-ray DUMP TO ISO now uses the optional `udf250` builder when it is available on PATH.
+- The `udf250` builder writes a genuine UDF 2.50 image, which standalone Blu-ray players expect.
+- Set `MPDOOM_UDF250` to a specific builder path or put `udf250` in PATH. The DVDStyler AppImage includes it.
+- genisoimage UDF remains the fallback when `udf250` is not installed.
+- No bundled dependency, no UI change and no change to the full-disc backup behavior.
+
 ## v3.2.39
 
 - PLAY CD now streams each track directly from the optical drive with cdparanoia.

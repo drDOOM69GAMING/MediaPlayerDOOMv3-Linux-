@@ -2105,6 +2105,7 @@ impl PlayerApp {
                 ui.label(RichText::new("DUMP TO MKV ........ Decrypt and remux every title to clean MKV files (MakeMKV); works from the open image or the physical disc").color(dim).monospace());
                 ui.label(RichText::new("DUMP TO ISO (DVD) ... dvdbackup + genisoimage (or MakeMKV backup --decrypt) to a clean, playable ISO").color(dim).monospace());
                 ui.label(RichText::new("DUMP TO ISO (BD) .... Full disc with menus/extras: MakeMKV backup --decrypt removes AACS/BD+, then a UDF ISO is built").color(dim).monospace());
+                ui.label(RichText::new("UDF 2.50 ............ Optional `udf250` builder on PATH writes UDF 2.50 for standalone players; genisoimage UDF is the fallback").color(dim).monospace());
                 ui.label(RichText::new("Dump space .......... ISO dumps temporarily need about 2.3x the disc size (decrypted tree + ISO); it is removed after building").color(dim).monospace());
                 ui.label(RichText::new("No encryption ....... Every video output is decrypted; raw encrypted images are never produced or offered").color(dim).monospace());
                 ui.add_space(6.0);

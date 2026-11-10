@@ -1,6 +1,6 @@
 # MediaPlayerDOOM v3 for Linux
 
-![Version](https://img.shields.io/badge/version-3.2.39-blue)
+![Version](https://img.shields.io/badge/version-3.2.40-blue)
 ![Platform](https://img.shields.io/badge/platform-Linux%20x86__64-informational)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -69,7 +69,7 @@ This repository is the Linux port. It is tested on CachyOS and Arch with KDE Pla
 - Smooth frame pacing with a 60 Hz movie present loop, a reused video texture, wall-clock presentation and slow audio drift correction
 - DUMP TO MKV decrypts and remuxes every title with MakeMKV
 - DVD DUMP TO ISO uses the bundled CachyOS dvdbackup plus genisoimage, with MakeMKV as fallback
-- Blu-ray DUMP TO ISO uses MakeMKV backup with decryption and builds a full disc UDF image with menus and extras
+- Blu-ray DUMP TO ISO uses MakeMKV backup with decryption and builds a full disc UDF image with menus and extras; UDF 2.50 is used when the optional `udf250` builder is on PATH
 - AACS and BD plus status with Disc ID, KEYDB match and MKB version
 - CHECK AACS re-reads the disc and updates the status
 - AACS keys are read from the user KEYDB and are never bundled with the app
