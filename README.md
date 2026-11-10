@@ -4,7 +4,7 @@
 ![Platform](https://img.shields.io/badge/platform-Linux%20x86__64-informational)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
-A retro DOOM-styled media player for Linux, built with Rust and egui. It covers music, audio CDs, DVDs, Blu-rays, conversion, metadata, equalization, beat-synced visuals and YouTube downloads in one desktop app.
+It covers music, audio CDs, DVDs, Blu-rays, conversion, metadata, equalization, beat-synced visuals and YouTube downloads in one desktop app.
 
 This repository is the Linux port. It is tested on CachyOS and Arch with KDE Plasma on Wayland and X11. Debian, Ubuntu and Linux Mint are also supported. Linux is the only supported target here.
 
