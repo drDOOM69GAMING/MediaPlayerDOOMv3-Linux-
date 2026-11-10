@@ -2,11 +2,11 @@
 
 ## v3.2.40
 
-- Blu-ray DUMP TO ISO now uses the optional `udf250` builder when it is available on PATH.
-- The `udf250` builder writes a genuine UDF 2.50 image, which standalone Blu-ray players expect.
-- Set `MPDOOM_UDF250` to a specific builder path or put `udf250` in PATH. The DVDStyler AppImage includes it.
-- genisoimage UDF remains the fallback when `udf250` is not installed.
-- No bundled dependency, no UI change and no change to the full-disc backup behavior.
+- Blu-ray DUMP TO ISO now writes a genuine UDF 2.50 image natively, inside the app.
+- The image uses a UDF 2.50 metadata partition with mirrored metadata, the layout standalone Blu-ray players expect.
+- No external `udf250`, Python script, genisoimage or helper tool is required for the Blu-ray ISO.
+- The image is staged beside the destination and published atomically; cancelling removes the partial image.
+- Full-disc backup with menus and extras is unchanged.
 
 ## v3.2.39
 

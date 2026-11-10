@@ -26,20 +26,6 @@ pub fn videos_dir() -> PathBuf {
     dir
 }
 
-/// Optional UDF 2.50 builder (the `udf250` wrapper from the DVDStyler
-/// AppImage). Blu-ray players prefer UDF 2.50, while genisoimage can only
-/// write UDF 1.02. The tool stays external so the MIT app does not bundle
-/// GPL code. Set MPDOOM_UDF250 to point at a specific copy.
-fn udf250_builder() -> Option<PathBuf> {
-    if let Some(p) = std::env::var_os("MPDOOM_UDF250") {
-        let p = PathBuf::from(p);
-        if p.is_file() {
-            return Some(p);
-        }
-    }
-    crate::tools::which("udf250")
-}
-
 pub fn disc_label(device: &str) -> Option<String> {
     for args in [
         vec!["-s", "LABEL", "-o", "value", device],
@@ -269,6 +255,19 @@ pub fn dir_size(path: &Path) -> u64 {
         if p.is_dir() {
             total = total.saturating_add(dir_size(&p));
         } else if let Ok(m) = e.metadata() {
+            total = total.saturating_add(m.len());
+        }
+    }
+    total
+}
+
+/// Bytes currently present in the ISO staging folder. The UDF writer builds a
+/// temporary image there, so this tracks progress without an API callback.
+fn staging_bytes(path: &Path) -> u64 {
+    let Ok(rd) = std::fs::read_dir(path) else { return 0 };
+    let mut total = 0u64;
+    for e in rd.flatten() {
+        if let Ok(m) = e.metadata() {
             total = total.saturating_add(m.len());
         }
     }
@@ -899,10 +898,108 @@ pub fn dump_decrypted_dvd_makemkv(
     }
 }
 
+/// Build the Blu-ray image from the decrypted tree using the in-process UDF
+/// 2.50 writer. Kept separate so the staging, cancellation and publish steps
+/// can be tested without a drive.
+fn build_bluray_udf_iso(
+    bdmv_root: &Path,
+    dir: &Path,
+    target: &Path,
+    label: &str,
+    tx: &Sender<Msg>,
+    cancel: &AtomicBool,
+) -> Result<(), String> {
+    let iso_stage = dir.join(format!(".mpdoom-iso-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&iso_stage);
+    std::fs::create_dir_all(&iso_stage)
+        .map_err(|e| format!("cannot create ISO staging folder: {}", e))?;
+    let staged = iso_stage.join("bluray.iso");
+    let mut volume: String = label
+        .chars()
+        .filter(|c| c.is_ascii_graphic() || *c == ' ')
+        .take(31)
+        .collect();
+    if volume.trim().is_empty() {
+        volume = "BLURAY".to_string();
+    }
+    let src_bytes = dir_size(bdmv_root);
+    let estimate = src_bytes
+        .saturating_add(src_bytes / 20)
+        .saturating_add(16 * 1024 * 1024)
+        .max(1);
+    let options = libmkiso::UdfOptions {
+        revision: libmkiso::UdfRevision::V250,
+        partition: libmkiso::UdfPartition::Metadata { mirror: true },
+        allocation: libmkiso::AllocationMode::Long,
+        label: volume,
+        ..Default::default()
+    };
+    let _ = tx.send(Msg::DiscDumpProgress {
+        done: 0,
+        total: estimate,
+        text: format!("Building Blu-ray UDF 2.50 ISO {}...", target.display()),
+    });
+    let mut last_sent = Instant::now() - Duration::from_secs(5);
+    let result = libmkiso::write_udf_with_cancel(
+        bdmv_root,
+        &staged,
+        &options,
+        || {
+            if cancel.load(Ordering::Relaxed) {
+                return Err(anyhow::anyhow!("cancelled"));
+            }
+            if last_sent.elapsed() >= Duration::from_millis(250) {
+                last_sent = Instant::now();
+                let done = staging_bytes(&iso_stage).min(estimate);
+                let pct = if estimate > 0 {
+                    (done.saturating_mul(100) / estimate).min(99)
+                } else {
+                    0
+                };
+                let _ = tx.send(Msg::DiscDumpProgress {
+                    done,
+                    total: estimate,
+                    text: format!(
+                        "Building Blu-ray ISO... {}%  ({:.1} / {:.1} GB)",
+                        pct,
+                        done as f64 / 1e9,
+                        estimate as f64 / 1e9
+                    ),
+                });
+            }
+            Ok(())
+        },
+    );
+    if let Err(e) = result {
+        let was_cancel = cancel.load(Ordering::Relaxed);
+        let _ = std::fs::remove_dir_all(&iso_stage);
+        if was_cancel {
+            return Err("cancelled".into());
+        }
+        return Err(format!("Blu-ray UDF 2.50 build failed: {}", e));
+    }
+    let size = std::fs::metadata(&staged).map(|m| m.len()).unwrap_or(0);
+    if size == 0 {
+        let _ = std::fs::remove_dir_all(&iso_stage);
+        return Err("the Blu-ray ISO builder produced an empty image".into());
+    }
+    let _ = tx.send(Msg::DiscDumpProgress {
+        done: estimate,
+        total: estimate,
+        text: "Blu-ray ISO complete".to_string(),
+    });
+    if let Err(e) = std::fs::rename(&staged, target) {
+        let _ = std::fs::remove_dir_all(&iso_stage);
+        return Err(format!("could not finalize Blu-ray image: {}", e));
+    }
+    let _ = std::fs::remove_dir_all(&iso_stage);
+    Ok(())
+}
+
 /// Full Blu-ray disc to a clean ISO. MakeMKV's `backup --decrypt` handles
 /// both AACS and BD+ (including discs where libaacs has no matching key), then
-/// `genisoimage` wraps the decrypted BDMV tree in a UDF ISO. Menus, extras and
-/// every title are preserved; nothing encrypted is written.
+/// the in-process UDF 2.50 writer wraps the decrypted BDMV tree. Menus, extras
+/// and every title are preserved; nothing encrypted is written.
 pub fn dump_bluray_iso(
     device: &str,
     dir: &Path,
@@ -935,14 +1032,6 @@ pub fn dump_bluray_iso(
             }
         }
         let target = decrypted_iso_path(dir, device);
-        let partial = target.with_file_name(format!(
-            "{}.part",
-            target
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| "bluray.iso".to_string())
-        ));
-        let _ = std::fs::remove_file(&partial);
         let work = dir.join(format!(".mpdoom-bd-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&work);
         std::fs::create_dir_all(&work)
@@ -1047,126 +1136,9 @@ pub fn dump_bluray_iso(
             return Err("MakeMKV backup produced no BDMV folder".into());
         };
 
-        // ---- stage 2: UDF ISO from the decrypted tree ----
-        let _ = tx.send(Msg::DiscDumpProgress {
-            done: 0,
-            total,
-            text: format!("Building Blu-ray UDF ISO {}...", target.display()),
-        });
-        let volume: String = label.chars().take(32).collect();
-        let udf250 = udf250_builder();
-        let tool_name = if udf250.is_some() { "udf250" } else { "genisoimage" };
-        let mut cmd = if let Some(tool) = &udf250 {
-            let mut c = Command::new(tool);
-            // Same arguments the DVDStyler build uses: exclude the AACS
-            // certificate tree, then source tree, ISO file and volume label.
-            c.arg("--exclude")
-                .arg("CERTIFICATE")
-                .arg(&bdmv_root)
-                .arg(&partial)
-                .arg(&volume);
-            c
-        } else {
-            let mut c = Command::new("genisoimage");
-            c.args(["-udf", "-iso-level", "3", "-quiet", "-V"])
-                .arg(&volume)
-                .arg("-o")
-                .arg(&partial)
-                .arg(&bdmv_root);
-            c
-        };
-        cmd.stdout(Stdio::null()).stderr(Stdio::piped());
-        #[cfg(target_os = "linux")]
-        {
-            use std::os::unix::process::CommandExt;
-            unsafe {
-                cmd.pre_exec(|| {
-                    libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
-                    Ok(())
-                });
-            }
-        }
-        let mut child = cmd.spawn().map_err(|e| {
+        if let Err(e) = build_bluray_udf_iso(&bdmv_root, dir, &target, &label, tx, cancel) {
             let _ = std::fs::remove_dir_all(&work);
-            let _ = std::fs::remove_file(&partial);
-            format!("{} failed to start: {}", tool_name, e)
-        })?;
-        let err_handle = child.stderr.take().map(|mut e| {
-            std::thread::spawn(move || {
-                let mut s = String::new();
-                let _ = e.read_to_string(&mut s);
-                s
-            })
-        });
-        let mut last_sent = Instant::now() - Duration::from_secs(5);
-        loop {
-            if cancel.load(Ordering::Relaxed) {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = std::fs::remove_dir_all(&work);
-                let _ = std::fs::remove_file(&partial);
-                return Err("cancelled".into());
-            }
-            match child.try_wait() {
-                Ok(Some(status)) => {
-                    let err = err_handle.and_then(|h| h.join().ok()).unwrap_or_default();
-                    if !status.success() {
-                        let _ = std::fs::remove_dir_all(&work);
-                        let _ = std::fs::remove_file(&partial);
-                        let tail = err.lines().rev().take(4).collect::<Vec<_>>().join(" | ");
-                        return Err(format!(
-                            "{} failed{}",
-                            tool_name,
-                            if tail.is_empty() {
-                                String::new()
-                            } else {
-                                format!(": {}", tail)
-                            }
-                        ));
-                    }
-                    break;
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    let _ = std::fs::remove_dir_all(&work);
-                    let _ = std::fs::remove_file(&partial);
-                    return Err(format!("{} error: {}", tool_name, e));
-                }
-            }
-            let done = std::fs::metadata(&partial).map(|m| m.len()).unwrap_or(0);
-            if last_sent.elapsed() >= Duration::from_millis(500) {
-                last_sent = Instant::now();
-                let pct = if total > 0 {
-                    (done.saturating_mul(100) / total).min(100)
-                } else {
-                    0
-                };
-                let text = if total > 0 {
-                    format!(
-                        "Building Blu-ray ISO... {}%  ({:.1} / {:.1} GB)",
-                        pct,
-                        done as f64 / 1e9,
-                        total as f64 / 1e9
-                    )
-                } else {
-                    format!("Building Blu-ray ISO... {:.1} GB", done as f64 / 1e9)
-                };
-                let _ = tx.send(Msg::DiscDumpProgress { done, total, text });
-            }
-            std::thread::sleep(Duration::from_millis(200));
-        }
-        let size = std::fs::metadata(&partial).map(|m| m.len()).unwrap_or(0);
-        if size == 0 {
-            let _ = std::fs::remove_dir_all(&work);
-            let _ = std::fs::remove_file(&partial);
-            return Err("the Blu-ray ISO builder produced an empty image".into());
-        }
-        if let Err(e) = std::fs::rename(&partial, &target) {
-            let _ = std::fs::remove_dir_all(&work);
-            let _ = std::fs::remove_file(&partial);
-            return Err(format!("could not finalize Blu-ray image: {}", e));
+            return Err(e);
         }
         let _ = std::fs::remove_dir_all(&work);
         Ok(target)
@@ -1191,6 +1163,106 @@ fn find_bdmv_root(root: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_bluray_udf_image_round_trips() {
+        let n = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("mpdoom-udf-{}", n));
+        let src = dir.join("src");
+        std::fs::create_dir_all(src.join("BDMV/PLAYLIST")).unwrap();
+        std::fs::create_dir_all(src.join("BDMV/STREAM")).unwrap();
+        std::fs::write(src.join("BDMV/index.bdmv"), b"index").unwrap();
+        std::fs::write(src.join("BDMV/PLAYLIST/00000.mpls"), b"playlist").unwrap();
+        std::fs::write(src.join("BDMV/STREAM/00000.m2ts"), vec![7u8; 4096]).unwrap();
+        let out = dir.join("out.iso");
+        let options = libmkiso::UdfOptions {
+            revision: libmkiso::UdfRevision::V250,
+            partition: libmkiso::UdfPartition::Metadata { mirror: true },
+            allocation: libmkiso::AllocationMode::Long,
+            label: "TEST".into(),
+            ..Default::default()
+        };
+        libmkiso::write_udf_with_options(&src, &out, &options).unwrap();
+        let bytes = std::fs::read(&out).unwrap();
+        let reader = libmkiso::UdfReader::open(&bytes, libmkiso::UdfLimits::default()).unwrap();
+        let names: Vec<&str> = reader.entries().iter().map(|e| e.name.as_str()).collect();
+        assert!(names.iter().any(|n| n.ends_with("index.bdmv")));
+        assert!(names.iter().any(|n| n.ends_with("00000.mpls")));
+        assert!(names.iter().any(|n| n.ends_with("00000.m2ts")));
+        let idx = reader
+            .entries()
+            .iter()
+            .position(|e| e.name.ends_with("00000.m2ts"))
+            .unwrap();
+        let payload = reader.read_entry(idx, 8192).unwrap();
+        assert_eq!(payload.len(), 4096);
+        assert!(payload.iter().all(|b| *b == 7));
+        if std::env::var_os("MPDOOM_KEEP_UDF_TEST").is_some() {
+            eprintln!("kept {}", out.display());
+        } else {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn builds_bluray_iso_and_cleans_staging() {
+        let n = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("mpdoom-bdiso-{}", n));
+        let src = dir.join("src");
+        let out_dir = dir.join("out");
+        std::fs::create_dir_all(src.join("BDMV/STREAM")).unwrap();
+        std::fs::create_dir_all(&out_dir).unwrap();
+        std::fs::write(src.join("BDMV/index.bdmv"), b"index").unwrap();
+        std::fs::write(src.join("BDMV/STREAM/00000.m2ts"), vec![3u8; 8192]).unwrap();
+        let target = out_dir.join("disc.iso");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let cancel = AtomicBool::new(false);
+        build_bluray_udf_iso(&src, &out_dir, &target, "TEST", &tx, &cancel).unwrap();
+        assert!(target.is_file());
+        assert!(std::fs::metadata(&target).unwrap().len() > 0);
+        assert!(!out_dir
+            .join(format!(".mpdoom-iso-{}", std::process::id()))
+            .exists());
+        let bytes = std::fs::read(&target).unwrap();
+        let reader = libmkiso::UdfReader::open(&bytes, libmkiso::UdfLimits::default()).unwrap();
+        assert!(reader
+            .entries()
+            .iter()
+            .any(|e| e.name.ends_with("00000.m2ts")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cancelled_bluray_iso_leaves_no_output() {
+        let n = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("mpdoom-bdcancel-{}", n));
+        let src = dir.join("src");
+        let out_dir = dir.join("out");
+        std::fs::create_dir_all(src.join("BDMV")).unwrap();
+        std::fs::create_dir_all(&out_dir).unwrap();
+        std::fs::write(src.join("BDMV/index.bdmv"), b"index").unwrap();
+        let target = out_dir.join("disc.iso");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let cancel = AtomicBool::new(true);
+        assert_eq!(
+            build_bluray_udf_iso(&src, &out_dir, &target, "TEST", &tx, &cancel),
+            Err("cancelled".into())
+        );
+        assert!(!target.exists());
+        assert!(!out_dir
+            .join(format!(".mpdoom-iso-{}", std::process::id()))
+            .exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn dumps_a_regular_source_to_iso() {
