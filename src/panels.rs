@@ -474,16 +474,16 @@ impl PlayerApp {
                         &pp,
                         panel_right - 1.0,
                         cy + 1.0,
-                        "drDOOM69GAMING",
-                        12.0,
+                        "Copyright Wayne aka drDOOM69GAMING",
+                        11.0,
                         Color32::from_rgba_unmultiplied(255, 255, 255, 110),
                     );
                     print_sideways(
                         &pp,
                         panel_right - 7.0,
                         cy,
-                        "drDOOM69GAMING",
-                        12.0,
+                        "Copyright Wayne aka drDOOM69GAMING",
+                        11.0,
                         Color32::from_rgba_unmultiplied(255, 205, 120, 235),
                     );
                 }

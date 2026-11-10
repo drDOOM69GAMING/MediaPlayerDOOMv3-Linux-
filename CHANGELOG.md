@@ -10,6 +10,7 @@
 
 ## Startup
 
+- Startup auto-play no longer waits for the deferred library scan; the cached song starts right after the window appears.
 - The cached playlist is no longer re-sorted at every launch.
 - The display cache is built once instead of twice.
 - The metadata repair pass only touches entries with missing, placeholder or leading-track-number values.
@@ -18,6 +19,7 @@
 - The next track is not pre-opened until the current song has played for 5 seconds, so a cold drive is not forced to seek away from the song that is still starting.
 - The current song's live tag refresh is delayed by 3 seconds when cached tags are already available.
 - `MPDOOM_AV_LOG=1` now records startup phase timings.
+- The expanded sidebar shows the credit "Copyright Wayne aka drDOOM69GAMING".
 
 ## v3.2.39
 
