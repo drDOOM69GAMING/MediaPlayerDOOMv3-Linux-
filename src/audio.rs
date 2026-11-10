@@ -1039,6 +1039,15 @@ impl PlayerApp {
             }
             return;
         }
+        // The CD deck's PLAY button doubles as "play the disc in the tray"
+        // when no disc folder is loaded yet.
+        if self.deck_mode == DeckMode::Disc
+            && !self.disc_in
+            && self.cd_physical.is_some()
+        {
+            self.start_cd_play();
+            return;
+        }
         let loaded = self.state.current_song.is_some();
         let active = self.play_started.is_some() && !self.sink.empty();
         if loaded && active {
@@ -1335,6 +1344,16 @@ impl PlayerApp {
                 // After a reopen-seek the sink position restarts at 0 within the
                 // freshly appended source, so add the reopen offset back on top.
                 self.pos = self.seek_base + self.sink.get_pos().as_secs_f32();
+            }
+            // An optical drive can take a while to deliver the first samples.
+            // Say what is happening instead of looking stuck at 0:00.
+            if let Some(cur) = &self.state.current_song {
+                if crate::cd::is_cdda(cur)
+                    && self.play_started.is_some()
+                    && self.sink.get_pos().as_secs_f32() < 0.05
+                {
+                    self.set_status("CD: reading track from the drive...");
+                }
             }
         }
         if self.scanning {

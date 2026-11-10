@@ -321,6 +321,9 @@ pub fn cdda_source(drive: &str, track: u8, duration_ms: u64) -> Option<CddaSourc
     let mut child = Command::new(exe)
         .args(["-q", "-r", "-d", drive])
         .arg(track.to_string())
+        // cdparanoia needs an explicit output name. Without it the process
+        // waits forever and produces no stdout. A single dash means stdout.
+        .arg("-")
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
