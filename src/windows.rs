@@ -3,12 +3,223 @@
 // Tray icon, window/taskbar icon, hotkeys.
 use std::error::Error;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use eframe::egui;
+use lofty::prelude::*;
 use crate::consts::APP_NAME;
 use crate::log::av_log;
 use crate::util::data_dir;
+
+/// Set by PlayerApp so the tray menu can show/hide the window even after the
+/// UI event loop has stopped painting a hidden window.
+static TRAY_CTX: OnceLock<egui::Context> = OnceLock::new();
+static TRAY_HIDDEN: OnceLock<Arc<AtomicBool>> = OnceLock::new();
+
+pub fn set_tray_context(ctx: egui::Context, hidden: Arc<AtomicBool>) {
+    let _ = TRAY_CTX.set(ctx);
+    let _ = TRAY_HIDDEN.set(hidden);
+}
+
+/// Wayland cannot hide a window with winit (`set_visible` is a no-op), so use
+/// KDE's own scripting API to set `skipTaskbar` and minimize. Returns true only
+/// when KWin accepted the script, so the UI never claims Hide worked when it
+/// did not.
+fn kwin_toggle(hide: bool) -> bool {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = hide;
+        return false;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::sync::Mutex;
+        static LOCK: Mutex<()> = Mutex::new(());
+        let _guard = LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let qdbus = if crate::tools::which("qdbus6").is_some() {
+            "qdbus6"
+        } else if crate::tools::which("qdbus").is_some() {
+            "qdbus"
+        } else {
+            return false;
+        };
+        let script = format!(
+            r#"var wins = workspace.windowList();
+for (var i = 0; i < wins.length; i++) {{
+    var w = wins[i];
+    var rc = (w.resourceClass || "").toLowerCase();
+    var rn = (w.resourceName || "").toLowerCase();
+    var cap = (w.caption || "");
+    if (rc.indexOf("mediaplayerofdoom") >= 0 || rn.indexOf("mediaplayerofdoom") >= 0 || cap.indexOf("Random Shuffle Player") >= 0) {{
+        w.skipTaskbar = {hide};
+        w.minimized = {hide};
+        {activate}
+    }}
+}}
+"#,
+            hide = hide,
+            activate = if hide { "" } else { "workspace.activeWindow = w;" }
+        );
+        let path = data_dir().join("tray-toggle.js");
+        if std::fs::write(&path, script).is_err() {
+            return false;
+        }
+        let path_s = path.to_string_lossy().to_string();
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let plugin = format!("mediaplayerofdoom_tray_{}", stamp);
+        let load = std::process::Command::new(qdbus)
+            .args([
+                "org.kde.KWin",
+                "/Scripting",
+                "org.kde.kwin.Scripting.loadScript",
+                &path_s,
+                &plugin,
+            ])
+            .output();
+        let Ok(load) = load else { return false };
+        if !load.status.success() {
+            return false;
+        }
+        let Ok(id) = String::from_utf8_lossy(&load.stdout).trim().parse::<u64>() else {
+            return false;
+        };
+        let script_path = format!("/Scripting/Script{}", id);
+        let ran = std::process::Command::new(qdbus)
+            .args(["org.kde.KWin", &script_path, "org.kde.kwin.Script.run"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        // Do not call Scripting.start(): it re-runs every script ever loaded,
+        // including old Hide scripts, which made Show appear to do nothing.
+        let _ = std::process::Command::new(qdbus)
+            .args([
+                "org.kde.KWin",
+                "/Scripting",
+                "org.kde.kwin.Scripting.unloadScript",
+                &plugin,
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        ran
+    }
+}
+
+/// Hide the main window. On KDE's Wayland session the KWin script removes the
+/// taskbar entry and minimizes; non-KDE sessions fall back to minimize (and the
+/// caller is told the taskbar hide was not guaranteed).
+pub fn hide_window(ctx: &egui::Context) -> bool {
+    if kwin_toggle(true) {
+        return true;
+    }
+    #[cfg(any(windows, target_os = "macos"))]
+    {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        return true;
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        // X11 honors set_visible; Wayland does not.
+        if std::env::var("XDG_SESSION_TYPE")
+            .map(|v| v.eq_ignore_ascii_case("x11"))
+            .unwrap_or(false)
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            return true;
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+        false
+    }
+}
+
+/// Restore the main window after Hide. KWin unminimizes and activates it;
+/// other sessions get the normal minimize/visible commands.
+pub fn show_window(ctx: &egui::Context) {
+    let _ = kwin_toggle(false);
+    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+    ctx.request_repaint();
+}
+
+/// Test hook: exercise the same tray show/hide path used by a menu click.
+pub fn simulate_tray(id: &str) {
+    #[cfg(target_os = "linux")]
+    {
+        linux_tray::simulate(id);
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = id;
+    }
+}
+
+/// Desktop popup for a track. Uses the desktop notification service on Linux;
+/// other platforms simply keep the tray tooltip path.
+pub fn notify_song(artist: &str, title: &str, album: &str) {
+    let title = title.trim();
+    let title = if title.is_empty() { APP_NAME } else { title };
+    let summary = if crate::util::is_placeholder_meta(artist) {
+        title.to_string()
+    } else {
+        format!("{} — {}", artist.trim(), title)
+    };
+    let body = if crate::util::is_placeholder_meta(album) {
+        APP_NAME.to_string()
+    } else {
+        format!("{} · {}", album.trim(), APP_NAME)
+    };
+    #[cfg(target_os = "linux")]
+    {
+        let _ = std::process::Command::new("notify-send")
+            .args([
+                "-a",
+                APP_NAME,
+                "-i",
+                "mediaplayerofdoom",
+                "-t",
+                "3500",
+                // Replace the previous song popup instead of stacking a new
+                // one every track. KDE treats this hint as a synchronous tag.
+                "-h",
+                "string:x-canonical-private-synchronous:mediaplayerofdoom",
+            ])
+            .arg(&summary)
+            .arg(&body)
+            .spawn();
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (summary, body);
+    }
+}
+
+/// Resolve tags for a path (including CUE tracks) and show a desktop popup.
+pub fn notify_song_path(path: &str) {
+    let mut title = String::new();
+    let mut artist = String::new();
+    let mut album = String::new();
+    if let Some(t) = crate::cue::track_for(path) {
+        title = t.title;
+        artist = t.artist;
+        album = t.album;
+    } else if let Some(probed) = crate::files::load_tagged(path) {
+        if let Some(tag) = probed.primary_tag().or_else(|| probed.first_tag()) {
+            if let Some(t) = tag.title() { title = t.to_string(); }
+            if let Some(a) = tag.artist() { artist = a.to_string(); }
+            if let Some(al) = tag.album() { album = al.to_string(); }
+        }
+    }
+    let (title, artist, album) = crate::library::repaired_meta(path, &title, &artist, &album);
+    notify_song(&artist, &title, &album);
+}
 pub fn open_in_explorer(path: &str) {
     let disk = crate::cue::disk_path(path);
     let dir = Path::new(&disk).parent().unwrap_or(Path::new("."));
@@ -47,6 +258,33 @@ mod linux_tray {
     }
 
     fn push(id: &str) {
+        // Show/Hide/Quit must work even when the window is hidden and egui is
+        // no longer running `ui()`, so handle them directly from the tray
+        // thread instead of queueing them for the UI.
+        if matches!(id, "show" | "quit") {
+            if let (Some(ctx), Some(hidden)) = (super::TRAY_CTX.get(), super::TRAY_HIDDEN.get()) {
+                match id {
+                    "show" => {
+                        hidden.store(false, std::sync::atomic::Ordering::Relaxed);
+                        super::show_window(ctx);
+                    }
+                    "quit" => {
+                        // If the UI loop is frozen while hidden, a plain Close
+                        // command can be ignored. Unminimize first, then fall
+                        // back to a direct exit if the app is still alive.
+                        let _ = super::show_window(ctx);
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        std::thread::spawn(|| {
+                            std::thread::sleep(std::time::Duration::from_secs(2));
+                            std::process::exit(0);
+                        });
+                    }
+                    _ => {}
+                }
+                ctx.request_repaint();
+                return;
+            }
+        }
         if let Ok(mut q) = queue().lock() {
             q.push_back(id.to_string());
         }
@@ -90,6 +328,7 @@ mod linux_tray {
             };
             vec![
                 item("Show", "show"),
+                item("Hide", "hide"),
                 MenuItem::Separator,
                 item("Play/Pause", "play_pause"),
                 item("Skip", "skip"),
@@ -99,6 +338,10 @@ mod linux_tray {
                 item("Quit", "quit"),
             ]
         }
+    }
+
+    pub fn simulate(id: &str) {
+        push(id);
     }
 
     pub struct PlatformTray {
@@ -136,13 +379,14 @@ mod win_tray {
     pub fn make_tray() -> Result<PlatformTray, Box<dyn Error + Send + Sync>> {
         let menu = Menu::new();
         let show = MenuItem::with_id(MenuId::new("show"), "Show", true, None);
+        let hide = MenuItem::with_id(MenuId::new("hide"), "Hide", true, None);
         let playpause = MenuItem::with_id(MenuId::new("play_pause"), "Play/Pause", true, None);
         let skip = MenuItem::with_id(MenuId::new("skip"), "Skip", true, None);
         let prev = MenuItem::with_id(MenuId::new("prev"), "Previous", true, None);
         let stop_item = MenuItem::with_id(MenuId::new("stop"), "Stop", true, None);
         let quit = MenuItem::with_id(MenuId::new("quit"), "Quit", true, None);
         let sep = PredefinedMenuItem::separator();
-        menu.append_items(&[&show, &playpause, &skip, &prev, &stop_item, &sep, &quit])?;
+        menu.append_items(&[&show, &hide, &sep, &playpause, &skip, &prev, &stop_item, &sep, &quit])?;
         let tray = TrayIconBuilder::new()
             .with_menu(Box::new(menu))
             .with_tooltip(APP_NAME)

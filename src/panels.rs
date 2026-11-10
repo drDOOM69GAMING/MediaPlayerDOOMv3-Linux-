@@ -2116,6 +2116,14 @@ impl PlayerApp {
                 ui.label(RichText::new("Search bar ........... Filter playlist").color(dim).monospace());
                 ui.add_space(6.0);
 
+                ui.label(RichText::new("SYSTEM TRAY / HIDE").color(acc).monospace().strong());
+                ui.label(RichText::new("Hide ................ Right-click the tray icon -> Hide; removes the taskbar entry but keeps the tray icon, audio and auto-advance running").color(dim).monospace());
+                ui.label(RichText::new("Show ................ Right-click the tray icon -> Show restores and activates the window; works while the UI is hidden").color(dim).monospace());
+                ui.label(RichText::new("Now playing ......... While hidden, a desktop notification pops up on each new track (artist, title, album)").color(dim).monospace());
+                ui.label(RichText::new("Quit ................ Tray Quit works while hidden; if the UI cannot process Close it force-exits after 2 seconds").color(dim).monospace());
+                ui.label(RichText::new("KDE Wayland ......... Hide uses KWin scripting (skipTaskbar + minimize); other desktops fall back to minimize").color(dim).monospace());
+                ui.add_space(6.0);
+
                 ui.label(RichText::new("EXTRAS").color(acc).monospace().strong());
                 ui.label(RichText::new("Sleep Timer .......... Auto-close after time").color(dim).monospace());
                 ui.label(RichText::new("Look Up ............. Open song folder in explorer").color(dim).monospace());

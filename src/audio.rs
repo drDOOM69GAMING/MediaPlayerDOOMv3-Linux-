@@ -82,12 +82,171 @@ where
     }
 }
 
+type AutoDecoder = Decoder<BufReader<File>>;
+type AutoSource = NotifySource<VizTap<EqSource<AutoDecoder>>>;
+
+/// Wrapper that records the path when its source actually starts playing, so
+/// the UI can catch up to a track that advanced while it was hidden.
+pub struct NotifySource<S> {
+    inner: S,
+    path: String,
+    now: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    fired: bool,
+}
+
+impl<S> NotifySource<S> {
+    fn new(inner: S, path: String, now: std::sync::Arc<std::sync::Mutex<Option<String>>>) -> Self {
+        NotifySource { inner, path, now, fired: false }
+    }
+}
+
+impl<S: Source> Iterator for NotifySource<S>
+where
+    S::Item: rodio::Sample,
+{
+    type Item = S::Item;
+    fn next(&mut self) -> Option<Self::Item> {
+        if !self.fired {
+            self.fired = true;
+            av_log(&format!("auto-advance: started {}", self.path));
+            if let Ok(mut slot) = self.now.lock() {
+                *slot = Some(self.path.clone());
+            }
+        }
+        self.inner.next()
+    }
+}
+
+impl<S: Source> Source for NotifySource<S>
+where
+    S::Item: rodio::Sample,
+{
+    fn current_frame_len(&self) -> Option<usize> {
+        self.inner.current_frame_len()
+    }
+    fn channels(&self) -> u16 {
+        self.inner.channels()
+    }
+    fn sample_rate(&self) -> u32 {
+        self.inner.sample_rate()
+    }
+    fn total_duration(&self) -> Option<Duration> {
+        self.inner.total_duration()
+    }
+    fn try_seek(&mut self, pos: Duration) -> Result<(), rodio::source::SeekError> {
+        self.inner.try_seek(pos)
+    }
+}
+
+fn build_auto_source(
+    path: &str,
+    eq_shared: &std::sync::Arc<std::sync::Mutex<EqShared>>,
+    viz_lock: &std::sync::Arc<std::sync::Mutex<VizState>>,
+    now: &std::sync::Arc<std::sync::Mutex<Option<String>>>,
+) -> Option<(AutoSource, Option<PathBuf>)> {
+    let (decoder, wav) = match open_decoder(path) {
+        Some(d) => (d, None),
+        None => {
+            let wav = transcode_with_ffmpeg(path, &ffmpeg_path()).ok()?;
+            let d = open_decoder(&wav.to_string_lossy())?;
+            (d, Some(wav))
+        }
+    };
+    let eq = EqSource::new(decoder, eq_shared.clone());
+    let tapped = VizTap::new(eq, viz_lock.clone());
+    Some((NotifySource::new(tapped, path.to_string(), now.clone()), wav))
+}
+
+/// Prepare and queue one upcoming track while the current one plays. This is
+/// what keeps playback moving when egui gets no repaint events (minimized or
+/// fully obscured window). The sink holds at most one queued source.
+pub(crate) fn spawn_auto_advance(
+    sink: std::sync::Arc<Sink>,
+    eq_shared: std::sync::Arc<std::sync::Mutex<EqShared>>,
+    viz_lock: std::sync::Arc<std::sync::Mutex<VizState>>,
+    queue: std::sync::Arc<std::sync::Mutex<VecDeque<String>>>,
+    gen: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    now: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    active: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    hidden: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    tx: Sender<Msg>,
+) {
+    {
+        let now = now.clone();
+        let hidden = hidden.clone();
+        std::thread::spawn(move || {
+            use std::sync::atomic::Ordering;
+            let mut last = String::new();
+            let mut last_at = std::time::Instant::now() - Duration::from_secs(30);
+            loop {
+                std::thread::sleep(Duration::from_millis(350));
+                if !hidden.load(Ordering::Relaxed) {
+                    continue;
+                }
+                let current = now
+                    .lock()
+                    .ok()
+                    .and_then(|slot| slot.clone());
+                if let Some(path) = current {
+                    if path != last && last_at.elapsed() >= Duration::from_secs(4) {
+                        crate::windows::notify_song_path(&path);
+                        last = path;
+                        last_at = std::time::Instant::now();
+                    }
+                }
+            }
+        });
+    }
+    std::thread::spawn(move || loop {
+        use std::sync::atomic::Ordering;
+        if !active.load(Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_millis(150));
+            continue;
+        }
+        // 0 = current track has not reached the sink yet; >1 = a next track is
+        // already queued. Only prepare when exactly the current one is playing.
+        let len = sink.len();
+        if len == 0 || len > 1 {
+            std::thread::sleep(Duration::from_millis(80));
+            continue;
+        }
+        let generation = gen.load(Ordering::Relaxed);
+        let path = queue
+            .lock()
+            .ok()
+            .and_then(|mut q| q.pop_front());
+        let Some(path) = path else {
+            std::thread::sleep(Duration::from_millis(120));
+            continue;
+        };
+        if !active.load(Ordering::Relaxed) || gen.load(Ordering::Relaxed) != generation {
+            continue;
+        }
+        let Some((source, wav)) = build_auto_source(&path, &eq_shared, &viz_lock, &now) else {
+            av_log(&format!("auto-advance: could not open {}", path));
+            continue;
+        };
+        if !active.load(Ordering::Relaxed) || gen.load(Ordering::Relaxed) != generation {
+            continue;
+        }
+        if let Some(w) = wav {
+            // Cache the WAV for seeking when the UI comes back. The handler
+            // ignores this if a user-started transcode is already pending.
+            let _ = tx.send(Msg::Transcoded { display: path.clone(), wav: w });
+        }
+        av_log(&format!("auto-advance: queued {}", path));
+        sink.append(source);
+    });
+}
+
 impl PlayerApp {
     pub(crate) fn play_song(&mut self, path: &str) {
         if path.is_empty() || !crate::cue::exists(path) {
             self.set_error("File not found");
             return;
         }
+        self.reset_auto_advance();
+        self.song_starting = true;
         self.state.current_song = Some(path.to_string());
         self.playing_pl_idx = self.state.playlist.iter().position(|p| p == path);
         self.eq_resume = None;
@@ -99,6 +258,105 @@ impl PlayerApp {
         self.playing = Self::playing_display(path);
         self.set_status(format!("Loading: {}...", stem(path)));
         self.do_play(path, path);
+        self.auto_active.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.refill_auto_advance();
+    }
+
+    /// Abandon any queued next track and invalidate an in-flight preparation.
+    /// Called whenever the user or the UI starts/stops/changes playback.
+    pub(crate) fn reset_auto_advance(&mut self) {
+        self.auto_gen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if let Ok(mut q) = self.auto_queue.lock() {
+            q.clear();
+        }
+        if let Ok(mut now) = self.auto_now.lock() {
+            *now = None;
+        }
+        self.auto_active
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Fill the background queue with upcoming paths. The worker only needs
+    /// one ahead at a time; a generous prefill means a minimized player keeps
+    /// advancing for hours without a UI frame.
+    pub(crate) fn refill_auto_advance(&mut self) {
+        if !self.auto_active.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
+        let mut pl = self.state.playlist.clone();
+        if self.state.dir_sequential {
+            if let Some(dir) = &self.state.current_dir {
+                let filtered: Vec<String> = pl
+                    .iter()
+                    .filter(|p| Path::new(p).parent() == Some(Path::new(dir)))
+                    .cloned()
+                    .collect();
+                if !filtered.is_empty() {
+                    pl = filtered;
+                }
+            }
+        }
+        if pl.is_empty() {
+            return;
+        }
+        let limit = if self.random_on { 200 } else { pl.len().min(200) };
+        let mut q = match self.auto_queue.lock() {
+            Ok(q) => q,
+            Err(p) => p.into_inner(),
+        };
+        if q.len() >= limit {
+            return;
+        }
+        let weights = self.state.song_weights.clone();
+        let mut current = self.state.current_song.clone();
+        let mut idx = current
+            .as_ref()
+            .and_then(|c| pl.iter().position(|p| p == c))
+            .unwrap_or(0);
+        while q.len() < limit {
+            let next = if self.random_on {
+                random_next(current.as_deref(), &pl, &weights)
+            } else {
+                idx = (idx + 1) % pl.len();
+                pl[idx].clone()
+            };
+            q.push_back(next.clone());
+            current = Some(next);
+        }
+    }
+
+    /// Catch the UI up when a background-prepared track starts. The audio is
+    /// already playing; this only refreshes song state, tags, art and history.
+    pub(crate) fn sync_auto_track(&mut self) {
+        let path = match self.auto_now.lock() {
+            Ok(mut now) => now.take(),
+            Err(p) => p.into_inner().take(),
+        };
+        let Some(path) = path else { return };
+        if self.radio_on || self.video_on {
+            return;
+        }
+        if self.state.current_song.as_deref() == Some(path.as_str()) {
+            return;
+        }
+        if !crate::cue::exists(&path) {
+            return;
+        }
+        self.state.current_song = Some(path.clone());
+        self.playing_pl_idx = self.state.playlist.iter().position(|p| p == &path);
+        self.state.prev_songs.push(path.clone());
+        self.state.song_count += 1;
+        *self.state.play_history.entry(path.clone()).or_insert(0) += 1;
+        self.save_history();
+        self.playing = Self::playing_display(&path);
+        self.pos = 0.0;
+        self.seek_base = 0.0;
+        self.len_secs = 0.0;
+        self.state.song_length = Duration::ZERO;
+        self.play_started = Some(Instant::now());
+        self.send_meta_art(path.clone());
+        self.save_settings();
+        self.refill_auto_advance();
     }
 
     pub(crate) fn send_meta_art(&mut self, path: String) {
@@ -198,6 +456,7 @@ impl PlayerApp {
     }
 
     pub(crate) fn play_decoded(&mut self, display: &str, src: Decoder<BufReader<File>>, forward_track: bool) {
+        self.song_starting = false;
         self.set_winding(None);
         self.seek_base = 0.0;
         if self.radio_on {
@@ -453,16 +712,23 @@ impl PlayerApp {
     pub(crate) fn pause_music(&mut self) {
         self.state.is_paused = true;
         self.sink.pause();
+        self.auto_active
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         self.set_status("Paused");
     }
 
     pub(crate) fn unpause_music(&mut self) {
         self.state.is_paused = false;
         self.sink.play();
+        self.auto_active
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        self.refill_auto_advance();
         self.set_status("Playing");
     }
 
     pub(crate) fn stop_music(&mut self) {
+        self.song_starting = false;
+        self.reset_auto_advance();
         self.kill_audio_pipe();
         self.sink.stop();
         self.sink.set_speed(1.0);

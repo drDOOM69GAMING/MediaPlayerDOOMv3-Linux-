@@ -30,9 +30,12 @@ impl PlayerApp {
         self.eq_resume = Some(Duration::from_secs_f32(pos));
         self.state.is_paused = false;
         self.state.current_song = Some(path.to_string());
+        self.song_starting = true;
         self.playing_pl_idx = self.state.playlist.iter().position(|p| p == path);
         self.playing = Self::playing_display(path);
         self.do_play(path, path);
+        self.auto_active.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.refill_auto_advance();
         self.set_status(format!("TAPE resumed: {}", stem(path)));
     }
 
@@ -152,6 +155,8 @@ impl PlayerApp {
         }
         self.sink.stop();
         self.sink.set_volume(self.state.volume as f32 / 100.0);
+        self.song_starting = false;
+        self.reset_auto_advance();
         self.radio_loading = true;
         match spawn_radio_stream(&st.url, &ffmpeg_path()) {
             Ok((proc, src)) => {
@@ -188,6 +193,7 @@ impl PlayerApp {
         self.radio_last_moved = 0.0;
         self.radio_tuned = None;
         self.sink.stop();
+        self.reset_auto_advance();
         self.play_started = None;
         self.state.is_paused = false;
     }

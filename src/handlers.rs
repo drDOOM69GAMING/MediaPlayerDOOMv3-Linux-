@@ -190,13 +190,47 @@ impl PlayerApp {
         }
     }
 
+    /// Remove the main window from the taskbar but keep the tray icon and
+    /// audio/background auto-advance alive.
+    pub(crate) fn hide_to_tray(&mut self) {
+        self.hidden_to_tray
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let real_hide = crate::windows::hide_window(&self.ctx);
+        self.notify_current_song();
+        self.set_status(if real_hide {
+            "Hidden to tray — right-click the icon to show"
+        } else {
+            "Minimized — taskbar hide is not available on this desktop"
+        });
+    }
+
+    /// Restore the window from Hide mode.
+    pub(crate) fn show_from_tray(&mut self) {
+        self.hidden_to_tray
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        crate::windows::show_window(&self.ctx);
+        self.ctx
+            .send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.fullscreen));
+        self.set_status("Player shown");
+    }
+
+    pub(crate) fn notify_current_song(&self) {
+        if let Some(p) = &self.state.current_song {
+            notify_song_path(p);
+        } else {
+            notify_song(
+                "",
+                "Hidden to tray",
+                "Right-click the tray icon and choose Show",
+            );
+        }
+    }
+
     pub(crate) fn poll_ext(&mut self) {
         while let Some(id) = poll_tray_menu() {
             match id.as_str() {
-                "show" => {
-                    self.ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-                    self.ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-                }
+                "show" => self.show_from_tray(),
+                "hide" => self.hide_to_tray(),
                 "play_pause" => self.toggle_pause(),
                 "skip" => self.skip_song(),
                 "prev" => self.prev_song(),

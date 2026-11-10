@@ -17,6 +17,8 @@ use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command};
 use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -78,7 +80,7 @@ pub(crate) struct PlayerApp {
     pub(crate) ctx: egui::Context,
     pub(crate) _stream: OutputStream,
     pub(crate) _stream_handle: OutputStreamHandle,
-    pub(crate) sink: Sink,
+    pub(crate) sink: std::sync::Arc<Sink>,
     /// ffmpeg child used for fast seek/streaming playback (not normal decodes).
     pub(crate) audio_pipe_proc: Option<Child>,
     pub(crate) state: PlayerState,
@@ -236,6 +238,22 @@ pub(crate) struct PlayerApp {
     pub(crate) viz_rms_prev: f32,
     pub(crate) viz_pop: f32,
     pub(crate) viz_bpm: f32,
+    /// True while audio/video is actually playing. A background ticker reads
+    /// this and wakes egui even when the window is minimized or obscured, so
+    /// end-of-track auto-advance keeps running without a visible UI.
+    /// True between a play request and the decoder actually reaching the sink.
+    /// The library-scan auto-start must not steal a track the user just chose.
+    pub(crate) song_starting: bool,
+    pub(crate) playback_wake: Arc<AtomicBool>,
+    /// Background auto-advance queue: the UI fills upcoming paths, a worker
+    /// opens the next one while the current track plays, and the sink plays it
+    /// without needing a UI repaint.
+    pub(crate) auto_queue: Arc<std::sync::Mutex<VecDeque<String>>>,
+    pub(crate) auto_gen: Arc<std::sync::atomic::AtomicU64>,
+    pub(crate) auto_now: Arc<std::sync::Mutex<Option<String>>>,
+    pub(crate) auto_active: Arc<AtomicBool>,
+    /// Shared with the tray menu. True while the window is hidden to the tray.
+    pub(crate) hidden_to_tray: Arc<AtomicBool>,
     pub(crate) want_web: bool,
     pub(crate) last_drop: Vec<PathBuf>,
     pub(crate) drag_from: Option<usize>,
@@ -395,7 +413,7 @@ impl PlayerApp {
         });
 
         let (stream, handle) = OutputStream::try_default()?;
-        let sink = Sink::try_new(&handle)?;
+        let sink = std::sync::Arc::new(Sink::try_new(&handle)?);
         sink.pause();
 
         let settings_path = data_dir().join("settings.json");
@@ -871,6 +889,13 @@ video_ended: false,
             viz_rms_prev: 0.0,
             viz_pop: 0.0,
             viz_bpm: 120.0,
+            song_starting: false,
+            playback_wake: Arc::new(AtomicBool::new(false)),
+            auto_queue: Arc::new(std::sync::Mutex::new(VecDeque::new())),
+            auto_gen: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            auto_now: Arc::new(std::sync::Mutex::new(None)),
+            auto_active: Arc::new(AtomicBool::new(false)),
+            hidden_to_tray: Arc::new(AtomicBool::new(false)),
             want_web: false,
             last_drop: Vec::new(),
             drag_from: None,
@@ -964,6 +989,51 @@ video_ended: false,
             if std::env::var_os("MPDOOM_CONVERT_START").is_some() {
                 app.start_convert();
             }
+        }
+        // Background auto-advance: one source is prepared while the current
+        // track plays, so the next song starts even when the window is
+        // minimized and egui gets no repaint events.
+        crate::audio::spawn_auto_advance(
+            app.sink.clone(),
+            app.eq_shared.clone(),
+            app.viz_lock.clone(),
+            app.auto_queue.clone(),
+            app.auto_gen.clone(),
+            app.auto_now.clone(),
+            app.auto_active.clone(),
+            app.hidden_to_tray.clone(),
+            app.msg_tx.clone(),
+        );
+        crate::windows::set_tray_context(ctx.clone(), app.hidden_to_tray.clone());
+        // Dev hook: exercise Hide -> Show -> Hide through the real tray path.
+        if std::env::var_os("MPDOOM_TRAY_TEST").is_some() {
+            std::thread::spawn(|| {
+                std::thread::sleep(Duration::from_secs(3));
+                crate::windows::simulate_tray("hide");
+                std::thread::sleep(Duration::from_secs(6));
+                crate::windows::simulate_tray("show");
+                std::thread::sleep(Duration::from_secs(3));
+                crate::windows::simulate_tray("hide");
+                std::thread::sleep(Duration::from_secs(6));
+                crate::windows::simulate_tray("quit");
+            });
+        }
+        // A minimized or fully obscured winit window can stop delivering the
+        // redraw events that drive `ui()`. That used to freeze the automatic
+        // next-song transition even though the audio sink kept draining. This
+        // tiny ticker wakes the egui event loop while playback is active, so
+        // the normal update_playback_state() path keeps running.
+        {
+            let ctx = cc.egui_ctx.clone();
+            let wake = app.playback_wake.clone();
+            std::thread::spawn(move || loop {
+                if wake.load(Ordering::Relaxed) {
+                    ctx.request_repaint();
+                    std::thread::sleep(Duration::from_millis(100));
+                } else {
+                    std::thread::sleep(Duration::from_millis(500));
+                }
+            });
         }
         Ok(app)
     }
@@ -1693,6 +1763,7 @@ video_ended: false,
                         && !self.video_on
                         && self.deck_mode == DeckMode::Tape
                         && self.play_started.is_none()
+                        && !self.song_starting
                         && !self.full_library.is_empty()
                     {
                         self.skip_song();
@@ -1717,6 +1788,7 @@ video_ended: false,
                     && !self.state.is_paused
                     && !self.video_on
                     && self.deck_mode == DeckMode::Tape
+                    && !self.song_starting
                 {
                     self.skip_song();
                 }
@@ -2185,6 +2257,7 @@ video_ended: false,
                         self.pos = 0.0;
                         self.len_secs = 0.0;
                         self.play_started = None;
+                        self.song_starting = false;
                         self.set_error(format!("{}: {}", stem(&display), err));
                     }
                 }
@@ -2576,6 +2649,30 @@ impl eframe::App for PlayerApp {
             }
         }
         ctx.request_repaint_after(std::time::Duration::from_millis(33));
+        // Wake the background ticker only while something is actually playing.
+        self.playback_wake.store(
+            (!self.state.is_paused
+                && (self.state.current_song.is_some() || self.radio_on))
+                || (self.video_on && !self.video_paused),
+            Ordering::Relaxed,
+        );
+        // Dev/automation hook: minimise after N seconds to verify that
+        // auto-advance still runs without a visible UI.
+        {
+            static MINIMIZE_AT: std::sync::OnceLock<Option<Instant>> = std::sync::OnceLock::new();
+            static MINIMIZED: AtomicBool = AtomicBool::new(false);
+            let at = *MINIMIZE_AT.get_or_init(|| {
+                std::env::var("MPDOOM_MINIMIZE_AFTER")
+                    .ok()
+                    .and_then(|v| v.parse::<f32>().ok())
+                    .map(|s| Instant::now() + std::time::Duration::from_secs_f32(s))
+            });
+            if let Some(t) = at {
+                if Instant::now() >= t && !MINIMIZED.swap(true, Ordering::Relaxed) {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                }
+            }
+        }
         if !self.fs_asserted {
             self.fs_asserted = true;
             self.ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.fullscreen));
@@ -2592,6 +2689,17 @@ impl eframe::App for PlayerApp {
         ui.painter().rect_filled(ui.max_rect(), 0.0, th.bg);
 
         self.drain_msg();
+        self.sync_auto_track();
+        if self.auto_active.load(Ordering::Relaxed) {
+            let low = self
+                .auto_queue
+                .lock()
+                .map(|q| q.len() < 20)
+                .unwrap_or(false);
+            if low {
+                self.refill_auto_advance();
+            }
+        }
         self.update_playback_state();
         if let Some(s) = &self.video_sink {
             if self.video_audio_pending || self.video_paused {

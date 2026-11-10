@@ -30,7 +30,8 @@ A retro DOOM-styled media player rendered in egui. Tape, CD, and Radio faces on 
 - **Album art**: local `cover/folder` art always wins; online lookup only as a fallback when no local art exists (so pictures never get replaced by wrong web matches)
 - **Lyrics**: Artist/Track auto-detected from the filename when tags are unknown
 - **Playlist management**: drag-to-reorder, save/load JSON, playlist-only mode, sequential mode, per-CD directory ordering, and a live current-song highlight that scrolls to and marks whatever is playing
-- **System tray** + global hotkeys (media keys where the desktop allows them)
+- **Uninterrupted playback**: the next track is opened and queued on the audio sink before the current one ends, so playback advances even when the window is minimized, hidden to the tray, or obscured and egui is not repainting
+- **System tray + global hotkeys**: right-click the tray icon for **Hide** / **Show**, Play/Pause, Skip, Previous, Stop and Quit. Hide removes the taskbar entry (KDE Wayland via KWin) while keeping audio and automatic track advance alive; while hidden, each new song appears as a desktop notification. Show restores and activates the window. Media keys work where the desktop allows them
 - **Taskbar icon**: on Windows the app icon is applied directly on the real window handle at launch; on Linux the window/tray icon comes from the icon data embedded in the binary
 - **YouTube**: paste a URL or search term to download audio/video via yt-dlp, with a live progress bar (percentage, stage, speed, ETA and item count) in the YT row, the download queue and the bottom status bar
 
@@ -203,6 +204,24 @@ This app is built on the work of some incredible open-source projects, and it wo
 - The **Rust** language and its crate ecosystem.
 
 Full details, license texts, and donation links are in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). If you can, consider donating to FFmpeg, yt-dlp, and MKVToolNix - they give this all away for free.
+
+## v3.2.35 changelog
+
+- **Playback keeps advancing when the UI is not running**
+  - The next track is now opened/transcoded in a background worker and queued on the audio sink while the current track plays
+  - Automatic advance no longer depends on egui repaint events, so it continues when the window is minimized, obscured or hidden to the tray
+  - The UI catches up to the background-started track (title, tags, art, history and seek position) when it is shown again
+  - Verified with a minimized window: tracks advanced on schedule while the UI event loop was frozen
+- **Hide to tray on KDE Wayland**
+  - Added **Hide** and **Show** to the tray menu
+  - Hide uses KWin scripting to set `skipTaskbar` and minimize, because winit's `Visible(false)` is a no-op on Wayland; the taskbar entry is removed but audio and auto-advance continue
+  - Show unminimizes and activates the window even while the UI loop is stopped
+  - Tray **Quit** now unminimizes/close and force-exits after 2 seconds if the UI cannot process the close
+  - While hidden, each new track produces a single desktop notification with artist, title and album; the notification uses KDE's replace tag and a 4-second debounce so songs do not stack popups
+  - Normal startup auto-play is restored: the library-ready scan no longer steals a manually started track, but still starts playback when the app opens with a remembered song
+  - KWin scripts are loaded with a unique plugin name and run only by the returned script ID; the old `Scripting.start()` path re-ran every previously loaded Hide script, which made Show silently do nothing
+  - Non-KDE Wayland desktops fall back to minimize; X11/Windows use the native visible command
+- Version bump to **v3.2.35**
 
 ## v3.2.34 changelog
 
