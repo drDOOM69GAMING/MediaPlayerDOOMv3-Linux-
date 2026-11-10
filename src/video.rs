@@ -23,6 +23,33 @@ use crate::{
 
 // Video playback: open/seek/window, video queue, bounds/cut analysis and video-audio attach.
 
+/// Sample the movie audio sink at a few milliseconds instead of once per egui
+/// paint. The frame reader uses this clock to decide when the next picture is
+/// due; a 30 Hz clock made 24/25/30 fps video wait in paint-sized steps, which
+/// looked like judder even though audio stayed in sync.
+fn spawn_video_clock(
+    sink: std::sync::Arc<Sink>,
+    clock: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    gen: u64,
+) {
+    let weak = std::sync::Arc::downgrade(&sink);
+    std::thread::spawn(move || loop {
+        use std::sync::atomic::Ordering;
+        // The app drops its Arc when the video closes or seeks. The weak
+        // reference is the stop signal for this poller.
+        let Some(s) = weak.upgrade() else { break };
+        if s.is_paused() {
+            clock.store(0, Ordering::Relaxed);
+        } else {
+            let pos = s.get_pos().as_millis() as u64 + 1;
+            let tagged = (((gen & 0xFFFF) << 48) | pos.min((1u64 << 48) - 1)) as u64;
+            clock.store(tagged, Ordering::Relaxed);
+        }
+        drop(s);
+        std::thread::sleep(Duration::from_millis(2));
+    });
+}
+
 impl PlayerApp {
     pub(crate) fn play_dvd_source(&mut self, source: &str) {
         let source = source.trim();
@@ -186,6 +213,15 @@ impl PlayerApp {
                             av_log("audio pending first frame");
                         }
                     }
+                    let sink = std::sync::Arc::new(sink);
+                    // Poll the audio clock off the UI thread. egui only paints
+                    // every few milliseconds, and sampling the sink there made
+                    // the video reader quantise frame waits to the paint rate.
+                    spawn_video_clock(
+                        sink.clone(),
+                        self.video_clock.clone(),
+                        self.video_gen,
+                    );
                     self.video_open_at = self.ctx.input(|i| i.time);
                     self.video_audio_proc = Some(child);
                     self.video_sink = Some(sink);

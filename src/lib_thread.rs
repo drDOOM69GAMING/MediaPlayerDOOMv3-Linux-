@@ -459,7 +459,16 @@ LibCmd::Scan(dir) => {
                     )
                 };
                 cmd.arg("-i").arg(&input)
-                    .args(["-an", "-sn", "-vf", &vf, "-pix_fmt", "rgba", "-f", "rawvideo", "-"])
+                    .args(["-an", "-sn", "-vf", &vf]);
+                // DVD streams often report 29.97 fps while the decoded film
+                // runs at 23.976 with soft-telecine repeat flags. Letting the
+                // raw pipe keep that variable cadence made the reader send
+                // frames in bursts. Force the probed rate into a constant
+                // output rate so every frame has the same presentation slot.
+                if dvd {
+                    cmd.args(["-r", &format!("{:.6}", fps)]);
+                }
+                cmd.args(["-pix_fmt", "rgba", "-f", "rawvideo", "-"])
                     .stdout(std::process::Stdio::piped())
                     .stderr(std::process::Stdio::piped())
                     .no_window();
@@ -529,6 +538,11 @@ LibCmd::Scan(dir) => {
                         let mut next_t = std::time::Instant::now();
                         let mut was_paused = false;
                         let mut frames: u64 = 0;
+                        let frame_log = std::env::var_os("MPDOOM_FRAME_LOG").is_some();
+                        let mut last_sent_at = std::time::Instant::now();
+                        let mut last_send: Option<std::time::Instant> = None;
+                        let min_gap = frame_t.mul_f32(0.70);
+                        let mut last_drift_at = std::time::Instant::now();
                         loop {
                             let paused = pausef.load(std::sync::atomic::Ordering::Relaxed);
                             if paused {
@@ -562,28 +576,59 @@ LibCmd::Scan(dir) => {
                                 was_paused = false;
                             }
                             let target = frames as f32 / fps;
-                            let wait_start = std::time::Instant::now();
-                            loop {
+                            // Present on a monotonic schedule. The audio
+                            // position arrives in buffer-sized jumps, and
+                            // gating every frame on it made the intervals
+                            // alternate between very short and very long.
+                            // Correct slow drift against the audio clock once
+                            // per second instead.
+                            let mut now = std::time::Instant::now();
+                            if now > next_t + frame_t {
+                                // More than one frame late: restart the
+                                // schedule rather than sending a burst.
+                                next_t = now;
+                            }
+                            while std::time::Instant::now() < next_t {
+                                now = std::time::Instant::now();
+                                let remain = next_t.saturating_duration_since(now);
+                                if remain > std::time::Duration::from_millis(4) {
+                                    std::thread::sleep(remain - std::time::Duration::from_millis(2));
+                                } else {
+                                    std::thread::sleep(std::time::Duration::from_millis(1));
+                                }
+                            }
+                            if last_drift_at.elapsed() >= std::time::Duration::from_secs(1) {
                                 let c = clock.load(std::sync::atomic::Ordering::Relaxed);
                                 if c != 0 && ((c >> 48) as u16) == mygen {
                                     let cpos = c & ((1u64 << 48) - 1);
                                     if cpos != 0 {
                                         let apos = (cpos - 1) as f32 / 1000.0;
-                                        if apos + 0.005 >= target {
-                                            break;
+                                        let vpos = frames as f32 / fps;
+                                        let drift = apos - vpos;
+                                        if drift.abs() > 0.08 {
+                                            // Nudge the schedule by at most
+                                            // 10 ms per second. No frame is
+                                            // skipped and no burst is shown.
+                                            let step = drift.clamp(-0.01, 0.01);
+                                            if step > 0.0 {
+                                                next_t = next_t
+                                                    .checked_sub(
+                                                        std::time::Duration::from_secs_f32(step),
+                                                    )
+                                                    .unwrap_or(next_t);
+                                            } else {
+                                                next_t += std::time::Duration::from_secs_f32(-step);
+                                            }
                                         }
-                                        if wait_start.elapsed() > std::time::Duration::from_millis(250) {
-                                            break;
-                                        }
-                                        std::thread::sleep(std::time::Duration::from_millis(4));
-                                        continue;
                                     }
                                 }
-                                let now = std::time::Instant::now();
-                                if now >= next_t {
-                                    break;
+                                last_drift_at = std::time::Instant::now();
+                            }
+                            if let Some(last) = last_send {
+                                let elapsed = last.elapsed();
+                                if elapsed < min_gap {
+                                    std::thread::sleep(min_gap - elapsed);
                                 }
-                                std::thread::sleep(std::time::Duration::from_millis(2));
                             }
                             if pipe.read_exact(&mut buf).is_err() {
                                 break;
@@ -604,12 +649,22 @@ LibCmd::Scan(dir) => {
                                     break;
                                 }
                                 buf = vec![0u8; frame];
+                                last_send = Some(std::time::Instant::now());
                                 if frames == 0 {
                                     av_log("reader: first frame sent");
                                 }
                             }
                             frames += 1;
-                            next_t = std::time::Instant::now() + frame_t;
+                            if frame_log {
+                                let now = std::time::Instant::now();
+                                av_log(&format!(
+                                    "frame {} dt={:.1}ms",
+                                    frames,
+                                    now.duration_since(last_sent_at).as_secs_f32() * 1000.0
+                                ));
+                                last_sent_at = now;
+                            }
+                            next_t += frame_t;
                             if frames % pos_send == 0 {
                                 let secs = seek + frames as f32 / fps;
                                 if tx2.send(Msg::VideoPos { gen, secs }).is_err() {

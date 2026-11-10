@@ -132,6 +132,9 @@ pub fn write_art_cache(path: &str, bytes: &[u8]) -> bool {
 }
 
 pub fn make_display(path: &str) -> String {
+    if let Some((_, track, _)) = crate::cd::cdda_parts(path) {
+        return format!("Track {:02}", track);
+    }
     if let Some(d) = crate::cue::display(path) {
         return d;
     }

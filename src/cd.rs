@@ -8,10 +8,11 @@
 
 use std::fmt::Write as _;
 use std::fs::File;
+use std::io::{BufReader, Read};
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, ChildStdout, Command, Stdio};
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
@@ -229,6 +230,114 @@ pub fn eject(drive: &str) -> bool {
     Command::new("eject").arg(drive).status().map(|s| s.success()).unwrap_or(false)
 }
 
+/// Internal playlist path for one track streamed straight from the optical
+/// drive. It carries the device, track number and TOC length so the playback
+/// worker can start cdparanoia without touching the library or a temp file.
+pub fn cdda_path(drive: &str, track: u8, duration_ms: u64) -> String {
+    format!("cdda://{}|{}|{}", drive, track, duration_ms)
+}
+
+pub fn cdda_parts(path: &str) -> Option<(&str, u8, u64)> {
+    let rest = path.strip_prefix("cdda://")?;
+    let mut it = rest.splitn(3, '|');
+    let drive = it.next()?;
+    let track = it.next()?.parse().ok()?;
+    let duration_ms = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    Some((drive, track, duration_ms))
+}
+
+pub fn is_cdda(path: &str) -> bool {
+    path.starts_with("cdda://")
+}
+
+/// A rodio source that reads raw 16-bit little-endian stereo PCM from
+/// cdparanoia. Nothing is written to disk: the drive is read only as fast as
+/// playback consumes samples, so pressing PLAY CD really plays the tray disc.
+pub struct CddaSource {
+    reader: BufReader<ChildStdout>,
+    child: Child,
+    duration: Option<Duration>,
+}
+
+impl Iterator for CddaSource {
+    type Item = i16;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let mut b = [0u8; 2];
+        self.reader.read_exact(&mut b).ok()?;
+        Some(i16::from_le_bytes(b))
+    }
+}
+
+impl rodio::Source for CddaSource {
+    fn current_frame_len(&self) -> Option<usize> {
+        None
+    }
+
+    fn channels(&self) -> u16 {
+        2
+    }
+
+    fn sample_rate(&self) -> u32 {
+        44_100
+    }
+
+    fn total_duration(&self) -> Option<Duration> {
+        self.duration
+    }
+
+    fn try_seek(&mut self, _pos: Duration) -> Result<(), rodio::source::SeekError> {
+        Err(rodio::source::SeekError::NotSupported {
+            underlying_source: "CDDA",
+        })
+    }
+}
+
+impl Drop for CddaSource {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn cdparanoia_exe() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os("MPDOOM_CDPARANOIA") {
+        let p = PathBuf::from(p);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    which("cdparanoia")
+}
+
+pub fn available() -> bool {
+    cdparanoia_exe().is_some()
+}
+
+/// Start streaming one track from the drive. cdparanoia's default WAV output
+/// is replaced with `-r`, which sends raw PCM to stdout.
+pub fn cdda_source(drive: &str, track: u8, duration_ms: u64) -> Option<CddaSource> {
+    let exe = cdparanoia_exe()?;
+    let mut child = Command::new(exe)
+        .args(["-q", "-r", "-d", drive])
+        .arg(track.to_string())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let stdout = child.stdout.take()?;
+    Some(CddaSource {
+        reader: BufReader::new(stdout),
+        child,
+        duration: (duration_ms > 0).then(|| Duration::from_millis(duration_ms)),
+    })
+}
+
+/// Audio length of one track in seconds.
+pub fn track_secs(info: &CdInfo, i: usize) -> f32 {
+    track_durations(info).get(i).copied().unwrap_or(0.0)
+}
+
 #[derive(Clone, Default, Debug)]
 pub struct CdMeta {
     pub artist: String,
@@ -389,7 +498,7 @@ fn run_cdparanoia<F>(
 where
     F: FnMut(f32, f32),
 {
-    let exe = which("cdparanoia").ok_or("cdparanoia is not installed (install it to rip CDs)")?;
+    let exe = cdparanoia_exe().ok_or("cdparanoia is not installed (install it to rip CDs)")?;
     let err_path = wav.with_extension("cdparanoia.err");
     let err_file = File::create(&err_path)
         .map_err(|e| format!("cannot create cdparanoia log: {}", e))?;
@@ -577,132 +686,6 @@ pub fn rip(info: &CdInfo, tx: &Sender<Msg>) -> Result<(PathBuf, Vec<String>, Str
     Ok((dir, files, label))
 }
 
-/// Extract the disc into a temporary playback cache without writing anything
-/// to the music library. The cache is keyed by disc ID, so pressing PLAY CD a
-/// second time starts immediately. Returns (folder, files, label).
-pub fn extract_for_playback(
-    info: &CdInfo,
-    tx: &Sender<Msg>,
-) -> Result<(PathBuf, Vec<String>, String), String> {
-    let total = info.tracks.len();
-    let dir = work_dir().join("cdplay").join(&info.disc_id);
-
-    // Reuse a complete cache from an earlier play. This avoids the metadata
-    // lookup and any disc access when the same CD is loaded again.
-    if let Some((files, label)) = read_play_cache(&dir, total) {
-        let _ = tx.send(Msg::CdProgress {
-            track: total,
-            total,
-            frac: 1.0,
-            speed: 0.0,
-            text: "CD ready".into(),
-        });
-        return Ok((dir, files, label));
-    }
-
-    let _ = tx.send(Msg::CdProgress {
-        track: 0,
-        total,
-        frac: 0.0,
-        speed: 0.0,
-        text: "Looking up CD metadata...".into(),
-    });
-    let mut meta = lookup_metadata(info).unwrap_or_default();
-    if meta.titles.len() < total {
-        meta.titles.resize(total, String::new());
-    }
-    let artist = if meta.artist.trim().is_empty() { "Unknown Artist".to_string() } else { meta.artist.clone() };
-    let album = if meta.album.trim().is_empty() { "Unknown Album".to_string() } else { meta.album.clone() };
-    let label = if meta.artist.trim().is_empty() && meta.album.trim().is_empty() {
-        format!("Audio CD {}", info.disc_id)
-    } else {
-        format!("{} - {}", artist, album)
-    };
-
-    // Keep only the current disc in the temporary playback cache.
-    if let Some(parent) = dir.parent() {
-        if let Ok(rd) = std::fs::read_dir(parent) {
-            for e in rd.flatten() {
-                if e.path() != dir {
-                    let _ = std::fs::remove_dir_all(e.path());
-                }
-            }
-        }
-    }
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {}", dir.display(), e))?;
-
-    let durations = track_durations(info);
-    let total_secs = durations.iter().sum::<f32>().max(1.0);
-    let mut done_before = 0.0f32;
-    let mut files = Vec::new();
-    for (i, track) in info.tracks.iter().enumerate() {
-        let title = meta.titles.get(i).cloned().unwrap_or_default();
-        let shown = if title.trim().is_empty() { format!("Track {:02}", track) } else { title };
-        let wav = dir.join(format!("{:02} - {}.wav", track, sanitize_win(&shown)));
-        let _ = tx.send(Msg::CdProgress {
-            track: i + 1,
-            total,
-            frac: (done_before / total_secs).clamp(0.0, 0.999),
-            speed: 0.0,
-            text: format!("Loading CD {} / {}: {}", i + 1, total, shown),
-        });
-        let dur = durations.get(i).copied().unwrap_or(0.0);
-        let mut last_sent = Instant::now();
-        run_cdparanoia(&info.drive, *track, &wav, dur, |done, speed| {
-            if last_sent.elapsed() >= Duration::from_millis(150) {
-                let frac = ((done_before + done) / total_secs).clamp(0.0, 0.999);
-                let _ = tx.send(Msg::CdProgress {
-                    track: i + 1,
-                    total,
-                    frac,
-                    speed,
-                    text: format!("Loading CD {} / {}: {}", i + 1, total, shown),
-                });
-                last_sent = Instant::now();
-            }
-        })?;
-        done_before += dur;
-        files.push(wav.to_string_lossy().to_string());
-    }
-    let _ = std::fs::write(dir.join(".label"), &label);
-    let _ = tx.send(Msg::CdProgress {
-        track: total,
-        total,
-        frac: 1.0,
-        speed: 0.0,
-        text: "CD ready".into(),
-    });
-    Ok((dir, files, label))
-}
-
-fn read_play_cache(dir: &Path, expected: usize) -> Option<(Vec<String>, String)> {
-    let label = std::fs::read_to_string(dir.join(".label")).ok()?;
-    let mut files: Vec<String> = std::fs::read_dir(dir)
-        .ok()?
-        .flatten()
-        .filter_map(|e| {
-            let p = e.path();
-            let is_wav = p
-                .extension()
-                .and_then(|x| x.to_str())
-                .map(|x| x.eq_ignore_ascii_case("wav"))
-                .unwrap_or(false);
-            if is_wav {
-                Some(p.to_string_lossy().to_string())
-            } else {
-                None
-            }
-        })
-        .collect();
-    files.sort();
-    if files.len() == expected {
-        Some((files, label.trim().to_string()))
-    } else {
-        None
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -748,18 +731,36 @@ mod tests {
     }
 
     #[test]
-    fn play_cache_requires_every_track() {
-        let dir = std::env::temp_dir().join(format!("mpdoom-cdtest-{}", std::process::id()));
+    fn cdda_source_streams_raw_pcm() {
+        use rodio::Source as _;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("mpdoom-cdda-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join(".label"), "Artist - Album").unwrap();
-        std::fs::write(dir.join("01 - One.wav"), b"x").unwrap();
-        assert!(read_play_cache(&dir, 2).is_none());
-        std::fs::write(dir.join("02 - Two.wav"), b"x").unwrap();
-        let (files, label) = read_play_cache(&dir, 2).unwrap();
-        assert_eq!(files.len(), 2);
-        assert_eq!(label, "Artist - Album");
+        let script = dir.join("fake-cdparanoia");
+        std::fs::write(&script, "#!/bin/sh\nprintf '\\001\\000\\377\\377'\n").unwrap();
+        let mut perms = std::fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).unwrap();
+
+        std::env::set_var("MPDOOM_CDPARANOIA", &script);
+        let mut src = cdda_source("/dev/sr0", 1, 500).unwrap();
+        assert_eq!(src.next(), Some(1));
+        assert_eq!(src.next(), Some(-1));
+        assert_eq!(src.next(), None);
+        assert_eq!(src.total_duration(), Some(Duration::from_millis(500)));
+        std::env::remove_var("MPDOOM_CDPARANOIA");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cdda_paths_round_trip() {
+        let p = cdda_path("/dev/sr0", 7, 123_456);
+        assert!(is_cdda(&p));
+        assert_eq!(cdda_parts(&p), Some(("/dev/sr0", 7, 123_456)));
+        assert!(!is_cdda("/music/song.flac"));
+        assert_eq!(cdda_parts("/music/song.flac"), None);
     }
 
     #[test]

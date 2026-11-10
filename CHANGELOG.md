@@ -1,5 +1,19 @@
 # Changelog
 
+## v3.2.39
+
+- PLAY CD now streams each track directly from the optical drive with cdparanoia.
+- Nothing is ripped, cached or written to disk when playing a CD from the tray.
+- CD tracks start immediately, follow disc order and use the normal transport, tray controls and auto-advance.
+- CD artist, album and track titles load in the background without delaying playback.
+- Ejecting the tray stops direct CD playback and restores the saved library.
+- Movie playback now uses a 60 Hz present loop instead of the 30 Hz music UI loop.
+- The video texture is reused for every frame instead of being recreated.
+- The movie audio clock is sampled off the UI thread every few milliseconds.
+- Video frames are paced on a monotonic wall-clock schedule with slow audio drift correction, so intervals stay even instead of alternating between short and long.
+- DVD output is forced to a constant frame rate, so soft-telecine streams no longer deliver frames in bursts.
+- DVD and ISO playback keep audio sync while presenting frames more evenly.
+
 ## v3.2.38
 
 - CD ripping now shows a live progress bar with percentage, read speed multiplier and ETA.
@@ -8,7 +22,6 @@
 - Next and Previous follow the disc track list instead of the library.
 - The disc stays loaded when switching decks and returns when CD mode is selected again.
 - Added PLAY CD to play the audio CD in the optical drive without ripping it into the library.
-- Played-from-tray CDs are extracted to a temporary cache and loaded as a normal disc in track order.
 - The saved library is preserved while a disc is in the CD deck.
 
 ## v3.2.37

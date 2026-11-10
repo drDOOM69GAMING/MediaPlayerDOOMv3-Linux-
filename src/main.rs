@@ -29,6 +29,10 @@ pub(crate) mod cd {
     pub fn rip(_info: &CdInfo, _tx: &Sender<Msg>) -> Result<(PathBuf, Vec<String>, String), String> {
         Err("CD ripping is only supported on Linux".into())
     }
+    pub fn cdda_path(_drive: &str, _track: u8, _duration_ms: u64) -> String { String::new() }
+    pub fn cdda_parts(_path: &str) -> Option<(&str, u8, u64)> { None }
+    pub fn is_cdda(_path: &str) -> bool { false }
+    pub fn track_secs(_info: &CdInfo, _i: usize) -> f32 { 0.0 }
 }
 #[cfg(target_os = "linux")]
 pub(crate) mod desktop;

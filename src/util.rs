@@ -54,6 +54,9 @@ pub fn is_audio(path: &str) -> bool {
 }
 
 pub fn stem(path: &str) -> String {
+    if let Some((_, track, _)) = crate::cd::cdda_parts(path) {
+        return format!("Track {:02}", track);
+    }
     if let Some(t) = crate::cue::stem_title(path) {
         return t;
     }

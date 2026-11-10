@@ -332,6 +332,12 @@ pub(crate) struct PlayerApp {
     /// Tracks of the disc currently loaded in the CD deck. Kept separately so
     /// switching decks does not lose the disc or replace the saved library.
     pub(crate) disc_playlist: Vec<String>,
+    /// CD streaming metadata: disc ID, artist, album and per-track labels.
+    pub(crate) cd_disc_id: String,
+    pub(crate) cd_artist: String,
+    pub(crate) cd_album: String,
+    pub(crate) cd_titles: HashMap<String, String>,
+    pub(crate) cd_display: HashMap<String, String>,
     pub(crate) band_map: HashMap<String, Vec<String>>,
     pub(crate) full_library: Vec<String>,
     pub(crate) band_sel: String,
@@ -342,7 +348,7 @@ pub(crate) struct PlayerApp {
     pub(crate) video_tex: Option<egui::TextureHandle>,
     pub(crate) video_pos: egui::Pos2,
     pub(crate) video_fs: bool,
-    pub(crate) video_sink: Option<Sink>,
+    pub(crate) video_sink: Option<std::sync::Arc<Sink>>,
     pub(crate) video_audio_proc: Option<Child>,
     pub(crate) video_audio_pending: bool,
     pub(crate) video_open_at: f64,
@@ -833,6 +839,11 @@ impl PlayerApp {
             music_root,
             disc_saved: Vec::new(),
             disc_playlist: Vec::new(),
+            cd_disc_id: String::new(),
+            cd_artist: String::new(),
+            cd_album: String::new(),
+            cd_titles: HashMap::new(),
+            cd_display: HashMap::new(),
             band_map,
             full_library,
             band_sel: String::new(),
@@ -1126,8 +1137,9 @@ video_ended: false,
 
     fn write_settings(&self) {
         // A disc in the CD deck is temporary. Persist the library behind it so
-        // a ripped or played-from-tray disc never becomes the saved library.
-        let saved_playlist = if self.disc_in {
+        // a ripped or streamed disc never becomes the saved library.
+        let disc_loaded = self.disc_in && self.deck_mode == DeckMode::Disc;
+        let saved_playlist = if disc_loaded {
             if self.disc_saved.is_empty() {
                 self.all_songs_ordered()
             } else {
@@ -1136,7 +1148,7 @@ video_ended: false,
         } else {
             self.state.playlist.clone()
         };
-        let saved_last = if self.disc_in {
+        let saved_last = if disc_loaded {
             None
         } else {
             self.state.current_song.clone()
@@ -1265,7 +1277,9 @@ video_ended: false,
         let mut seed: Vec<(String, String)> = Vec::new();
         let mut cache: Vec<String> = Vec::with_capacity(self.state.playlist.len());
         for p in &self.state.playlist {
-            if let Some(n) = self.tag_names.get(p) {
+            if let Some(d) = self.cd_display.get(p) {
+                cache.push(d.clone());
+            } else if let Some(n) = self.tag_names.get(p) {
                 cache.push(n.clone());
             } else if let Some(e) = self.meta_cache.get(p) {
                 let n = playlist_display(&e.artist, &e.title, p);
@@ -1309,7 +1323,13 @@ video_ended: false,
     /// "Meta All": batch-fetch tags + cover art + MusicBrainz community
     /// ratings for every track in the current playlist.
     pub(crate) fn download_all_meta(&mut self) {
-        let pl = self.state.playlist.clone();
+        let pl: Vec<String> = self
+            .state
+            .playlist
+            .iter()
+            .filter(|p| !crate::cd::is_cdda(p))
+            .cloned()
+            .collect();
         if pl.is_empty() {
             self.set_status("No playlist loaded - load or scan a library first");
             return;
@@ -1498,6 +1518,9 @@ video_ended: false,
     /// few seconds instead of waiting for the whole library batch.
     pub(crate) fn request_current_rating(&mut self) {
         let Some(p) = self.state.current_song.clone() else { return };
+        if crate::cd::is_cdda(&p) {
+            return;
+        }
         if self.ratings.contains_key(&p) || self.manual_ratings.contains(&p) {
             return;
         }
@@ -1682,7 +1705,8 @@ video_ended: false,
             .playlist
             .iter()
             .filter(|p| {
-                !self.tag_names.contains_key(*p)
+                !crate::cd::is_cdda(p)
+                    && !self.tag_names.contains_key(*p)
                     && !self.meta_cache.contains_key(*p)
                     && !self.tags_pending.contains(*p)
             })
@@ -1704,6 +1728,9 @@ video_ended: false,
     }
 
     pub(crate) fn playing_display(path: &str) -> String {
+        if let Some((_, track, _)) = crate::cd::cdda_parts(path) {
+            return format!("CD > Track {:02}", track);
+        }
         if let Some(t) = crate::cue::track_for(path) {
             return format!("{} > {:02} {}", t.album, t.number, t.title);
         }
@@ -2370,7 +2397,22 @@ video_ended: false,
                     self.video_dims = (w, h);
                     let size = [w as usize, h as usize];
                     let img = egui::ColorImage::from_rgba_unmultiplied(size, &rgba);
-                    self.video_tex = Some(self.ctx.load_texture("video", img, egui::TextureOptions::LINEAR));
+                    // Reuse the texture instead of allocating a new one for
+                    // every frame. Creating and destroying a 1080p texture at
+                    // movie frame rates caused upload stalls and visible
+                    // judder, especially on Wayland.
+                    match self.video_tex.as_mut() {
+                        Some(tex) if tex.size() == size => {
+                            tex.set(img, egui::TextureOptions::LINEAR);
+                        }
+                        _ => {
+                            self.video_tex = Some(self.ctx.load_texture(
+                                "video",
+                                img,
+                                egui::TextureOptions::LINEAR,
+                            ));
+                        }
+                    }
                     self.video_loading_since = None;
                     self.video_load_timed_out = false;
                     if self.video_audio_pending && !self.video_paused {
@@ -2522,6 +2564,11 @@ video_ended: false,
                     if !self.disc_in {
                         self.disc_saved = self.state.playlist.clone();
                     }
+                    self.cd_disc_id.clear();
+                    self.cd_artist.clear();
+                    self.cd_album.clear();
+                    self.cd_titles.clear();
+                    self.cd_display.clear();
                     self.state.playlist = files.clone();
                     self.disc_playlist = files.clone();
                     self.rebuild_display_cache();
@@ -2539,36 +2586,54 @@ video_ended: false,
                     self.play_song(&first);
                 }
             }
-            Msg::CdPlayReady { folder: _folder, files, label } => {
-                self.clear_cd_progress();
-                if files.is_empty() {
-                    self.set_error("CD playback produced no tracks");
-                } else {
-                    if !self.disc_in {
-                        self.disc_saved = self.state.playlist.clone();
+            Msg::CdMetaReady { disc_id, artist, album, titles } => {
+                if self.disc_in && self.cd_disc_id == disc_id {
+                    self.cd_artist = artist.clone();
+                    self.cd_album = album.clone();
+                    self.cd_titles.clear();
+                    self.cd_display.clear();
+                    for (i, path) in self.disc_playlist.clone().iter().enumerate() {
+                        let fallback = crate::cd::cdda_parts(path)
+                            .map(|(_, t, _)| format!("Track {:02}", t))
+                            .unwrap_or_default();
+                        let title = titles
+                            .get(i)
+                            .filter(|t| !t.trim().is_empty())
+                            .cloned()
+                            .unwrap_or(fallback);
+                        let label = if artist.trim().is_empty() {
+                            title.clone()
+                        } else {
+                            format!("{} - {}", artist, title)
+                        };
+                        self.cd_titles.insert(path.clone(), title);
+                        self.cd_display.insert(path.clone(), label);
                     }
-                    self.disc_playlist = files.clone();
-                    self.state.playlist = files.clone();
+                    if !artist.trim().is_empty() || !album.trim().is_empty() {
+                        self.disc_label = match (artist.trim().is_empty(), album.trim().is_empty()) {
+                            (false, false) => format!("{} - {}", artist, album),
+                            (false, true) => artist.clone(),
+                            (true, false) => album.clone(),
+                            (true, true) => self.disc_label.clone(),
+                        };
+                    }
                     self.rebuild_display_cache();
-                    self.disc_in = true;
-                    self.disc_label = label.clone();
-                    self.stop_radio();
-                    self.deck_mode = DeckMode::Disc;
-                    self.set_status(format!("CD loaded from tray: {} ({} tracks)", label, files.len()));
-                    if self.state.is_paused {
-                        self.unpause_music();
+                    if let Some(cur) = self.state.current_song.clone() {
+                        if crate::cd::is_cdda(&cur) {
+                            self.playing = self
+                                .cd_display
+                                .get(&cur)
+                                .cloned()
+                                .unwrap_or_else(|| Self::playing_display(&cur));
+                            self.send_meta_art(cur);
+                        }
                     }
-                    let first = files[0].clone();
-                    self.play_song(&first);
+                    self.set_status("CD metadata loaded");
                 }
             }
             Msg::CdFail(e) => {
                 self.clear_cd_progress();
                 self.set_error(format!("CD rip failed: {}", e));
-            }
-            Msg::CdPlayFail(e) => {
-                self.clear_cd_progress();
-                self.set_error(format!("CD playback failed: {}", e));
             }
             Msg::DiscDumpProgress { done, total, text } => {
                 let now = Instant::now();
@@ -2784,7 +2849,12 @@ impl eframe::App for PlayerApp {
                 self.seek_video(t);
             }
         }
-        ctx.request_repaint_after(std::time::Duration::from_millis(33));
+        // Movies need a faster present loop than the music UI. A 30 Hz repaint
+        // cannot show 24, 25 and 29.97 fps evenly, so frames alternate between
+        // early and late. 60 Hz keeps the deck UI at its normal pace but lets
+        // the video surface update on the next display refresh.
+        let repaint_ms = if self.video_on && !self.video_paused { 16 } else { 33 };
+        ctx.request_repaint_after(std::time::Duration::from_millis(repaint_ms));
         // Wake the background ticker only while something is actually playing.
         self.playback_wake.store(
             (!self.state.is_paused
@@ -2838,15 +2908,7 @@ impl eframe::App for PlayerApp {
             }
         }
         self.update_playback_state();
-        if let Some(s) = &self.video_sink {
-            if self.video_audio_pending || self.video_paused {
-                self.video_clock.store(0, std::sync::atomic::Ordering::Relaxed);
-            } else {
-                let pos = s.get_pos().as_millis() as u64 + 1;
-                let tagged = (((self.video_gen as u64) & 0xFFFF) << 48) | pos.min((1u64 << 48) - 1);
-                self.video_clock.store(tagged, std::sync::atomic::Ordering::Relaxed);
-            }
-        } else {
+        if self.video_sink.is_none() {
             self.video_clock.store(0, std::sync::atomic::Ordering::Relaxed);
         }
         if self.video_audio_pending && !self.video_paused && now - self.video_open_at > 2.5 {

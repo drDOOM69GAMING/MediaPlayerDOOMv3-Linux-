@@ -1,6 +1,6 @@
 # MediaPlayerDOOM v3 for Linux
 
-![Version](https://img.shields.io/badge/version-3.2.38-blue)
+![Version](https://img.shields.io/badge/version-3.2.39-blue)
 ![Platform](https://img.shields.io/badge/platform-Linux%20x86__64-informational)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -41,7 +41,7 @@ This repository is the Linux port. It is tested on CachyOS and Arch with KDE Pla
 - Tags and embedded cover art are preserved where the container supports them
 - Physical audio CDs are detected automatically and ripped to lossless FLAC with MusicBrainz tags and cover art
 - CD ripping shows a live progress bar with percentage, read speed and ETA
-- PLAY CD loads the tray disc into the deck for playback without saving it to the library
+- PLAY CD streams the tray disc directly through cdparanoia; nothing is ripped or written to disk
 - CD playback always follows track order, with shuffle and star filters ignored
 - Per file progress with cancel and a hide option that keeps the conversion running
 
@@ -64,6 +64,7 @@ This repository is the Linux port. It is tested on CachyOS and Arch with KDE Pla
 - Blu-ray playback from the optical drive, an ISO image or a folder using libbluray and libaacs
 - English audio is preferred and subtitles are off by default
 - Real time seeking for both formats
+- Smooth frame pacing with a 60 Hz movie present loop, a reused video texture, wall-clock presentation and slow audio drift correction
 - DUMP TO MKV decrypts and remuxes every title with MakeMKV
 - DVD DUMP TO ISO uses the bundled CachyOS dvdbackup plus genisoimage, with MakeMKV as fallback
 - Blu-ray DUMP TO ISO uses MakeMKV backup with decryption and builds a full disc UDF image with menus and extras

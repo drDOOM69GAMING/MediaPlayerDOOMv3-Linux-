@@ -99,6 +99,9 @@ impl PlayerApp {
         }
         if m == DeckMode::Tape {
             self.stop_radio();
+            // Entering the tape deck must leave the previous source fully
+            // stopped, including a CD stream that is reading the drive.
+            self.stop_music();
             self.deck_mode = m;
             if let Some((path, pos)) = self.deck_resume.take() {
                 if crate::cue::exists(&path) {
@@ -327,6 +330,11 @@ impl PlayerApp {
             if !self.disc_in {
                 self.disc_saved = self.state.playlist.clone();
             }
+            self.cd_disc_id.clear();
+            self.cd_artist.clear();
+            self.cd_album.clear();
+            self.cd_titles.clear();
+            self.cd_display.clear();
             self.disc_playlist = files.clone();
             self.state.playlist = files;
             self.rebuild_display_cache();
@@ -352,6 +360,11 @@ impl PlayerApp {
         }
         self.disc_in = false;
         self.disc_playlist.clear();
+        self.cd_disc_id.clear();
+        self.cd_artist.clear();
+        self.cd_album.clear();
+        self.cd_titles.clear();
+        self.cd_display.clear();
         self.state.playlist = if !self.disc_saved.is_empty() {
             self.disc_saved.clone()
         } else {
@@ -1068,6 +1081,17 @@ impl PlayerApp {
             self.set_error("No audio CD detected in the tray");
             return;
         };
+        // One optical drive cannot stream a track and rip the disc at the same
+        // time. Stop direct playback before the rip opens the device.
+        if self
+            .state
+            .current_song
+            .as_deref()
+            .map(crate::cd::is_cdda)
+            .unwrap_or(false)
+        {
+            self.stop_music();
+        }
         self.clear_cd_progress();
         self.cd_ripping = true;
         self.cd_rip_frac = 0.0;
@@ -1089,8 +1113,9 @@ impl PlayerApp {
         });
     }
 
-    /// Play the audio CD currently in the tray without ripping it into the
-    /// library. Tracks are extracted to a temporary cache and played in order.
+    /// Play the audio CD currently in the optical drive. Each track is a
+    /// cdparanoia stream read straight into the audio sink, so playback starts
+    /// immediately and no rip or temporary audio file is produced.
     pub(crate) fn start_cd_play(&mut self) {
         if self.cd_ripping {
             return;
@@ -1099,23 +1124,61 @@ impl PlayerApp {
             self.set_error("No audio CD detected in the tray");
             return;
         };
+        if !crate::cd::available() {
+            self.set_error("cdparanoia is not installed (install it to play audio CDs)");
+            return;
+        }
+        let total = info.tracks.len();
+        let mut paths = Vec::with_capacity(total);
+        let mut titles = HashMap::new();
+        let mut displays = HashMap::new();
+        for (i, track) in info.tracks.iter().enumerate() {
+            let ms = (crate::cd::track_secs(&info, i) * 1000.0).max(0.0) as u64;
+            let path = crate::cd::cdda_path(&info.drive, *track, ms);
+            let title = format!("Track {:02}", track);
+            titles.insert(path.clone(), title.clone());
+            displays.insert(path.clone(), title);
+            paths.push(path);
+        }
+        if paths.is_empty() {
+            self.set_error("No audio tracks on this CD");
+            return;
+        }
         self.clear_cd_progress();
-        self.cd_ripping = true;
-        self.cd_rip_frac = 0.0;
-        self.cd_rip_total = info.tracks.len();
-        self.cd_rip_text = "Preparing CD playback...".to_string();
-        self.set_status(format!("Loading CD ({} tracks) for playback...", info.tracks.len()));
+        if !self.disc_in {
+            self.disc_saved = self.state.playlist.clone();
+        }
+        self.cd_disc_id = info.disc_id.clone();
+        self.cd_artist.clear();
+        self.cd_album.clear();
+        self.cd_titles = titles;
+        self.cd_display = displays;
+        self.disc_playlist = paths.clone();
+        self.state.playlist = paths.clone();
+        self.rebuild_display_cache();
+        self.disc_in = true;
+        self.disc_label = format!("Audio CD {}", info.disc_id);
+        self.stop_radio();
+        self.deck_mode = DeckMode::Disc;
+        self.set_status(format!("CD playing from tray ({} tracks)", total));
+        if self.state.is_paused {
+            self.unpause_music();
+        }
+        self.play_song(&paths[0]);
+
+        // Track titles can take a moment to arrive, but playback must not wait
+        // for the network. The deck shows Track NN and fills in the names when
+        // MusicBrainz answers.
         let tx = self.msg_tx.clone();
-        std::thread::spawn(move || match crate::cd::extract_for_playback(&info, &tx) {
-            Ok((dir, files, label)) => {
-                let _ = tx.send(Msg::CdPlayReady {
-                    folder: dir.to_string_lossy().to_string(),
-                    files,
-                    label,
+        let disc_id = info.disc_id.clone();
+        std::thread::spawn(move || {
+            if let Some(meta) = crate::cd::lookup_metadata(&info) {
+                let _ = tx.send(Msg::CdMetaReady {
+                    disc_id,
+                    artist: meta.artist,
+                    album: meta.album,
+                    titles: meta.titles,
                 });
-            }
-            Err(e) => {
-                let _ = tx.send(Msg::CdPlayFail(e));
             }
         });
     }
@@ -1125,6 +1188,34 @@ impl PlayerApp {
         let _ = crate::cd::eject(&info.drive);
         self.cd_physical = None;
         self.clear_cd_progress();
-        self.set_status("CD tray ejected");
+        // A disc streamed from the drive cannot keep playing once the tray
+        // opens. Stop it and put the saved library back.
+        if self
+            .state
+            .current_song
+            .as_deref()
+            .map(crate::cd::is_cdda)
+            .unwrap_or(false)
+        {
+            self.stop_music();
+            self.disc_in = false;
+            self.disc_playlist.clear();
+            self.cd_display.clear();
+            self.cd_titles.clear();
+            self.cd_artist.clear();
+            self.cd_album.clear();
+            self.cd_disc_id.clear();
+            self.state.playlist = if !self.disc_saved.is_empty() {
+                self.disc_saved.clone()
+            } else {
+                self.all_songs_ordered()
+            };
+            self.playing_pl_idx = None;
+            self.rebuild_display_cache();
+            self.save_settings();
+            self.set_status("CD tray ejected");
+        } else {
+            self.set_status("CD tray ejected");
+        }
     }
 }

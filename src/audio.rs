@@ -83,7 +83,70 @@ where
 }
 
 type AutoDecoder = Decoder<BufReader<File>>;
-type AutoSource = NotifySource<VizTap<EqSource<AutoDecoder>>>;
+
+/// Playback source for one queued item. Files use the normal rodio decoder;
+/// CD tracks stream raw PCM from cdparanoia, so nothing is written to disk.
+pub enum PlaySource {
+    File(AutoDecoder),
+    #[cfg(target_os = "linux")]
+    Cdda(crate::cd::CddaSource),
+}
+
+impl Iterator for PlaySource {
+    type Item = i16;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            PlaySource::File(s) => s.next(),
+            #[cfg(target_os = "linux")]
+            PlaySource::Cdda(s) => s.next(),
+        }
+    }
+}
+
+impl Source for PlaySource {
+    fn current_frame_len(&self) -> Option<usize> {
+        match self {
+            PlaySource::File(s) => s.current_frame_len(),
+            #[cfg(target_os = "linux")]
+            PlaySource::Cdda(s) => s.current_frame_len(),
+        }
+    }
+
+    fn channels(&self) -> u16 {
+        match self {
+            PlaySource::File(s) => s.channels(),
+            #[cfg(target_os = "linux")]
+            PlaySource::Cdda(s) => s.channels(),
+        }
+    }
+
+    fn sample_rate(&self) -> u32 {
+        match self {
+            PlaySource::File(s) => s.sample_rate(),
+            #[cfg(target_os = "linux")]
+            PlaySource::Cdda(s) => s.sample_rate(),
+        }
+    }
+
+    fn total_duration(&self) -> Option<Duration> {
+        match self {
+            PlaySource::File(s) => s.total_duration(),
+            #[cfg(target_os = "linux")]
+            PlaySource::Cdda(s) => s.total_duration(),
+        }
+    }
+
+    fn try_seek(&mut self, pos: Duration) -> Result<(), rodio::source::SeekError> {
+        match self {
+            PlaySource::File(s) => s.try_seek(pos),
+            #[cfg(target_os = "linux")]
+            PlaySource::Cdda(s) => s.try_seek(pos),
+        }
+    }
+}
+
+type AutoSource = NotifySource<VizTap<EqSource<PlaySource>>>;
 
 /// Wrapper that records the path when its source actually starts playing, so
 /// the UI can catch up to a track that advanced while it was hidden.
@@ -157,14 +220,12 @@ where
     }
 }
 
-fn build_auto_source(
-    path: &str,
-    eq_shared: &std::sync::Arc<std::sync::Mutex<EqShared>>,
-    viz_lock: &std::sync::Arc<std::sync::Mutex<VizState>>,
-    now: &std::sync::Arc<std::sync::Mutex<Option<String>>>,
-    current: &std::sync::Arc<std::sync::Mutex<Option<String>>>,
-    history: &std::sync::Arc<std::sync::Mutex<Vec<String>>>,
-) -> Option<(AutoSource, Option<PathBuf>)> {
+fn open_play_source(path: &str) -> Option<(PlaySource, Option<PathBuf>)> {
+    #[cfg(target_os = "linux")]
+    if let Some((drive, track, duration_ms)) = crate::cd::cdda_parts(path) {
+        let src = crate::cd::cdda_source(drive, track, duration_ms)?;
+        return Some((PlaySource::Cdda(src), None));
+    }
     let (decoder, wav) = match open_decoder(path) {
         Some(d) => (d, None),
         None => {
@@ -173,7 +234,19 @@ fn build_auto_source(
             (d, Some(wav))
         }
     };
-    let eq = EqSource::new(decoder, eq_shared.clone());
+    Some((PlaySource::File(decoder), wav))
+}
+
+fn build_auto_source(
+    path: &str,
+    eq_shared: &std::sync::Arc<std::sync::Mutex<EqShared>>,
+    viz_lock: &std::sync::Arc<std::sync::Mutex<VizState>>,
+    now: &std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    current: &std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    history: &std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+) -> Option<(AutoSource, Option<PathBuf>)> {
+    let (source, wav) = open_play_source(path)?;
+    let eq = EqSource::new(source, eq_shared.clone());
     let tapped = VizTap::new(eq, viz_lock.clone());
     Some((
         NotifySource::new(
@@ -320,7 +393,24 @@ pub(crate) fn spawn_auto_advance(
         // 0 = current track has not reached the sink yet; >1 = a next track is
         // already queued. Only prepare when exactly the current one is playing.
         let len = sink.len();
-        if len == 0 || len > 1 {
+        #[cfg(target_os = "linux")]
+        let next_cdda = queue
+            .lock()
+            .ok()
+            .and_then(|q| q.front().cloned())
+            .map(|p| crate::cd::is_cdda(&p))
+            .unwrap_or(false);
+        #[cfg(not(target_os = "linux"))]
+        let next_cdda = false;
+        if next_cdda {
+            // A CD can only read one place at a time. Do not pre-open the next
+            // track while the current one is still playing; wait for the sink
+            // to drain, then start the next track.
+            if len > 0 {
+                std::thread::sleep(Duration::from_millis(80));
+                continue;
+            }
+        } else if len == 0 || len > 1 {
             std::thread::sleep(Duration::from_millis(80));
             continue;
         }
@@ -357,7 +447,8 @@ pub(crate) fn spawn_auto_advance(
 
 impl PlayerApp {
     pub(crate) fn play_song(&mut self, path: &str) {
-        if path.is_empty() || !crate::cue::exists(path) {
+        let cdda = crate::cd::is_cdda(path);
+        if path.is_empty() || (!cdda && !crate::cue::exists(path)) {
             self.set_error("File not found");
             return;
         }
@@ -374,12 +465,18 @@ impl PlayerApp {
         self.state.current_song = Some(path.to_string());
         self.playing_pl_idx = self.state.playlist.iter().position(|p| p == path);
         self.eq_resume = None;
-        self.state.prev_songs.push(path.to_string());
+        if !cdda {
+            self.state.prev_songs.push(path.to_string());
+            *self.state.play_history.entry(path.to_string()).or_insert(0) += 1;
+        }
         self.state.song_count += 1;
-        *self.state.play_history.entry(path.to_string()).or_insert(0) += 1;
         self.save_history();
         self.save_settings();
-        self.playing = Self::playing_display(path);
+        self.playing = self
+            .cd_display
+            .get(path)
+            .cloned()
+            .unwrap_or_else(|| Self::playing_display(path));
         self.set_status(format!("Loading: {}...", stem(path)));
         self.do_play(path, path);
         self.auto_active.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -511,7 +608,8 @@ impl PlayerApp {
         if self.state.current_song.as_deref() == Some(path.as_str()) {
             return;
         }
-        if !crate::cue::exists(&path) {
+        let cdda = crate::cd::is_cdda(&path);
+        if !cdda && !crate::cue::exists(&path) {
             return;
         }
         self.tray_note_current(&path);
@@ -521,15 +619,23 @@ impl PlayerApp {
             .store(false, std::sync::atomic::Ordering::Relaxed);
         self.state.current_song = Some(path.clone());
         self.playing_pl_idx = self.state.playlist.iter().position(|p| p == &path);
-        self.state.prev_songs.push(path.clone());
+        if !cdda {
+            self.state.prev_songs.push(path.clone());
+            *self.state.play_history.entry(path.clone()).or_insert(0) += 1;
+        }
         self.state.song_count += 1;
-        *self.state.play_history.entry(path.clone()).or_insert(0) += 1;
         self.save_history();
-        self.playing = Self::playing_display(&path);
+        self.playing = self
+            .cd_display
+            .get(&path)
+            .cloned()
+            .unwrap_or_else(|| Self::playing_display(&path));
         self.pos = 0.0;
         self.seek_base = 0.0;
-        self.len_secs = 0.0;
-        self.state.song_length = Duration::ZERO;
+        self.len_secs = crate::cd::cdda_parts(&path)
+            .map(|(_, _, ms)| ms as f32 / 1000.0)
+            .unwrap_or(0.0);
+        self.state.song_length = Duration::from_secs_f32(self.len_secs);
         self.play_started = Some(Instant::now());
         self.send_meta_art(path.clone());
         self.save_settings();
@@ -537,6 +643,34 @@ impl PlayerApp {
     }
 
     pub(crate) fn send_meta_art(&mut self, path: String) {
+        if let Some((_, track, duration_ms)) = crate::cd::cdda_parts(&path) {
+            let title = self
+                .cd_titles
+                .get(&path)
+                .cloned()
+                .unwrap_or_else(|| format!("Track {:02}", track));
+            let artist = if self.cd_artist.trim().is_empty() {
+                "Audio CD".to_string()
+            } else {
+                self.cd_artist.clone()
+            };
+            let album = if self.cd_album.trim().is_empty() {
+                self.disc_label.clone()
+            } else {
+                self.cd_album.clone()
+            };
+            self.meta = (title, artist, album);
+            self.art_state = 0;
+            self.art_local_valid = false;
+            self.art_tex = None;
+            self.want_web = false;
+            self.web_art_for = None;
+            self.lyrics = None;
+            self.lyrics_for = None;
+            self.len_secs = duration_ms as f32 / 1000.0;
+            self.state.song_length = Duration::from_millis(duration_ms);
+            return;
+        }
         self.meta = (stem(&path), "Unknown".to_string(), "Unknown".to_string());
         self.art_state = 1;
         self.art_local_valid = false;
@@ -571,6 +705,16 @@ impl PlayerApp {
     }
 
     pub(crate) fn do_play(&mut self, display: &str, audio: &str) {
+        #[cfg(target_os = "linux")]
+        if let Some((drive, track, duration_ms)) = crate::cd::cdda_parts(audio) {
+            match crate::cd::cdda_source(drive, track, duration_ms) {
+                Some(src) => self.play_source(display, PlaySource::Cdda(src), true),
+                None => self.set_error(
+                    "cdparanoia is not installed (install it to play audio CDs)",
+                ),
+            }
+            return;
+        }
         let src_path = if let Some(w) = self.transcodes.get(audio) {
             w.clone()
         } else {
@@ -633,6 +777,10 @@ impl PlayerApp {
     }
 
     pub(crate) fn play_decoded(&mut self, display: &str, src: Decoder<BufReader<File>>, forward_track: bool) {
+        self.play_source(display, PlaySource::File(src), forward_track);
+    }
+
+    pub(crate) fn play_source(&mut self, display: &str, src: PlaySource, forward_track: bool) {
         self.song_starting = false;
         self.set_winding(None);
         self.seek_base = 0.0;
@@ -647,15 +795,22 @@ impl PlayerApp {
         self.sink.stop();
         self.sink.set_volume(self.state.volume as f32 / 100.0);
         let dur = src.total_duration().unwrap_or_default().as_secs_f32();
-        if self.len_secs <= 0.0 && dur > 0.0 {
+        if crate::cd::is_cdda(display) {
+            if dur > 0.0 {
+                self.len_secs = dur;
+                self.state.song_length = Duration::from_secs_f32(dur);
+            }
+        } else if self.len_secs <= 0.0 && dur > 0.0 {
             self.len_secs = dur;
         }
         self.sink.append(self.tap_viz(EqSource::new(src, self.eq_shared.clone())));
         self.sink.play();
         self.state.current_song = Some(display.to_string());
-        self.state.prev_songs.push(display.to_string());
+        if !crate::cd::is_cdda(display) {
+            self.state.prev_songs.push(display.to_string());
+            *self.state.play_history.entry(display.to_string()).or_insert(0) += 1;
+        }
         self.state.song_count += 1;
-        *self.state.play_history.entry(display.to_string()).or_insert(0) += 1;
         self.state.is_paused = false;
         if new_track {
             self.tape_songs += 1;
@@ -684,7 +839,11 @@ impl PlayerApp {
         self.dragging = false;
         self.save_history();
         self.save_settings();
-        self.playing = Self::playing_display(display);
+        self.playing = self
+            .cd_display
+            .get(display)
+            .cloned()
+            .unwrap_or_else(|| Self::playing_display(display));
         self.set_status(format!("Playing: {}", stem(display)));
         self.send_meta_art(display.to_string());
         self.request_current_rating();
@@ -892,6 +1051,10 @@ impl PlayerApp {
         }
         if self.state.current_song.is_none() {
             if let Some((path, pos)) = self.deck_resume.take() {
+                if crate::cd::is_cdda(&path) {
+                    self.play_song(&path);
+                    return;
+                }
                 if crate::cue::exists(&path) {
                     self.resume_tape(&path, pos);
                     return;
@@ -899,6 +1062,10 @@ impl PlayerApp {
             }
         }
         if let Some(cur) = self.state.current_song.clone() {
+            if crate::cd::is_cdda(&cur) {
+                self.play_song(&cur);
+                return;
+            }
             if crate::cue::exists(&cur) {
                 self.resume_tape(&cur, self.pos.max(0.0));
                 return;
@@ -1022,6 +1189,16 @@ impl PlayerApp {
         if self.state.current_song.is_none() {
             return;
         }
+        if self
+            .state
+            .current_song
+            .as_deref()
+            .map(crate::cd::is_cdda)
+            .unwrap_or(false)
+        {
+            self.set_status("CD track: use Next or Previous to change track");
+            return;
+        }
         let secs = secs.max(0.0);
         if self.sink.try_seek(Duration::from_secs_f32(secs)).is_ok() {
             self.pos = secs;
@@ -1129,7 +1306,15 @@ impl PlayerApp {
                 // the first samples of a FLAC. The old 600 ms patience made
                 // the player skip perfectly good tracks in a loop, opening a
                 // new file (and its art) every couple of seconds.
-                if start.elapsed() > Duration::from_secs(5) && self.sink.empty() && self.state.current_song.is_some() {
+                let cdda = self
+                    .state
+                    .current_song
+                    .as_deref()
+                    .map(crate::cd::is_cdda)
+                    .unwrap_or(false);
+                // Between CD tracks the sink is briefly empty while the drive
+                // starts the next track. Do not treat that gap as a stall.
+                if !cdda && start.elapsed() > Duration::from_secs(5) && self.sink.empty() && self.state.current_song.is_some() {
                     av_log(&format!("watchdog: sink empty after {:?}, skipping", start.elapsed()));
                     let now = Instant::now();
                     if now.duration_since(self.last_skip) > Duration::from_millis(1500) {
