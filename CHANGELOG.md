@@ -13,8 +13,10 @@
 - The cached playlist is no longer re-sorted at every launch.
 - The display cache is built once instead of twice.
 - The metadata repair pass only touches entries with missing, placeholder or leading-track-number values.
-- When a cached playlist exists, the library scan starts 10 seconds after launch so the window and first song do not compete with a cold-drive walk.
+- When a cached playlist exists, the library scan starts 30 seconds after launch so the window and first song do not compete with a cold-drive walk.
 - Library scans run at lower CPU and I/O priority and yield to playback and the UI.
+- The next track is not pre-opened until the current song has played for 5 seconds, so a cold drive is not forced to seek away from the song that is still starting.
+- The current song's live tag refresh is delayed by 3 seconds when cached tags are already available.
 - `MPDOOM_AV_LOG=1` now records startup phase timings.
 
 ## v3.2.39

@@ -305,8 +305,11 @@ pub(crate) fn spawn_auto_advance(
             }
         });
     }
-    std::thread::spawn(move || loop {
+    std::thread::spawn(move || {
         use std::sync::atomic::Ordering;
+        let mut seen_playing = false;
+        let mut seen_generation = 0u64;
+        loop {
         // Background tray transport. These commands arrive while the UI may be
         // frozen in Hide mode, so they must act on the sink directly.
         let cmd = control.lock().ok().and_then(|mut q| q.pop_front());
@@ -392,7 +395,15 @@ pub(crate) fn spawn_auto_advance(
         }
         // 0 = current track has not reached the sink yet; >1 = a next track is
         // already queued. Only prepare when exactly the current one is playing.
+        let generation = gen.load(Ordering::Relaxed);
+        if generation != seen_generation {
+            seen_generation = generation;
+            seen_playing = false;
+        }
         let len = sink.len();
+        if len == 1 {
+            seen_playing = true;
+        }
         #[cfg(target_os = "linux")]
         let next_cdda = queue
             .lock()
@@ -410,11 +421,22 @@ pub(crate) fn spawn_auto_advance(
                 std::thread::sleep(Duration::from_millis(80));
                 continue;
             }
-        } else if len == 0 || len > 1 {
+        } else if len > 1 {
             std::thread::sleep(Duration::from_millis(80));
             continue;
+        } else if len == 0 && !seen_playing {
+            // The current track has not reached the sink yet (for example an
+            // ffmpeg transcode is still being prepared). Never skip it.
+            std::thread::sleep(Duration::from_millis(80));
+            continue;
+        } else if len == 1 && sink.get_pos() < Duration::from_secs(5) {
+            // Do not open the next file while the current song is still
+            // starting. On a cold spinning disk that seek moved the head away
+            // from the track the user is waiting to hear. The next track is
+            // still prepared minutes before it is needed.
+            std::thread::sleep(Duration::from_millis(200));
+            continue;
         }
-        let generation = gen.load(Ordering::Relaxed);
         let path = queue
             .lock()
             .ok()
@@ -442,6 +464,7 @@ pub(crate) fn spawn_auto_advance(
         }
         av_log(&format!("auto-advance: queued {}", path));
         sink.append(source);
+        }
     });
 }
 
@@ -702,8 +725,19 @@ impl PlayerApp {
             let _ = self.lib_tx.send(LibCmd::ArtLocal(path.clone()));
         }
         // Live refresh keeps cached tags fresh (and backfills the cache on the
-        // first play of an uncached track).
-        let _ = self.lib_tx.send(LibCmd::Meta(path));
+        // first play of an uncached track). When the cache already has the
+        // tags, let the decoder read the start of the song first: a tag probe
+        // on a cold spinning disk would otherwise seek away from the audio
+        // data the user is waiting to hear.
+        if self.meta_cache.contains_key(&path) {
+            let tx = self.lib_tx.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_secs(3));
+                let _ = tx.send(LibCmd::Meta(path));
+            });
+        } else {
+            let _ = self.lib_tx.send(LibCmd::Meta(path));
+        }
     }
 
     pub(crate) fn do_play(&mut self, display: &str, audio: &str) {

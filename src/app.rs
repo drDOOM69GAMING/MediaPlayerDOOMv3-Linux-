@@ -1034,10 +1034,10 @@ video_ended: false,
                     app.scanning = false;
                     let tx = app.lib_tx.clone();
                     std::thread::spawn(move || {
-                        std::thread::sleep(Duration::from_secs(10));
+                        std::thread::sleep(Duration::from_secs(30));
                         let _ = tx.send(LibCmd::Scan(root));
                     });
-                    av_log("startup: library scan deferred by 10s");
+                    av_log("startup: library scan deferred by 30s");
                 } else {
                     let _ = app.lib_tx.send(LibCmd::Scan(root));
                 }
