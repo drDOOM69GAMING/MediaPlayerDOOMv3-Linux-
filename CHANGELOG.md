@@ -1,5 +1,16 @@
 # Changelog
 
+## v3.2.38
+
+- CD ripping now shows a live progress bar with percentage, read speed multiplier and ETA.
+- CD progress updates from the growing extraction output, so the bar moves during each track.
+- CD mode always plays tracks in disc order; shuffle, folder order and the star filter no longer reorder a disc.
+- Next and Previous follow the disc track list instead of the library.
+- The disc stays loaded when switching decks and returns when CD mode is selected again.
+- Added PLAY CD to play the audio CD in the optical drive without ripping it into the library.
+- Played-from-tray CDs are extracted to a temporary cache and loaded as a normal disc in track order.
+- The saved library is preserved while a disc is in the CD deck.
+
 ## v3.2.37
 
 - Added Set as Default Media Player for audio and video.

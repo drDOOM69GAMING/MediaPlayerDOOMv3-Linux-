@@ -293,6 +293,11 @@ pub(crate) struct PlayerApp {
     /// Physical audio CD detected in an optical drive.
     pub(crate) cd_physical: Option<CdInfo>,
     pub(crate) cd_ripping: bool,
+    pub(crate) cd_rip_frac: f32,
+    pub(crate) cd_rip_speed: f32,
+    pub(crate) cd_rip_track: usize,
+    pub(crate) cd_rip_total: usize,
+    pub(crate) cd_rip_text: String,
     pub(crate) disc_dumping: bool,
     pub(crate) disc_dump_done: u64,
     pub(crate) disc_dump_total: u64,
@@ -324,6 +329,9 @@ pub(crate) struct PlayerApp {
     /// Remembered library root, so startup doesn't re-walk every drive.
     pub(crate) music_root: Option<String>,
     pub(crate) disc_saved: Vec<String>,
+    /// Tracks of the disc currently loaded in the CD deck. Kept separately so
+    /// switching decks does not lose the disc or replace the saved library.
+    pub(crate) disc_playlist: Vec<String>,
     pub(crate) band_map: HashMap<String, Vec<String>>,
     pub(crate) full_library: Vec<String>,
     pub(crate) band_sel: String,
@@ -789,6 +797,11 @@ impl PlayerApp {
             disc_label: String::new(),
             cd_physical: None,
             cd_ripping: false,
+            cd_rip_frac: 0.0,
+            cd_rip_speed: 0.0,
+            cd_rip_track: 0,
+            cd_rip_total: 0,
+            cd_rip_text: String::new(),
             disc_dumping: false,
             disc_dump_done: 0,
             disc_dump_total: 0,
@@ -819,6 +832,7 @@ impl PlayerApp {
             last_cd_dir,
             music_root,
             disc_saved: Vec::new(),
+            disc_playlist: Vec::new(),
             band_map,
             full_library,
             band_sel: String::new(),
@@ -1111,11 +1125,27 @@ video_ended: false,
     }
 
     fn write_settings(&self) {
+        // A disc in the CD deck is temporary. Persist the library behind it so
+        // a ripped or played-from-tray disc never becomes the saved library.
+        let saved_playlist = if self.disc_in {
+            if self.disc_saved.is_empty() {
+                self.all_songs_ordered()
+            } else {
+                self.disc_saved.clone()
+            }
+        } else {
+            self.state.playlist.clone()
+        };
+        let saved_last = if self.disc_in {
+            None
+        } else {
+            self.state.current_song.clone()
+        };
         let s = Settings {
             settings_version: SETTINGS_VERSION,
             volume: self.state.volume,
-            last_played: self.state.current_song.clone(),
-            playlist: self.state.playlist.clone(),
+            last_played: saved_last,
+            playlist: saved_playlist,
             theme: self.state.theme.clone(),
             video_aspects: self.video_aspects.clone(),
             video_aspect_default: self.video_aspect_default,
@@ -1179,6 +1209,16 @@ video_ended: false,
     pub(crate) fn set_error(&mut self, s: impl Into<String>) {
         self.error = s.into();
         self.error_until = Some(Instant::now() + Duration::from_secs(5));
+    }
+
+    /// Reset the live CD progress shown in the CD deck.
+    pub(crate) fn clear_cd_progress(&mut self) {
+        self.cd_ripping = false;
+        self.cd_rip_frac = 0.0;
+        self.cd_rip_speed = 0.0;
+        self.cd_rip_track = 0;
+        self.cd_rip_total = 0;
+        self.cd_rip_text.clear();
     }
 
     pub(crate) fn theme_colors(&self) -> ThemePalette {
@@ -2459,22 +2499,38 @@ video_ended: false,
                     }
                 }
             }
-            Msg::CdProgress { track, total, text } => {
+            Msg::CdProgress { track, total, frac, speed, text } => {
                 self.cd_ripping = true;
-                self.set_status(format!("CD {}/{}: {}", track, total, text));
+                self.cd_rip_frac = frac.clamp(0.0, 1.0);
+                if speed > 0.05 {
+                    self.cd_rip_speed = if self.cd_rip_speed > 0.05 {
+                        self.cd_rip_speed * 0.65 + speed * 0.35
+                    } else {
+                        speed
+                    };
+                }
+                self.cd_rip_track = track;
+                self.cd_rip_total = total;
+                self.cd_rip_text = text.clone();
+                self.set_status(text);
             }
             Msg::CdDone { folder, files, label } => {
-                self.cd_ripping = false;
+                self.clear_cd_progress();
                 if files.is_empty() {
                     self.set_error("CD rip produced no files");
                 } else {
-                    self.disc_saved = self.state.playlist.clone();
+                    if !self.disc_in {
+                        self.disc_saved = self.state.playlist.clone();
+                    }
                     self.state.playlist = files.clone();
+                    self.disc_playlist = files.clone();
                     self.rebuild_display_cache();
                     self.disc_in = true;
                     self.disc_label = label.clone();
                     let first = files[0].clone();
                     self.ingest_bands(&files, Some(label));
+                    self.stop_radio();
+                    self.deck_mode = DeckMode::Disc;
                     self.save_settings();
                     self.set_status(format!("CD ripped to {} ({} tracks)", folder, files.len()));
                     if self.state.is_paused {
@@ -2483,9 +2539,36 @@ video_ended: false,
                     self.play_song(&first);
                 }
             }
+            Msg::CdPlayReady { folder: _folder, files, label } => {
+                self.clear_cd_progress();
+                if files.is_empty() {
+                    self.set_error("CD playback produced no tracks");
+                } else {
+                    if !self.disc_in {
+                        self.disc_saved = self.state.playlist.clone();
+                    }
+                    self.disc_playlist = files.clone();
+                    self.state.playlist = files.clone();
+                    self.rebuild_display_cache();
+                    self.disc_in = true;
+                    self.disc_label = label.clone();
+                    self.stop_radio();
+                    self.deck_mode = DeckMode::Disc;
+                    self.set_status(format!("CD loaded from tray: {} ({} tracks)", label, files.len()));
+                    if self.state.is_paused {
+                        self.unpause_music();
+                    }
+                    let first = files[0].clone();
+                    self.play_song(&first);
+                }
+            }
             Msg::CdFail(e) => {
-                self.cd_ripping = false;
+                self.clear_cd_progress();
                 self.set_error(format!("CD rip failed: {}", e));
+            }
+            Msg::CdPlayFail(e) => {
+                self.clear_cd_progress();
+                self.set_error(format!("CD playback failed: {}", e));
             }
             Msg::DiscDumpProgress { done, total, text } => {
                 let now = Instant::now();

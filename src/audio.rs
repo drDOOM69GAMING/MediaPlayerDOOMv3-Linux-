@@ -452,8 +452,11 @@ impl PlayerApp {
         if !self.auto_active.load(std::sync::atomic::Ordering::Relaxed) {
             return;
         }
+        // A loaded disc always plays in track order: no shuffle, no folder
+        // filter and no star filter. This is the whole point of the CD deck.
+        let disc_order = self.disc_in && self.deck_mode == DeckMode::Disc;
         let mut pl = self.state.playlist.clone();
-        if self.state.dir_sequential {
+        if !disc_order && self.state.dir_sequential {
             if let Some(dir) = &self.state.current_dir {
                 let filtered: Vec<String> = pl
                     .iter()
@@ -468,7 +471,7 @@ impl PlayerApp {
         if pl.is_empty() {
             return;
         }
-        let limit = if self.random_on { 200 } else { pl.len().min(200) };
+        let limit = if self.random_on && !disc_order { 200 } else { pl.len().min(200) };
         let mut q = match self.auto_queue.lock() {
             Ok(q) => q,
             Err(p) => p.into_inner(),
@@ -483,7 +486,7 @@ impl PlayerApp {
             .and_then(|c| pl.iter().position(|p| p == c))
             .unwrap_or(0);
         while q.len() < limit {
-            let next = if self.random_on {
+            let next = if self.random_on && !disc_order {
                 random_next(current.as_deref(), &pl, &weights)
             } else {
                 idx = (idx + 1) % pl.len();
@@ -748,6 +751,21 @@ impl PlayerApp {
         if self.state.playlist.is_empty() || self.state.is_paused {
             return;
         }
+        if self.disc_in && self.deck_mode == DeckMode::Disc {
+            let pl = self.state.playlist.clone();
+            let i = self
+                .state
+                .current_song
+                .as_deref()
+                .and_then(|c| pl.iter().position(|p| p == c))
+                .unwrap_or(0);
+            let ni = (i + 1) % pl.len();
+            let song = pl[ni].clone();
+            self.state.skip_count += 1;
+            self.playing_pl_idx = Some(ni);
+            self.play_song(&song);
+            return;
+        }
         let pl = self.state.playlist.clone();
         let min = self.rating_filter;
         let slots = self.rated_slots();
@@ -811,6 +829,20 @@ impl PlayerApp {
 
     pub(crate) fn prev_song(&mut self) {
         if self.state.playlist.is_empty() || self.state.is_paused {
+            return;
+        }
+        if self.disc_in && self.deck_mode == DeckMode::Disc {
+            let pl = self.state.playlist.clone();
+            let i = self
+                .state
+                .current_song
+                .as_deref()
+                .and_then(|c| pl.iter().position(|p| p == c))
+                .unwrap_or(0);
+            let pi = (i + pl.len() - 1) % pl.len();
+            let prev = pl[pi].clone();
+            self.playing_pl_idx = Some(pi);
+            self.play_song(&prev);
             return;
         }
         let pl = self.state.playlist.clone();

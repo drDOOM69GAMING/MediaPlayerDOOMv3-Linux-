@@ -586,21 +586,82 @@ impl PlayerApp {
                                     .monospace()
                                     .size(10.0),
                                 );
-                                ui.horizontal(|ui| {
-                                    let rip_lbl = if cd_ripping { "RIPPING CD..." } else { "RIP CD → MUSIC" };
-                                    if retro_btn(ui, rip_lbl, Color32::from_rgb(120, 255, 120), th.btn_bg).clicked() && !cd_ripping {
-                                        self.start_cd_rip();
-                                    }
-                                    if retro_btn(ui, "⏏ EJECT TRAY", th.fg, th.btn_bg).clicked() {
-                                        self.eject_cd_tray();
-                                    }
-                                });
                                 ui.label(
-                                    RichText::new("FLAC • lossless 16-bit / 44.1 kHz")
-                                        .color(Color32::from_gray(135))
+                                    RichText::new("DISC ORDER  •  SHUFFLE OFF  •  STAR FILTER OFF")
+                                        .color(Color32::from_gray(130))
                                         .monospace()
-                                        .size(9.0),
+                                        .size(8.0),
                                 );
+                                if cd_ripping {
+                                    ui.add_space(4.0);
+                                    ui.label(
+                                        RichText::new(&self.cd_rip_text)
+                                            .color(th.fg)
+                                            .monospace()
+                                            .size(9.0),
+                                    );
+                                    let frac = self.cd_rip_frac.clamp(0.0, 1.0);
+                                    let speed = if self.cd_rip_speed > 0.05 {
+                                        format!("  {:.1}x", self.cd_rip_speed)
+                                    } else {
+                                        String::new()
+                                    };
+                                    let eta = if self.cd_rip_speed > 0.05 && frac < 0.999 {
+                                        let secs = ((1.0 - frac) * cd.total_secs
+                                            / self.cd_rip_speed)
+                                            .max(0.0) as u64;
+                                        if secs >= 60 {
+                                            format!("  ~{}m", secs / 60)
+                                        } else {
+                                            format!("  ~{}s", secs)
+                                        }
+                                    } else {
+                                        String::new()
+                                    };
+                                    ui.add(
+                                        egui::ProgressBar::new(frac)
+                                            .desired_width(300.0)
+                                            .text(format!(
+                                                "{:.0}%{}{}",
+                                                frac * 100.0,
+                                                speed,
+                                                eta
+                                            )),
+                                    );
+                                } else {
+                                    ui.horizontal_wrapped(|ui| {
+                                        if retro_btn(ui, "▶ PLAY CD", th.playing_fg, th.btn_bg)
+                                            .on_hover_text(
+                                                "Load this audio CD into the deck and play it in order without ripping it into the library",
+                                            )
+                                            .clicked()
+                                        {
+                                            self.start_cd_play();
+                                        }
+                                        if retro_btn(
+                                            ui,
+                                            "RIP CD → MUSIC",
+                                            Color32::from_rgb(120, 255, 120),
+                                            th.btn_bg,
+                                        )
+                                        .on_hover_text(
+                                            "Rip the whole disc to lossless FLAC with MusicBrainz tags and cover art",
+                                        )
+                                        .clicked()
+                                        {
+                                            self.start_cd_rip();
+                                        }
+                                        if retro_btn(ui, "⏏ EJECT TRAY", th.fg, th.btn_bg).clicked() {
+                                            self.eject_cd_tray();
+                                        }
+                                    });
+                                    ui.label(
+                                        RichText::new("FLAC • lossless 16-bit / 44.1 kHz")
+                                            .color(Color32::from_gray(135))
+                                            .monospace()
+                                            .size(9.0),
+                                    );
+                                }
                             } else {
                                 ui.label(
                                     RichText::new("NO AUDIO CD IN TRAY")
@@ -2046,6 +2107,9 @@ impl PlayerApp {
 
                 ui.label(RichText::new("CD MODE").color(acc).monospace().strong());
                 ui.label(RichText::new("Insert audio CD ..... Detect tracks/TOC; rip whole disc losslessly to FLAC with MusicBrainz tags and cover art").color(dim).monospace());
+                ui.label(RichText::new("Play CD ............. Load the tray disc into the deck and play it in order without saving it to the library").color(dim).monospace());
+                ui.label(RichText::new("Disc order .......... CD playback always follows track order; shuffle, folder and star filters are ignored").color(dim).monospace());
+                ui.label(RichText::new("Rip progress ........ Live bar with percentage, read speed multiplier and ETA while the disc is extracted").color(dim).monospace());
                 ui.label(RichText::new("Eject ............... Open the tray when the rip is done").color(dim).monospace());
                 ui.add_space(6.0);
 
@@ -2091,8 +2155,11 @@ impl PlayerApp {
                 ui.add_space(6.0);
 
                 ui.label(RichText::new("DECK CONTROLS (CD MODE)").color(acc).monospace().strong());
+                ui.label(RichText::new("PLAY CD ............. Play the audio CD in the optical drive, in disc order").color(dim).monospace());
+                ui.label(RichText::new("RIP CD .............. Rip the optical disc to your music library as FLAC").color(dim).monospace());
                 ui.label(RichText::new("INSERT DISC ......... Load music from folder").color(dim).monospace());
                 ui.label(RichText::new("EJECT DISC .......... Remove disc").color(dim).monospace());
+                ui.label(RichText::new("EJECT TRAY .......... Open the optical drive and stop the CD job").color(dim).monospace());
                 ui.add_space(6.0);
 
                 ui.label(RichText::new("DECK CONTROLS (RADIO MODE)").color(acc).monospace().strong());

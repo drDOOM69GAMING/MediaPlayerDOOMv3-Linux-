@@ -7,12 +7,13 @@
 #![allow(dead_code)]
 
 use std::fmt::Write as _;
+use std::fs::File;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::mpsc::Sender;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use sha1::{Digest, Sha1};
 
@@ -363,28 +364,97 @@ fn unique_album_dir(base: PathBuf, disc_id: &str) -> PathBuf {
     base
 }
 
-fn run_cdparanoia(dev: &str, track: u8, wav: &Path) -> Result<(), String> {
+/// Audio length of each track in seconds from the raw TOC offsets.
+fn track_durations(info: &CdInfo) -> Vec<f32> {
+    (0..info.tracks.len())
+        .map(|i| {
+            let start = info.offsets.get(i).copied().unwrap_or(0);
+            let end = info.offsets.get(i + 1).copied().unwrap_or(info.leadout);
+            end.saturating_sub(start) as f32 / 75.0
+        })
+        .collect()
+}
+
+/// Extract one CDDA track to a WAV file. The callback receives the audio
+/// seconds written so far and the read speed relative to real time (1.0x is a
+/// standard audio CD). cdparanoia only reports coarse progress, so the growing
+/// WAV file is the most reliable live signal and matches what the UI shows.
+fn run_cdparanoia<F>(
+    dev: &str,
+    track: u8,
+    wav: &Path,
+    duration: f32,
+    mut progress: F,
+) -> Result<(), String>
+where
+    F: FnMut(f32, f32),
+{
     let exe = which("cdparanoia").ok_or("cdparanoia is not installed (install it to rip CDs)")?;
-    let out = Command::new(exe)
+    let err_path = wav.with_extension("cdparanoia.err");
+    let err_file = File::create(&err_path)
+        .map_err(|e| format!("cannot create cdparanoia log: {}", e))?;
+    let mut child = Command::new(exe)
         .args(["-q", "-w", "-d", dev])
         .arg(track.to_string())
         .arg(wav)
-        .output()
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(err_file))
+        .spawn()
         .map_err(|e| format!("cdparanoia failed to start: {}", e))?;
-    if !out.status.success() || !wav.is_file() {
-        let err = String::from_utf8_lossy(&out.stderr);
-        let line = err.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("unknown error");
+
+    let start = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {}
+            Err(e) => {
+                let _ = child.kill();
+                let _ = std::fs::remove_file(&err_path);
+                return Err(format!("cdparanoia failed: {}", e));
+            }
+        }
+        let bytes = std::fs::metadata(wav)
+            .map(|m| m.len().saturating_sub(44))
+            .unwrap_or(0);
+        let done = (bytes as f32 / 176_400.0).min(duration.max(0.0));
+        let elapsed = start.elapsed().as_secs_f32();
+        let speed = if elapsed > 0.25 { done / elapsed } else { 0.0 };
+        progress(done, speed);
+        std::thread::sleep(Duration::from_millis(150));
+    };
+
+    let elapsed = start.elapsed().as_secs_f32();
+    progress(
+        duration.max(0.0),
+        if elapsed > 0.25 { duration.max(0.0) / elapsed } else { 0.0 },
+    );
+    if !status.success() || !wav.is_file() {
+        let err = std::fs::read_to_string(&err_path).unwrap_or_default();
+        let line = err
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("unknown error");
+        let _ = std::fs::remove_file(&err_path);
         return Err(format!("cdparanoia track {}: {}", track, line.trim()));
     }
+    let _ = std::fs::remove_file(&err_path);
     Ok(())
 }
 
 /// Extract and encode the whole disc. Returns (folder, files, label).
 pub fn rip(info: &CdInfo, tx: &Sender<Msg>) -> Result<(PathBuf, Vec<String>, String), String> {
-    let _ = tx.send(Msg::CdProgress { track: 0, total: info.tracks.len(), text: "Looking up CD metadata...".into() });
+    let total = info.tracks.len();
+    let _ = tx.send(Msg::CdProgress {
+        track: 0,
+        total,
+        frac: 0.0,
+        speed: 0.0,
+        text: "Looking up CD metadata...".into(),
+    });
     let mut meta = lookup_metadata(info).unwrap_or_default();
-    if meta.titles.len() < info.tracks.len() {
-        meta.titles.resize(info.tracks.len(), String::new());
+    if meta.titles.len() < total {
+        meta.titles.resize(total, String::new());
     }
     let artist = if meta.artist.trim().is_empty() { "Unknown Artist".to_string() } else { meta.artist.clone() };
     let album = if meta.album.trim().is_empty() { "Unknown Album".to_string() } else { meta.album.clone() };
@@ -400,7 +470,9 @@ pub fn rip(info: &CdInfo, tx: &Sender<Msg>) -> Result<(PathBuf, Vec<String>, Str
 
     let wav_dir = work_dir().join("cd").join(&info.disc_id);
     let _ = std::fs::create_dir_all(&wav_dir);
-    let total = info.tracks.len();
+    let durations = track_durations(info);
+    let total_secs = durations.iter().sum::<f32>().max(1.0);
+    let mut done_before = 0.0f32;
     let mut files = Vec::new();
     for (i, track) in info.tracks.iter().enumerate() {
         let title = meta.titles.get(i).cloned().unwrap_or_default();
@@ -411,10 +483,40 @@ pub fn rip(info: &CdInfo, tx: &Sender<Msg>) -> Result<(PathBuf, Vec<String>, Str
             .filter(|a| !a.trim().is_empty())
             .cloned()
             .unwrap_or_else(|| artist.clone());
-        let _ = tx.send(Msg::CdProgress { track: i + 1, total, text: format!("Ripping {} / {}: {}", i + 1, total, shown) });
+        let _ = tx.send(Msg::CdProgress {
+            track: i + 1,
+            total,
+            frac: (done_before / total_secs).clamp(0.0, 1.0),
+            speed: 0.0,
+            text: format!("Ripping {} / {}: {}", i + 1, total, shown),
+        });
         let wav = wav_dir.join(format!("track{:02}.wav", track));
         let _ = std::fs::remove_file(&wav);
-        run_cdparanoia(&info.drive, *track, &wav)?;
+        let dur = durations.get(i).copied().unwrap_or(0.0);
+        let mut last_sent = Instant::now();
+        let mut last_speed = 0.0f32;
+        run_cdparanoia(&info.drive, *track, &wav, dur, |done, speed| {
+            last_speed = speed;
+            if last_sent.elapsed() >= Duration::from_millis(150) {
+                let frac = ((done_before + done) / total_secs).clamp(0.0, 0.999);
+                let _ = tx.send(Msg::CdProgress {
+                    track: i + 1,
+                    total,
+                    frac,
+                    speed,
+                    text: format!("Ripping {} / {}: {}", i + 1, total, shown),
+                });
+                last_sent = Instant::now();
+            }
+        })?;
+        done_before += dur;
+        let _ = tx.send(Msg::CdProgress {
+            track: i + 1,
+            total,
+            frac: (done_before / total_secs).clamp(0.0, 1.0),
+            speed: last_speed,
+            text: format!("Encoding {} / {}: {}", i + 1, total, shown),
+        });
 
         let fname = format!("{:02} - {}.flac", track, sanitize_win(&shown));
         let out = dir.join(fname);
@@ -475,6 +577,132 @@ pub fn rip(info: &CdInfo, tx: &Sender<Msg>) -> Result<(PathBuf, Vec<String>, Str
     Ok((dir, files, label))
 }
 
+/// Extract the disc into a temporary playback cache without writing anything
+/// to the music library. The cache is keyed by disc ID, so pressing PLAY CD a
+/// second time starts immediately. Returns (folder, files, label).
+pub fn extract_for_playback(
+    info: &CdInfo,
+    tx: &Sender<Msg>,
+) -> Result<(PathBuf, Vec<String>, String), String> {
+    let total = info.tracks.len();
+    let dir = work_dir().join("cdplay").join(&info.disc_id);
+
+    // Reuse a complete cache from an earlier play. This avoids the metadata
+    // lookup and any disc access when the same CD is loaded again.
+    if let Some((files, label)) = read_play_cache(&dir, total) {
+        let _ = tx.send(Msg::CdProgress {
+            track: total,
+            total,
+            frac: 1.0,
+            speed: 0.0,
+            text: "CD ready".into(),
+        });
+        return Ok((dir, files, label));
+    }
+
+    let _ = tx.send(Msg::CdProgress {
+        track: 0,
+        total,
+        frac: 0.0,
+        speed: 0.0,
+        text: "Looking up CD metadata...".into(),
+    });
+    let mut meta = lookup_metadata(info).unwrap_or_default();
+    if meta.titles.len() < total {
+        meta.titles.resize(total, String::new());
+    }
+    let artist = if meta.artist.trim().is_empty() { "Unknown Artist".to_string() } else { meta.artist.clone() };
+    let album = if meta.album.trim().is_empty() { "Unknown Album".to_string() } else { meta.album.clone() };
+    let label = if meta.artist.trim().is_empty() && meta.album.trim().is_empty() {
+        format!("Audio CD {}", info.disc_id)
+    } else {
+        format!("{} - {}", artist, album)
+    };
+
+    // Keep only the current disc in the temporary playback cache.
+    if let Some(parent) = dir.parent() {
+        if let Ok(rd) = std::fs::read_dir(parent) {
+            for e in rd.flatten() {
+                if e.path() != dir {
+                    let _ = std::fs::remove_dir_all(e.path());
+                }
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {}", dir.display(), e))?;
+
+    let durations = track_durations(info);
+    let total_secs = durations.iter().sum::<f32>().max(1.0);
+    let mut done_before = 0.0f32;
+    let mut files = Vec::new();
+    for (i, track) in info.tracks.iter().enumerate() {
+        let title = meta.titles.get(i).cloned().unwrap_or_default();
+        let shown = if title.trim().is_empty() { format!("Track {:02}", track) } else { title };
+        let wav = dir.join(format!("{:02} - {}.wav", track, sanitize_win(&shown)));
+        let _ = tx.send(Msg::CdProgress {
+            track: i + 1,
+            total,
+            frac: (done_before / total_secs).clamp(0.0, 0.999),
+            speed: 0.0,
+            text: format!("Loading CD {} / {}: {}", i + 1, total, shown),
+        });
+        let dur = durations.get(i).copied().unwrap_or(0.0);
+        let mut last_sent = Instant::now();
+        run_cdparanoia(&info.drive, *track, &wav, dur, |done, speed| {
+            if last_sent.elapsed() >= Duration::from_millis(150) {
+                let frac = ((done_before + done) / total_secs).clamp(0.0, 0.999);
+                let _ = tx.send(Msg::CdProgress {
+                    track: i + 1,
+                    total,
+                    frac,
+                    speed,
+                    text: format!("Loading CD {} / {}: {}", i + 1, total, shown),
+                });
+                last_sent = Instant::now();
+            }
+        })?;
+        done_before += dur;
+        files.push(wav.to_string_lossy().to_string());
+    }
+    let _ = std::fs::write(dir.join(".label"), &label);
+    let _ = tx.send(Msg::CdProgress {
+        track: total,
+        total,
+        frac: 1.0,
+        speed: 0.0,
+        text: "CD ready".into(),
+    });
+    Ok((dir, files, label))
+}
+
+fn read_play_cache(dir: &Path, expected: usize) -> Option<(Vec<String>, String)> {
+    let label = std::fs::read_to_string(dir.join(".label")).ok()?;
+    let mut files: Vec<String> = std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .filter_map(|e| {
+            let p = e.path();
+            let is_wav = p
+                .extension()
+                .and_then(|x| x.to_str())
+                .map(|x| x.eq_ignore_ascii_case("wav"))
+                .unwrap_or(false);
+            if is_wav {
+                Some(p.to_string_lossy().to_string())
+            } else {
+                None
+            }
+        })
+        .collect();
+    files.sort();
+    if files.len() == expected {
+        Some((files, label.trim().to_string()))
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -520,6 +748,34 @@ mod tests {
     }
 
     #[test]
+    fn play_cache_requires_every_track() {
+        let dir = std::env::temp_dir().join(format!("mpdoom-cdtest-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(".label"), "Artist - Album").unwrap();
+        std::fs::write(dir.join("01 - One.wav"), b"x").unwrap();
+        assert!(read_play_cache(&dir, 2).is_none());
+        std::fs::write(dir.join("02 - Two.wav"), b"x").unwrap();
+        let (files, label) = read_play_cache(&dir, 2).unwrap();
+        assert_eq!(files.len(), 2);
+        assert_eq!(label, "Artist - Album");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn track_durations_follow_toc() {
+        let info = CdInfo {
+            drive: "/dev/sr0".into(),
+            tracks: vec![1, 2],
+            offsets: vec![150, 150 + 75 * 10],
+            leadout: 150 + 75 * 25,
+            disc_id: "test".into(),
+            total_secs: 25.0,
+        };
+        assert_eq!(track_durations(&info), vec![10.0, 15.0]);
+    }
+
+    #[test]
     fn disc_id_has_musicbrainz_shape() {
         let a = tracks(&[(1, 150), (2, 10000)]);
         let id = musicbrainz_id(1, 2, 20000, &a);
@@ -561,8 +817,8 @@ mod live_rip_tests {
         let (tx, rx) = std::sync::mpsc::channel();
         let handle = std::thread::spawn(move || rip(&info, &tx));
         while let Ok(msg) = rx.recv() {
-            if let Msg::CdProgress { track, total, text } = msg {
-                eprintln!("[{}/{}] {}", track, total, text);
+            if let Msg::CdProgress { track, total, frac, speed, text } = msg {
+                eprintln!("[{}/{}] {:.0}% {:.1}x {}", track, total, frac * 100.0, speed, text);
             }
         }
         let (dir, files, label) = handle.join().unwrap().expect("rip failed");

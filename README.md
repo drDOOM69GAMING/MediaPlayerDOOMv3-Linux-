@@ -1,6 +1,6 @@
 # MediaPlayerDOOM v3 for Linux
 
-![Version](https://img.shields.io/badge/version-3.2.37-blue)
+![Version](https://img.shields.io/badge/version-3.2.38-blue)
 ![Platform](https://img.shields.io/badge/platform-Linux%20x86__64-informational)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -40,6 +40,9 @@ This repository is the Linux port. It is tested on CachyOS and Arch with KDE Pla
 - Quality 1 to 10 controls bitrate, FLAC compression, or PCM and ALAC bit depth
 - Tags and embedded cover art are preserved where the container supports them
 - Physical audio CDs are detected automatically and ripped to lossless FLAC with MusicBrainz tags and cover art
+- CD ripping shows a live progress bar with percentage, read speed and ETA
+- PLAY CD loads the tray disc into the deck for playback without saving it to the library
+- CD playback always follows track order, with shuffle and star filters ignored
 - Per file progress with cancel and a hide option that keeps the conversion running
 
 ### EQ, visualizer and deck

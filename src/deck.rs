@@ -84,18 +84,22 @@ impl PlayerApp {
             }
             return;
         }
+        // Leaving the CD deck does not eject the disc. Keep its tracks aside
+        // and put the library playlist back so the other decks keep working.
+        if self.deck_mode == DeckMode::Disc && m != DeckMode::Disc && self.disc_in {
+            self.disc_playlist = self.state.playlist.clone();
+            self.state.playlist = if !self.disc_saved.is_empty() {
+                self.disc_saved.clone()
+            } else {
+                self.all_songs_ordered()
+            };
+            self.playing_pl_idx = None;
+            self.rebuild_display_cache();
+            self.save_settings();
+        }
         if m == DeckMode::Tape {
-            let from_disc = self.deck_mode == DeckMode::Disc;
             self.stop_radio();
             self.deck_mode = m;
-            if from_disc {
-                self.disc_in = false;
-                self.disc_label = String::new();
-                self.state.playlist = self.all_songs_ordered();
-                self.playing_pl_idx = None;
-                self.rebuild_display_cache();
-                self.save_settings();
-            }
             if let Some((path, pos)) = self.deck_resume.take() {
                 if crate::cue::exists(&path) {
                     self.resume_tape(&path, pos);
@@ -116,6 +120,13 @@ impl PlayerApp {
         // spectrum/speakers froze at their last frame.
         self.stop_music();
         self.deck_mode = m;
+        // Returning to the CD deck restores the disc that was left in it.
+        if m == DeckMode::Disc && self.disc_in && !self.disc_playlist.is_empty() {
+            self.disc_saved = self.state.playlist.clone();
+            self.state.playlist = self.disc_playlist.clone();
+            self.playing_pl_idx = None;
+            self.rebuild_display_cache();
+        }
     }
 
     pub(crate) fn radio_band_range(&self) -> (f32, f32) {
@@ -313,7 +324,10 @@ impl PlayerApp {
                 return;
             }
             self.last_cd_dir = Some(dir.to_string_lossy().to_string());
-            self.disc_saved = self.state.playlist.clone();
+            if !self.disc_in {
+                self.disc_saved = self.state.playlist.clone();
+            }
+            self.disc_playlist = files.clone();
             self.state.playlist = files;
             self.rebuild_display_cache();
             self.disc_in = true;
@@ -337,9 +351,12 @@ impl PlayerApp {
             return;
         }
         self.disc_in = false;
-        if !self.disc_saved.is_empty() {
-            self.state.playlist = self.disc_saved.clone();
-        }
+        self.disc_playlist.clear();
+        self.state.playlist = if !self.disc_saved.is_empty() {
+            self.disc_saved.clone()
+        } else {
+            self.all_songs_ordered()
+        };
         self.state.current_song = None;
         self.playing_pl_idx = None;
         self.stop_music();
@@ -1051,7 +1068,11 @@ impl PlayerApp {
             self.set_error("No audio CD detected in the tray");
             return;
         };
+        self.clear_cd_progress();
         self.cd_ripping = true;
+        self.cd_rip_frac = 0.0;
+        self.cd_rip_total = info.tracks.len();
+        self.cd_rip_text = "Preparing CD rip...".to_string();
         self.set_status(format!("Ripping CD ({} tracks) to FLAC...", info.tracks.len()));
         let tx = self.msg_tx.clone();
         std::thread::spawn(move || match crate::cd::rip(&info, &tx) {
@@ -1068,11 +1089,42 @@ impl PlayerApp {
         });
     }
 
+    /// Play the audio CD currently in the tray without ripping it into the
+    /// library. Tracks are extracted to a temporary cache and played in order.
+    pub(crate) fn start_cd_play(&mut self) {
+        if self.cd_ripping {
+            return;
+        }
+        let Some(info) = self.cd_physical.clone() else {
+            self.set_error("No audio CD detected in the tray");
+            return;
+        };
+        self.clear_cd_progress();
+        self.cd_ripping = true;
+        self.cd_rip_frac = 0.0;
+        self.cd_rip_total = info.tracks.len();
+        self.cd_rip_text = "Preparing CD playback...".to_string();
+        self.set_status(format!("Loading CD ({} tracks) for playback...", info.tracks.len()));
+        let tx = self.msg_tx.clone();
+        std::thread::spawn(move || match crate::cd::extract_for_playback(&info, &tx) {
+            Ok((dir, files, label)) => {
+                let _ = tx.send(Msg::CdPlayReady {
+                    folder: dir.to_string_lossy().to_string(),
+                    files,
+                    label,
+                });
+            }
+            Err(e) => {
+                let _ = tx.send(Msg::CdPlayFail(e));
+            }
+        });
+    }
+
     pub(crate) fn eject_cd_tray(&mut self) {
         let Some(info) = self.cd_physical.clone() else { return };
         let _ = crate::cd::eject(&info.drive);
         self.cd_physical = None;
-        self.cd_ripping = false;
+        self.clear_cd_progress();
         self.set_status("CD tray ejected");
     }
 }
