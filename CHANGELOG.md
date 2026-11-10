@@ -16,10 +16,8 @@
 - The metadata repair pass only touches entries with missing, placeholder or leading-track-number values.
 - When a cached playlist exists, the library scan starts 30 seconds after launch so the window and first song do not compete with a cold-drive walk.
 - Library scans run at lower CPU and I/O priority and yield to playback and the UI.
-- The next track is not pre-opened until the current song has played for 5 seconds, so a cold drive is not forced to seek away from the song that is still starting.
-- The current song's live tag refresh is delayed by 3 seconds when cached tags are already available.
+- The first song after launch gets a 5-second quiet read window before the next track is pre-opened, so a cold drive is not forced to seek away from the song that is still starting. Later tracks pre-open immediately, so normal track changes stay seamless.
 - `MPDOOM_AV_LOG=1` now records startup phase timings.
-- The expanded sidebar shows the credit "Copyright Wayne aka drDOOM69GAMING".
 
 ## v3.2.39
 

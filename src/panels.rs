@@ -464,29 +464,6 @@ impl PlayerApp {
             }
             ui.add_space(4.0);
             self.draw_play_switch(ui, &th);
-            ui.add_space(4.0);
-            let pp = ui.painter().with_clip_rect(ui.clip_rect());
-                let panel_right = ui.max_rect().right();
-                let cy = ui.max_rect().center().y;
-                let free = panel_right - ui.min_rect().right();
-                if free > 40.0 {
-                    print_sideways(
-                        &pp,
-                        panel_right - 1.0,
-                        cy + 1.0,
-                        "Copyright Wayne aka drDOOM69GAMING",
-                        11.0,
-                        Color32::from_rgba_unmultiplied(255, 255, 255, 110),
-                    );
-                    print_sideways(
-                        &pp,
-                        panel_right - 7.0,
-                        cy,
-                        "Copyright Wayne aka drDOOM69GAMING",
-                        11.0,
-                        Color32::from_rgba_unmultiplied(255, 205, 120, 235),
-                    );
-                }
         });
     }
 
