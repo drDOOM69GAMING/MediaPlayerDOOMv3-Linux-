@@ -8,6 +8,15 @@
 - The image is staged beside the destination and published atomically; cancelling removes the partial image.
 - Full-disc backup with menus and extras is unchanged.
 
+## Startup
+
+- The cached playlist is no longer re-sorted at every launch.
+- The display cache is built once instead of twice.
+- The metadata repair pass only touches entries with missing, placeholder or leading-track-number values.
+- When a cached playlist exists, the library scan starts 10 seconds after launch so the window and first song do not compete with a cold-drive walk.
+- Library scans run at lower CPU and I/O priority and yield to playback and the UI.
+- `MPDOOM_AV_LOG=1` now records startup phase timings.
+
 ## v3.2.39
 
 - PLAY CD now streams each track directly from the optical drive with cdparanoia.

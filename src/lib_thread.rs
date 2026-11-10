@@ -18,6 +18,30 @@ use crate::pipe::spawn_video_audio;
 use crate::tools::*;
 use crate::types::*;
 use crate::util::*;
+
+/// A library walk is background maintenance. Lower its CPU and I/O priority
+/// so it cannot compete with the first paint, the startup auto-play, or the
+/// audio stream on a cold spinning disk. Linux only; other platforms keep the
+/// normal thread priority.
+#[cfg(target_os = "linux")]
+fn lower_scan_priority() {
+    unsafe {
+        let tid = libc::syscall(libc::SYS_gettid) as libc::id_t;
+        libc::setpriority(libc::PRIO_PROCESS, tid, 10);
+        // IOPRIO_WHO_PROCESS = 1, class best-effort = 2, level 7 (lowest)
+        let prio = (2 << 13) | 7;
+        libc::syscall(
+            libc::SYS_ioprio_set,
+            1 as libc::c_long,
+            tid as libc::c_long,
+            prio as libc::c_long,
+        );
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn lower_scan_priority() {}
+
 pub fn lib_loop(rx: Receiver<LibCmd>, tx: Sender<Msg>, clock: std::sync::Arc<std::sync::atomic::AtomicU64>) {
     let video_pause = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mut video_child: Option<Child> = None;
@@ -194,6 +218,7 @@ LibCmd::Scan(dir) => {
                 // finishes (the video player shows LOADING... the whole time).
                 let tx2 = tx.clone();
                 std::thread::spawn(move || {
+                    lower_scan_priority();
                     let files = collect_audio_report(&dir, &tx2);
                     let _ = tx2.send(Msg::DirScanned { dir, files });
                 });

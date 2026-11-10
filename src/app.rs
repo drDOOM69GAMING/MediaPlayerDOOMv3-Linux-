@@ -422,6 +422,8 @@ impl PlayerApp {
     }
 
     pub(crate) fn new(cc: &eframe::CreationContext<'_>, startup_files: Vec<String>, windowed: bool, startup_mode: Option<String>, startup_dvd: Option<String>, startup_bluray: Option<String>) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let t_startup = Instant::now();
+        av_log("startup: begin");
         #[cfg(target_os = "windows")]
         apply_taskbar_icon(cc);
         let ctx = cc.egui_ctx.clone();
@@ -466,7 +468,6 @@ impl PlayerApp {
                 state.volume = s.volume.clamp(0, 100);
                 state.current_song = s.last_played.filter(|p| crate::cue::exists(p));
                 state.playlist = s.playlist;
-                state.playlist.sort_by_cached_key(|p| song_sort_key(p));
                 if !s.theme.is_empty() { state.theme = s.theme; }
                 video_aspects = s.video_aspects;
                 video_aspect_default = s.video_aspect_default;
@@ -505,6 +506,11 @@ impl PlayerApp {
                 rating_filter = s.rating_filter.min(5);
             }
         }
+        av_log(&format!(
+            "startup: settings loaded in {}ms ({} playlist entries)",
+            t_startup.elapsed().as_millis(),
+            state.playlist.len()
+        ));
         // Upgrade from the old schema: ratings that predate the "manual" flag
         // were set by hand, so protect them from being overwritten. Only do
         // this once; on later launches manual_ratings is authoritative.
@@ -586,6 +592,21 @@ impl PlayerApp {
         // This also gives art/rating lookups usable artist/album values.
         let mut meta_cache_repaired = false;
         for (path, entry) in meta_cache_boot.iter_mut() {
+            // Most entries are already good. Repairing every one of 18k paths
+            // at launch cost time on a cold disk and rewrote cached values that
+            // did not need it. Only touch entries with a missing placeholder
+            // field or a leftover leading track number.
+            let needs_repair = entry.title.trim().is_empty()
+                || is_placeholder_meta(&entry.title)
+                || looks_like_track_number(&entry.title)
+                || strip_track_no(&entry.title).is_some()
+                || entry.artist.trim().is_empty()
+                || is_placeholder_meta(&entry.artist)
+                || entry.album.trim().is_empty()
+                || is_placeholder_meta(&entry.album);
+            if !needs_repair {
+                continue;
+            }
             let (t, a, al) = crate::library::repaired_meta(
                 path,
                 &entry.title,
@@ -635,8 +656,6 @@ impl PlayerApp {
             thread::spawn(move || crate::cd::monitor(tx));
         }
 
-        let display_cache: Vec<String> = state.playlist.iter().map(|p| make_display(p)).collect();
-
         let old_bands = data_dir().join("bands.json");
         if old_bands.exists() {
             let _ = std::fs::remove_file(&old_bands);
@@ -658,6 +677,12 @@ impl PlayerApp {
             let _ = std::fs::write(&art_sources_marker, "2");
         }
         let full_library: Vec<String> = state.playlist.clone();
+        av_log(&format!(
+            "startup: caches loaded in {}ms ({} bands, {} meta entries)",
+            t_startup.elapsed().as_millis(),
+            band_map.len(),
+            meta_cache_boot.len()
+        ));
 
         // tray-icon dynamically loads libappindicator on Linux. If the distro
         // package is missing the crate panics instead of returning Err, so a
@@ -704,7 +729,7 @@ impl PlayerApp {
             art_tex: None,
             art_state: 0,
             art_local_valid: false,
-            display_cache,
+            display_cache: Vec::new(),
             tag_names: HashMap::new(),
             auto_tag_budget: 400,
             tags_pending: HashSet::new(),
@@ -998,10 +1023,24 @@ video_ended: false,
         // search walks `Music` recursively on *every* logical drive, so paying
         // for that on each launch is what made startup take minutes before any
         // music played. A stale root is already filtered out during load.
+        let defer_scan = !app.state.playlist.is_empty();
         match app.music_root.clone() {
             Some(root) => {
                 av_log(&format!("startup: using remembered library root {}", root));
-                let _ = app.lib_tx.send(LibCmd::Scan(root));
+                if defer_scan {
+                    // The cached playlist is already on screen. Let the window
+                    // and startup auto-play touch the disk first; a cold-drive
+                    // scan would otherwise compete for the same few seconds.
+                    app.scanning = false;
+                    let tx = app.lib_tx.clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(Duration::from_secs(10));
+                        let _ = tx.send(LibCmd::Scan(root));
+                    });
+                    av_log("startup: library scan deferred by 10s");
+                } else {
+                    let _ = app.lib_tx.send(LibCmd::Scan(root));
+                }
             }
             None => {
                 av_log("startup: no remembered library root, searching drives");
@@ -1115,6 +1154,10 @@ video_ended: false,
                 }
             });
         }
+        av_log(&format!(
+            "startup: app constructed in {}ms",
+            t_startup.elapsed().as_millis()
+        ));
         Ok(app)
     }
 
@@ -1871,6 +1914,7 @@ video_ended: false,
             Msg::Error(s) => self.set_error(s),
             Msg::DirScanned { dir, files } => {
                 self.scanning = false;
+                av_log(&format!("scan: {} files complete", files.len()));
                 self.state.current_dir = Some(dir.clone());
                 let disc_loaded = self.disc_in && self.deck_mode == DeckMode::Disc;
                 // A refresh that finds exactly the same files should not rebuild
@@ -2878,6 +2922,8 @@ impl eframe::App for PlayerApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        static FIRST_FRAME: std::sync::Once = std::sync::Once::new();
+        FIRST_FRAME.call_once(|| av_log("startup: first UI frame"));
         let ctx = ui.ctx().clone();
         self.ctx = ctx.clone();
         if let Some(t) = self.auto_seek {

@@ -22,6 +22,7 @@ This repository is the Linux port. It is tested on CachyOS and Arch with KDE Pla
 - Lyrics lookup
 - Recording of the current track or radio stream
 - Uninterrupted auto-advance that keeps playing while the window is minimized or hidden
+- Fast startup from the cached library, with the background scan deferred and low-priority
 
 ### Metadata, art and ratings
 

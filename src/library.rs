@@ -338,7 +338,7 @@ pub fn merge_folder_meta(artist: &mut String, album: &mut String, path: &str) {
     }
 }
 
-fn looks_like_track_number(s: &str) -> bool {
+pub(crate) fn looks_like_track_number(s: &str) -> bool {
     let t = s.trim().to_ascii_lowercase();
     let t = t.strip_prefix("track").unwrap_or(&t).trim();
     !t.is_empty()
