@@ -200,6 +200,37 @@ impl PlayerApp {
             ui.horizontal(|ui| {
                 ui.add_space(6.0);
                 ui.label(RichText::new(&self.status).color(th.fg).monospace().size(11.0));
+                if self.yt_pct > -1.0 {
+                    let (n, m) = self.yt_item_counter();
+                    let status = if !self.yt_speed.is_empty() {
+                        format!("{} ETA {}", self.yt_speed, self.yt_eta)
+                    } else if !self.yt_band_label.is_empty() {
+                        self.yt_band_label.clone()
+                    } else {
+                        "starting...".to_string()
+                    };
+                    ui.add(
+                        egui::ProgressBar::new(self.yt_bar.clamp(0.0, 1.0))
+                            .desired_width(190.0)
+                            .text(
+                                RichText::new(format!(
+                                    "YT {:.0}%  {}",
+                                    self.yt_bar * 100.0,
+                                    status
+                                ))
+                                .color(Color32::from_gray(225))
+                                .monospace()
+                                .size(9.0),
+                            )
+                            .fill(Color32::from_rgb(28, 224, 255)),
+                    );
+                    ui.label(
+                        RichText::new(format!("{}/{}", n, m))
+                            .color(Color32::from_gray(150))
+                            .monospace()
+                            .size(9.0),
+                    );
+                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if retro_btn(ui, "Exit", Color32::from_rgb(255, 110, 110), th.btn_bg).clicked() {
                         let c = self.ctx.clone();
@@ -1220,8 +1251,29 @@ impl PlayerApp {
             ui.horizontal_wrapped(|ui| {
                 if retro_btn(ui, &format!("Theme: {}", self.state.theme), th.playing_fg, th.btn_bg).clicked() { self.cycle_theme(); }
                 if retro_btn(ui, &format!("EQ {}", if self.eq_on { self.eq_name() } else { "off" }), if self.eq_on { th.playing_fg } else { th.btn_fg }, th.btn_bg).clicked() { self.eq_toggle(); }
-                if retro_btn(ui, "◀ EQ", th.btn_fg, th.btn_bg).clicked() { self.cycle_eq_back(); }
-                if retro_btn(ui, "EQ ▶", th.btn_fg, th.btn_bg).clicked() { self.cycle_eq(); }
+                ui.label(RichText::new("CURVE:").color(th.fg).monospace().size(10.0));
+                let mut pick: Option<&'static str> = None;
+                egui::ComboBox::from_id_salt("eq_curve_pick")
+                    .selected_text(if self.eq_custom.is_some() { "Custom" } else { self.eq_name() })
+                    .width(150.0)
+                    .show_ui(ui, |ui| {
+                        for preset in EQ_PRESETS.iter() {
+                            let selected = self.eq_custom.is_none() && preset.name == self.state.eq_preset;
+                            if ui
+                                .selectable_label(selected, preset.name)
+                                .on_hover_text(preset.description)
+                                .clicked()
+                            {
+                                pick = Some(preset.name);
+                            }
+                        }
+                    });
+                if let Some(name) = pick {
+                    self.eq_select(name);
+                }
+                if retro_btn(ui, "◀", th.btn_fg, th.btn_bg).clicked() { self.cycle_eq_back(); }
+                if retro_btn(ui, "▶", th.btn_fg, th.btn_bg).clicked() { self.cycle_eq(); }
+                if retro_btn(ui, "FLAT", th.btn_fg, th.btn_bg).on_hover_text("Reset to the reference curve").clicked() { self.eq_select("Flat"); }
                 ui.separator();
                 ui.label(RichText::new("Sleep:").color(th.fg).monospace().size(11.0));
                 ui.add(egui::TextEdit::singleline(&mut self.sleep_input).desired_width(46.0).font(egui::TextStyle::Monospace).text_color(th.playing_fg));
@@ -1240,20 +1292,48 @@ impl PlayerApp {
                     ui.label(RichText::new("EQ CURVE:").color(th.fg).monospace().size(11.0));
                     let mut pts = vec![(0.0f32, 0.0f32); 128];
                     eq_curve_db(&gains, 44100.0, &mut pts);
-                    let (graph_rect, _) = ui.allocate_exact_size(egui::vec2(460.0, 92.0), egui::Sense::hover());
+                    let (graph_rect, _) = ui.allocate_exact_size(egui::vec2(480.0, 84.0), egui::Sense::hover());
                     if ui.is_rect_visible(graph_rect) {
                         let p = ui.painter().with_clip_rect(graph_rect);
                         p.rect_filled(graph_rect, 3.0, Color32::from_rgb(6, 8, 10));
                         p.rect_stroke(graph_rect, 3.0, egui::Stroke::new(1.0, darken(th.accent, 0.55)), egui::StrokeKind::Inside);
                         let x_for = |f: f32| graph_rect.left() + (f.log10() - 20.0f32.log10()) / (20000.0f32.log10() - 20.0f32.log10()) * graph_rect.width();
                         let y_for = |db: f32| graph_rect.center().y - db / 18.0 * (graph_rect.height() * 0.86 / 2.0);
-                        p.hline(graph_rect.left() + 4.0..=graph_rect.right() - 4.0, graph_rect.center().y, egui::Stroke::new(1.0, Color32::from_gray(42)));
+                        let line_col = if gains.iter().all(|&g| g.abs() < 0.5) { th.btn_fg } else { th.accent };
+                        // Fill under the curve with thin translucent columns so
+                        // the response reads at a glance without drawing a
+                        // concave polygon.
+                        for &(f, db) in pts.iter() {
+                            if db.abs() < 0.15 {
+                                continue;
+                            }
+                            let x = x_for(f);
+                            let y = y_for(db);
+                            p.line_segment(
+                                [egui::pos2(x, graph_rect.center().y), egui::pos2(x, y)],
+                                egui::Stroke::new(2.2, line_col.linear_multiply(0.06)),
+                            );
+                        }
+                        for db in [-12.0f32, -6.0, 0.0, 6.0, 12.0] {
+                            let y = y_for(db);
+                            p.hline(
+                                graph_rect.left() + 4.0..=graph_rect.right() - 4.0,
+                                y,
+                                egui::Stroke::new(1.0, if db == 0.0 { Color32::from_gray(62) } else { Color32::from_gray(30) }),
+                            );
+                            p.text(
+                                egui::pos2(graph_rect.right() - 5.0, y),
+                                egui::Align2::RIGHT_CENTER,
+                                format!("{:+}", db as i32),
+                                egui::FontId::monospace(7.0),
+                                Color32::from_gray(92),
+                            );
+                        }
                         for &f0 in EQ_BANDS.iter() {
                             let x = x_for(f0 as f32);
-                            p.line_segment([egui::pos2(x, graph_rect.top() + 4.0), egui::pos2(x, graph_rect.bottom() - 4.0)], egui::Stroke::new(1.0, Color32::from_gray(28)));
+                            p.line_segment([egui::pos2(x, graph_rect.top() + 4.0), egui::pos2(x, graph_rect.bottom() - 4.0)], egui::Stroke::new(1.0, Color32::from_gray(26)));
                         }
                         let mut prev: Option<egui::Pos2> = None;
-                        let line_col = if gains.iter().all(|&g| g.abs() < 0.5) { th.btn_fg } else { th.accent };
                         for &(f, db) in pts.iter() {
                             let cpt = egui::pos2(x_for(f), y_for(db));
                             if let Some(pp) = prev {
@@ -1265,17 +1345,34 @@ impl PlayerApp {
                             let g = gains[i];
                             let cpt = egui::pos2(x_for(f0 as f32), y_for(g as f32));
                             p.circle_filled(cpt, 3.0, if g.abs() >= 0.5 { th.playing_fg } else { Color32::from_gray(70) });
+                            if g.abs() >= 0.1 {
+                                p.text(
+                                    egui::pos2(cpt.x, cpt.y - 5.0),
+                                    egui::Align2::CENTER_BOTTOM,
+                                    format!("{:+}", g),
+                                    egui::FontId::monospace(7.0),
+                                    Color32::from_gray(135),
+                                );
+                            }
                             let ftext = if f0 >= 1000.0 { format!("{:.0}k", f0 / 1000.0) } else { format!("{}", f0 as i32) };
                             p.text(egui::pos2(x_for(f0 as f32), graph_rect.bottom() - 8.0), egui::Align2::CENTER_TOP, ftext, egui::FontId::monospace(8.0), Color32::from_gray(110));
                         }
-                        p.text(egui::pos2(graph_rect.left() + 6.0, graph_rect.top() + 8.0), egui::Align2::LEFT_TOP, format!("{} dB · preamp {:.0}%", self.eq_name(), preamp * 100.0), egui::FontId::monospace(9.0), th.playing_fg);
+                        p.text(egui::pos2(graph_rect.left() + 6.0, graph_rect.top() + 8.0), egui::Align2::LEFT_TOP, format!("{} · preamp {:.0}% · 1-octave", self.eq_name(), preamp * 100.0), egui::FontId::monospace(9.0), th.playing_fg);
                     }
                 });
+                ui.label(RichText::new(self.eq_desc()).color(Color32::from_gray(155)).monospace().size(9.0));
                 ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().slider_width = 70.0;
                     for i in 0..10 {
                         let mut g = gains[i];
                         ui.vertical(|ui| {
-                            let resp = ui.add(egui::Slider::new(&mut g, -12.0..=12.0).show_value(false).orientation(egui::SliderOrientation::Vertical).custom_formatter(|v, _| format!("{:+}", v as i32)));
+                            let resp = ui.add(
+                                egui::Slider::new(&mut g, -12.0..=12.0)
+                                    .step_by(0.5)
+                                    .show_value(false)
+                                    .orientation(egui::SliderOrientation::Vertical)
+                                    .custom_formatter(|v, _| format!("{:+}", v as i32)),
+                            );
                             if resp.changed() {
                                 self.eq_set(i, g);
                             }
@@ -2022,7 +2119,15 @@ impl PlayerApp {
                 ui.label(RichText::new("EXTRAS").color(acc).monospace().strong());
                 ui.label(RichText::new("Sleep Timer .......... Auto-close after time").color(dim).monospace());
                 ui.label(RichText::new("Look Up ............. Open song folder in explorer").color(dim).monospace());
-                ui.label(RichText::new("EQ .................. Equalizer presets").color(dim).monospace());
+                ui.label(RichText::new("EQ .................. 20 professional curves: Harman, Loudness, Broadcast, Podcast, Vocal Air, Acoustic, Jazz, Classical, Rock, Metal, Hip-Hop, EDM, De-Mud, Dialogue").color(dim).monospace());
+                ui.label(RichText::new("EQ bands ............ ISO 1-octave bands 31 Hz-16 kHz, Q 1.4; auto preamp + soft limiter; preset picker, arrow cycling and FLAT reset").color(dim).monospace());
+                ui.label(RichText::new("EQ graph ............ Real response, ±12 dB grid, band points, curve description and preamp percentage; all changes apply live").color(dim).monospace());
+                ui.add_space(6.0);
+
+                ui.label(RichText::new("YOUTUBE DOWNLOAD").color(acc).monospace().strong());
+                ui.label(RichText::new("Progress ............ Live bar in the YT row, download queue and bottom status bar: percentage, stage, speed, ETA and item count").color(dim).monospace());
+                ui.label(RichText::new("Stages .............. lookup -> download -> mp3 transcode/tagging -> save; the bar never jumps to 100% before the file is complete").color(dim).monospace());
+                ui.add_space(6.0);
                 ui.label(RichText::new("YouTube Download ..... Paste URL in status bar").color(dim).monospace());
                 ui.label(RichText::new("Convert .............. Convert a folder of music to another format").color(dim).monospace());
                 ui.label(RichText::new("Video Player ......... Double-click video in playlist").color(dim).monospace());

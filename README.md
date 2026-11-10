@@ -32,7 +32,7 @@ A retro DOOM-styled media player rendered in egui. Tape, CD, and Radio faces on 
 - **Playlist management**: drag-to-reorder, save/load JSON, playlist-only mode, sequential mode, per-CD directory ordering, and a live current-song highlight that scrolls to and marks whatever is playing
 - **System tray** + global hotkeys (media keys where the desktop allows them)
 - **Taskbar icon**: on Windows the app icon is applied directly on the real window handle at launch; on Linux the window/tray icon comes from the icon data embedded in the binary
-- **YouTube**: paste a URL or search term to download audio/video via yt-dlp
+- **YouTube**: paste a URL or search term to download audio/video via yt-dlp, with a live progress bar (percentage, stage, speed, ETA and item count) in the YT row, the download queue and the bottom status bar
 
 ## Requirements
 
@@ -181,8 +181,9 @@ Global media keys (Play/Pause, Next, Previous, Stop) and `Ctrl+Alt+M` / `Ctrl+Al
 
 ## Notes
 
-- The **AUTO preamp** in the EQ measures the boosted response and backs off the gain automatically so you never clip, even with a loud preset.
-- The EQ curve panel, preset cycling, band sliders, and the ON-OFF toggle all apply your changes live while music plays, with no restart and no temporary files.
+- The **EQ** uses standard ISO 1-octave bands (31 Hz-16 kHz, Q 1.4) and 20 curated curves modelled on the targets mix/master and broadcast teams use: Harman, Loudness, Broadcast, Podcast, Vocal Air, Acoustic, Jazz, Classical, Rock, Metal, Hip-Hop, EDM, Small Speakers, De-Mud, Dialogue and more.
+- The **AUTO preamp** measures the boosted response and backs off the gain automatically; 2% headroom on boosted curves plus a soft-knee limiter prevents hard clipping without dulling the sound. A flat curve stays bit-transparent.
+- The EQ curve graph shows the real response with ±12 dB grid lines, band points, preset description and preamp percentage. The preset picker, ◀/▶ cycling, FLAT reset, band sliders and ON-OFF toggle all apply live while music plays.
 - If you build from source on Windows and have `tools/ffmpeg.exe`, `tools/ffprobe.exe`, `tools/yt-dlp.exe` next to `Cargo.toml`, they are embedded into the exe by `build.rs` (that folder is gitignored). Without them the app falls back to downloading on first run.
 - On Linux the app resolves `ffmpeg`, `ffprobe`, `yt-dlp`, and `mkvmerge` from its own data folder first, then from `PATH`, so distro packages are used directly. Features that need a missing tool report a clear status instead of crashing.
 - Linux data/cache paths follow the XDG spec (`$XDG_DATA_HOME/mediaplayerofdoom`, normally `~/.local/share/mediaplayerofdoom`). Windows keeps the original `%APPDATA%\MediaPlayerOFDOOM` location, so existing libraries and settings are untouched.
@@ -202,6 +203,20 @@ This app is built on the work of some incredible open-source projects, and it wo
 - The **Rust** language and its crate ecosystem.
 
 Full details, license texts, and donation links are in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). If you can, consider donating to FFmpeg, yt-dlp, and MKVToolNix - they give this all away for free.
+
+## v3.2.33 changelog
+
+- **Professional EQ curves and DSP**
+  - Replaced the old uneven 10-band spacing with standard ISO 1-octave bands: 31, 62, 125, 250, 500, 1k, 2k, 4k, 8k and 16k Hz at Q 1.4
+  - Twenty curated curves modelled on mix/master and broadcast targets: Flat, Studio, Harman, Loudness, Broadcast, Podcast, Vocal Air, Acoustic, Jazz, Classical, Rock, Metal, Punk, Hip-Hop, EDM, Small Speakers, Bass Boost, Treble Boost, De-Mud and Dialogue
+  - Auto preamp now leaves 2% headroom on boosted curves while a flat curve stays bit-transparent
+  - Added a soft-knee output limiter, so heavy presets bend smoothly toward full scale instead of hard-clipping
+  - New preset picker with descriptions, FLAT reset, ±12 dB grid, filled response graph, per-band gain labels and preamp percentage
+- **YouTube download progress**
+  - The live progress bar now also appears in the bottom status bar, so it stays visible even when the YT row has scrolled away
+  - Shows percentage, current stage, speed, ETA and item counter for both single downloads and the download queue
+  - The queue window keeps its full-width bar with the active item name
+- Version bump to **v3.2.33**
 
 ## v3.2.32 changelog
 

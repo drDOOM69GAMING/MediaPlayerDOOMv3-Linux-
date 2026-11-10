@@ -446,6 +446,19 @@ impl PlayerApp {
                 eq_on = s.eq_on;
                 if !s.eq_preset.is_empty() { state.eq_preset = s.eq_preset; }
                 eq_custom = s.eq_custom;
+                // v3.2.33 replaced the old uneven presets with the ISO-band
+                // professional set. Map old saved names so a stale preset does
+                // not silently fall back to flat.
+                if !EQ_PRESETS.iter().any(|p| p.name == state.eq_preset) {
+                    state.eq_preset = match state.eq_preset.as_str() {
+                        "Heavy Metal" | "Death Metal" => "Metal",
+                        "Punk Rock" => "Punk",
+                        "Pop" => "Loudness",
+                        "Vocal" => "Vocal Air",
+                        _ => "Flat",
+                    }
+                    .to_string();
+                }
                 ratings = s.ratings;
                 manual_ratings = s.manual_ratings;
                 ratings_schema = s.ratings_schema;
@@ -1545,7 +1558,32 @@ video_ended: false,
     }
 
     pub(crate) fn eq_name(&self) -> &str {
-        if self.eq_custom.is_some() { "Custom" } else { self.state.eq_preset.as_str() }
+        if self.eq_custom.is_some() {
+            "Custom"
+        } else if EQ_PRESETS.iter().any(|p| p.name == self.state.eq_preset) {
+            self.state.eq_preset.as_str()
+        } else {
+            "Flat"
+        }
+    }
+
+    pub(crate) fn eq_desc(&self) -> &'static str {
+        if self.eq_custom.is_some() {
+            return "Custom curve: your own band gains";
+        }
+        EQ_PRESETS
+            .iter()
+            .find(|p| p.name == self.state.eq_preset)
+            .map(|p| p.description)
+            .unwrap_or("")
+    }
+
+    pub(crate) fn eq_select(&mut self, name: &str) {
+        self.state.eq_preset = name.to_string();
+        self.eq_custom = None;
+        self.apply_eq_live();
+        self.save_settings();
+        self.set_status(format!("EQ: {}", name));
     }
 
     pub(crate) fn drain_msg(&mut self) {
