@@ -112,6 +112,7 @@ pub enum Msg {
     CdProgress { track: usize, total: usize, frac: f32, speed: f32, text: String },
     CdDone { folder: String, files: Vec<String>, label: String },
     CdMetaReady { disc_id: String, artist: String, album: String, titles: Vec<String> },
+    CdArtReady { disc_id: String, bytes: Option<Vec<u8>> },
     CdFail(String),
     DiscDumpProgress { done: u64, total: u64, text: String },
     DiscDumpDone(String),

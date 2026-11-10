@@ -42,7 +42,9 @@ This repository is the Linux port. It is tested on CachyOS and Arch with KDE Pla
 - Physical audio CDs are detected automatically and ripped to lossless FLAC with MusicBrainz tags and cover art
 - CD ripping shows a live progress bar with percentage, read speed and ETA
 - PLAY CD streams the tray disc directly through cdparanoia; nothing is ripped or written to disk
+- CD audio is buffered ahead for smooth playback, with album art and titles loading in the background
 - CD playback always follows track order, with shuffle and star filters ignored
+- CD mode shows only the loaded disc and hides the library band browser
 - Per file progress with cancel and a hide option that keeps the conversion running
 
 ### EQ, visualizer and deck

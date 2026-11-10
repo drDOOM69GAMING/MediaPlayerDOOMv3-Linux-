@@ -415,47 +415,51 @@ impl PlayerApp {
             });
             ui.add_space(4.0);
             ui.separator();
-            let mut bands: Vec<String> = self.band_map.keys().cloned().collect();
-            bands.sort_by_key(|b| b.to_lowercase());
-            let mut sel = self.band_sel.clone();
-            let mut all_clicked = false;
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("BANDS (A-Z)").color(darken(th.accent, 0.35)).monospace().size(8.0));
-                if retro_btn(ui, "All", if sel.is_empty() { th.playing_fg } else { th.btn_fg }, th.btn_bg).clicked() { sel = String::new(); all_clicked = true; }
-                if retro_btn(ui, "Clear Bands", th.btn_fg, th.btn_bg).clicked() {
-                    self.clear_bands();
-                    sel = String::new();
-                }
-            });
-            if bands.is_empty() {
-                ui.label(RichText::new("Add music to build the band list").color(Color32::from_gray(90)).monospace().size(9.0));
-            } else {
-                egui::ScrollArea::vertical()
-                    .id_salt("band_scroll")
-                    .auto_shrink([false, false])
-                    .max_height(260.0)
-                    .show(ui, |ui| {
-                        let mut last_key = String::new();
-                        for b in bands.iter() {
-                            let ch = b.chars().next().map(|c| c.to_ascii_uppercase()).unwrap_or('#');
-                            let key = if ch.is_ascii_alphabetic() { ch.to_string() } else { "#".to_string() };
-                            if key != last_key {
-                                last_key = key.clone();
-                                ui.vertical_centered(|ui| {
-                                    ui.label(RichText::new(&key).color(th.accent).monospace().strong().size(11.0));
-                                });
-                                ui.separator();
+            // A loaded disc is its own list. Hide the library band browser so
+            // the CD deck shows only the disc, not the whole music folder.
+            if !(self.deck_mode == DeckMode::Disc && self.disc_in) {
+                let mut bands: Vec<String> = self.band_map.keys().cloned().collect();
+                bands.sort_by_key(|b| b.to_lowercase());
+                let mut sel = self.band_sel.clone();
+                let mut all_clicked = false;
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("BANDS (A-Z)").color(darken(th.accent, 0.35)).monospace().size(8.0));
+                    if retro_btn(ui, "All", if sel.is_empty() { th.playing_fg } else { th.btn_fg }, th.btn_bg).clicked() { sel = String::new(); all_clicked = true; }
+                    if retro_btn(ui, "Clear Bands", th.btn_fg, th.btn_bg).clicked() {
+                        self.clear_bands();
+                        sel = String::new();
+                    }
+                });
+                if bands.is_empty() {
+                    ui.label(RichText::new("Add music to build the band list").color(Color32::from_gray(90)).monospace().size(9.0));
+                } else {
+                    egui::ScrollArea::vertical()
+                        .id_salt("band_scroll")
+                        .auto_shrink([false, false])
+                        .max_height(260.0)
+                        .show(ui, |ui| {
+                            let mut last_key = String::new();
+                            for b in bands.iter() {
+                                let ch = b.chars().next().map(|c| c.to_ascii_uppercase()).unwrap_or('#');
+                                let key = if ch.is_ascii_alphabetic() { ch.to_string() } else { "#".to_string() };
+                                if key != last_key {
+                                    last_key = key.clone();
+                                    ui.vertical_centered(|ui| {
+                                        ui.label(RichText::new(&key).color(th.accent).monospace().strong().size(11.0));
+                                    });
+                                    ui.separator();
+                                }
+                                let n = self.band_map.get(b).map(|v| v.len()).unwrap_or(0);
+                                let hit = sel == *b;
+                                let text = format!("{}  ({})", b, n);
+                                if ui.selectable_label(hit, RichText::new(text).color(if hit { th.playing_fg } else { th.fg }).monospace().size(10.0)).clicked() {
+                                    sel = b.clone();
+                                }
                             }
-                            let n = self.band_map.get(b).map(|v| v.len()).unwrap_or(0);
-                            let hit = sel == *b;
-                            let text = format!("{}  ({})", b, n);
-                            if ui.selectable_label(hit, RichText::new(text).color(if hit { th.playing_fg } else { th.fg }).monospace().size(10.0)).clicked() {
-                                sel = b.clone();
-                            }
-                        }
-                    });
-                if all_clicked || self.band_sel != sel {
-                    self.choose_band(if all_clicked { String::new() } else { sel });
+                        });
+                    if all_clicked || self.band_sel != sel {
+                        self.choose_band(if all_clicked { String::new() } else { sel });
+                    }
                 }
             }
             ui.add_space(4.0);
@@ -539,7 +543,7 @@ impl PlayerApp {
                             p.text(
                                 egui::pos2(slot.center().x, slot.max.y - 8.0),
                                 egui::Align2::CENTER_BOTTOM,
-                                format!("{} TRACKS", self.state.playlist.len()),
+                                format!("{} TRACKS", self.disc_playlist.len()),
                                 egui::FontId::monospace(9.0),
                                 Color32::from_gray(120),
                             );
@@ -557,7 +561,7 @@ impl PlayerApp {
                             if self.disc_in {
                                 ui.label(RichText::new(&self.disc_label).color(th.playing_fg).monospace().strong().size(14.0));
                                 ui.add_space(2.0);
-                                ui.label(RichText::new(format!("{} TRACKS  •  CD", self.state.playlist.len())).color(Color32::from_gray(140)).monospace().size(10.0));
+                                ui.label(RichText::new(format!("{} TRACKS  •  CD", self.disc_playlist.len())).color(Color32::from_gray(140)).monospace().size(10.0));
                                 let now = self.state.current_song.clone().map(|s| stem(&s)).unwrap_or_else(|| "--".to_string());
                                 ui.label(RichText::new(format!("♪ {}", now)).color(th.fg).monospace().size(11.0));
                                 ui.horizontal(|ui| {

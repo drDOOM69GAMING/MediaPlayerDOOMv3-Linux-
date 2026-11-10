@@ -333,6 +333,7 @@ impl PlayerApp {
             self.cd_disc_id.clear();
             self.cd_artist.clear();
             self.cd_album.clear();
+            self.cd_art_loaded = false;
             self.cd_titles.clear();
             self.cd_display.clear();
             self.disc_playlist = files.clone();
@@ -363,6 +364,7 @@ impl PlayerApp {
         self.cd_disc_id.clear();
         self.cd_artist.clear();
         self.cd_album.clear();
+        self.cd_art_loaded = false;
         self.cd_titles.clear();
         self.cd_display.clear();
         self.state.playlist = if !self.disc_saved.is_empty() {
@@ -1151,6 +1153,7 @@ impl PlayerApp {
         self.cd_disc_id = info.disc_id.clone();
         self.cd_artist.clear();
         self.cd_album.clear();
+        self.cd_art_loaded = false;
         self.cd_titles = titles;
         self.cd_display = displays;
         self.disc_playlist = paths.clone();
@@ -1173,11 +1176,17 @@ impl PlayerApp {
         let disc_id = info.disc_id.clone();
         std::thread::spawn(move || {
             if let Some(meta) = crate::cd::lookup_metadata(&info) {
+                let art = crate::cd::fetch_cover(&meta);
+                let art_id = disc_id.clone();
                 let _ = tx.send(Msg::CdMetaReady {
                     disc_id,
                     artist: meta.artist,
                     album: meta.album,
                     titles: meta.titles,
+                });
+                let _ = tx.send(Msg::CdArtReady {
+                    disc_id: art_id,
+                    bytes: art,
                 });
             }
         });
@@ -1205,6 +1214,7 @@ impl PlayerApp {
             self.cd_artist.clear();
             self.cd_album.clear();
             self.cd_disc_id.clear();
+            self.cd_art_loaded = false;
             self.state.playlist = if !self.disc_saved.is_empty() {
                 self.disc_saved.clone()
             } else {

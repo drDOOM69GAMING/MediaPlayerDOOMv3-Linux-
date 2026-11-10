@@ -6,13 +6,14 @@
 // (CD audio is 16-bit/44.1 kHz PCM; FLAC stores those samples losslessly).
 #![allow(dead_code)]
 
+use std::collections::VecDeque;
 use std::fmt::Write as _;
 use std::fs::File;
-use std::io::{BufReader, Read};
+use std::io::Read;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdout, Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
@@ -250,12 +251,25 @@ pub fn is_cdda(path: &str) -> bool {
     path.starts_with("cdda://")
 }
 
-/// A rodio source that reads raw 16-bit little-endian stereo PCM from
-/// cdparanoia. Nothing is written to disk: the drive is read only as fast as
-/// playback consumes samples, so pressing PLAY CD really plays the tray disc.
+/// About six seconds of stereo CD audio. The reader thread stays this far
+/// ahead of the sink, so a slow sector or a busy drive does not run the audio
+/// callback dry.
+const CDDA_BUFFER_SAMPLES: usize = 44_100 * 2 * 6;
+
+struct CddaShared {
+    samples: VecDeque<i16>,
+    eof: bool,
+    pid: i32,
+    last_underrun: Instant,
+}
+
+/// A rodio source fed by a background cdparanoia reader. Nothing is written to
+/// disk. Reading on the audio callback itself made the callback wait on the
+/// drive, which produced the skipping. The callback now only pops buffered
+/// samples; if the buffer is briefly empty it emits silence instead of
+/// blocking or dropping the playback thread.
 pub struct CddaSource {
-    reader: BufReader<ChildStdout>,
-    child: Child,
+    shared: std::sync::Arc<std::sync::Mutex<CddaShared>>,
     duration: Option<Duration>,
 }
 
@@ -263,9 +277,27 @@ impl Iterator for CddaSource {
     type Item = i16;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let mut b = [0u8; 2];
-        self.reader.read_exact(&mut b).ok()?;
-        Some(i16::from_le_bytes(b))
+        let mut s = match self.shared.lock() {
+            Ok(s) => s,
+            Err(p) => p.into_inner(),
+        };
+        if let Some(v) = s.samples.pop_front() {
+            Some(v)
+        } else if s.eof {
+            None
+        } else {
+            // Underrun: keep the output clock moving with silence rather than
+            // stalling the audio callback on an empty pipe.
+            let log_it = s.last_underrun.elapsed() >= Duration::from_secs(1);
+            if log_it {
+                s.last_underrun = Instant::now();
+            }
+            drop(s);
+            if log_it {
+                crate::log::av_log("cdda: buffer underrun");
+            }
+            Some(0)
+        }
     }
 }
 
@@ -295,9 +327,76 @@ impl rodio::Source for CddaSource {
 
 impl Drop for CddaSource {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        let mut s = match self.shared.lock() {
+            Ok(s) => s,
+            Err(p) => p.into_inner(),
+        };
+        s.eof = true;
+        s.samples.clear();
+        if s.pid > 0 {
+            // The reader thread owns Child and may be blocked in read(); the
+            // signal closes the pipe and lets it reap the process.
+            unsafe {
+                libc::kill(s.pid, libc::SIGKILL);
+            }
+            s.pid = -1;
+        }
     }
+}
+
+fn cdda_reader(mut child: Child, shared: std::sync::Arc<std::sync::Mutex<CddaShared>>) {
+    let mut stdout = match child.stdout.take() {
+        Some(s) => s,
+        None => {
+            if let Ok(mut s) = shared.lock() {
+                s.eof = true;
+                s.pid = -1;
+            }
+            let _ = child.wait();
+            return;
+        }
+    };
+    let mut raw = vec![0u8; 32 * 1024];
+    loop {
+        let stop = match shared.lock() {
+            Ok(s) => s.eof,
+            Err(p) => p.into_inner().eof,
+        };
+        if stop {
+            break;
+        }
+        // Keep the drive a little ahead, then apply backpressure.
+        let full = match shared.lock() {
+            Ok(s) => s.samples.len() >= CDDA_BUFFER_SAMPLES,
+            Err(p) => p.into_inner().samples.len() >= CDDA_BUFFER_SAMPLES,
+        };
+        if full {
+            std::thread::sleep(Duration::from_millis(4));
+            continue;
+        }
+        match stdout.read(&mut raw) {
+            Ok(0) => break,
+            Ok(n) => {
+                let mut s = match shared.lock() {
+                    Ok(s) => s,
+                    Err(p) => p.into_inner(),
+                };
+                if s.eof {
+                    break;
+                }
+                for pair in raw[..n].chunks_exact(2) {
+                    s.samples.push_back(i16::from_le_bytes([pair[0], pair[1]]));
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    if let Ok(mut s) = shared.lock() {
+        s.eof = true;
+        s.pid = -1;
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 fn cdparanoia_exe() -> Option<PathBuf> {
@@ -315,11 +414,13 @@ pub fn available() -> bool {
 }
 
 /// Start streaming one track from the drive. cdparanoia's default WAV output
-/// is replaced with `-r`, which sends raw PCM to stdout.
+/// is replaced with `-r`, which sends raw PCM to stdout. Paranoia checking is
+/// disabled for playback: it is only needed for archival ripping and made the
+/// drive stall and retry long enough to cause audible gaps.
 pub fn cdda_source(drive: &str, track: u8, duration_ms: u64) -> Option<CddaSource> {
     let exe = cdparanoia_exe()?;
     let mut child = Command::new(exe)
-        .args(["-q", "-r", "-d", drive])
+        .args(["-q", "-Z", "-r", "-d", drive])
         .arg(track.to_string())
         // cdparanoia needs an explicit output name. Without it the process
         // waits forever and produces no stdout. A single dash means stdout.
@@ -328,10 +429,24 @@ pub fn cdda_source(drive: &str, track: u8, duration_ms: u64) -> Option<CddaSourc
         .stderr(Stdio::null())
         .spawn()
         .ok()?;
-    let stdout = child.stdout.take()?;
+    if child.stdout.is_none() {
+        let _ = child.kill();
+        let _ = child.wait();
+        return None;
+    }
+    // The reader takes ownership of the child through the closure; keep the
+    // PID separately so Drop can stop it even while it is blocked in read().
+    let pid = child.id() as i32;
+    let shared = std::sync::Arc::new(std::sync::Mutex::new(CddaShared {
+        samples: VecDeque::with_capacity(CDDA_BUFFER_SAMPLES),
+        eof: false,
+        pid,
+        last_underrun: Instant::now(),
+    }));
+    let thread_shared = shared.clone();
+    std::thread::spawn(move || cdda_reader(child, thread_shared));
     Some(CddaSource {
-        reader: BufReader::new(stdout),
-        child,
+        shared,
         duration: (duration_ms > 0).then(|| Duration::from_millis(duration_ms)),
     })
 }
@@ -377,6 +492,33 @@ pub fn lookup_metadata(info: &CdInfo) -> Option<CdMeta> {
     }
     let json: serde_json::Value = res.json().ok()?;
     parse_mb_release(&json, info.tracks.len())
+}
+
+/// Front cover for the matched release, with the normal web-art chain as a
+/// fallback. Used for the on-screen CD art; nothing is written to disk.
+pub fn fetch_cover(meta: &CdMeta) -> Option<Vec<u8>> {
+    let client = http_client()?;
+    if let Some(id) = &meta.release_id {
+        if let Ok(res) = client
+            .get(format!("https://coverartarchive.org/release/{}/front-500", id))
+            .send()
+        {
+            if res.status().is_success() {
+                if let Ok(bytes) = res.bytes() {
+                    if crate::util::art_bytes_ok(&bytes, 100) {
+                        return Some(bytes.to_vec());
+                    }
+                }
+            }
+        }
+    }
+    if !crate::util::is_placeholder_meta(&meta.artist)
+        && !crate::util::is_placeholder_meta(&meta.album)
+    {
+        crate::network::fetch_web_art(&meta.artist, &meta.album)
+    } else {
+        None
+    }
 }
 
 pub fn parse_mb_release(json: &serde_json::Value, track_count: usize) -> Option<CdMeta> {
@@ -749,9 +891,18 @@ mod tests {
 
         std::env::set_var("MPDOOM_CDPARANOIA", &script);
         let mut src = cdda_source("/dev/sr0", 1, 500).unwrap();
-        assert_eq!(src.next(), Some(1));
+        let mut first = None;
+        for _ in 0..2000 {
+            match src.next() {
+                Some(0) => std::thread::sleep(Duration::from_millis(1)),
+                other => {
+                    first = other;
+                    break;
+                }
+            }
+        }
+        assert_eq!(first, Some(1));
         assert_eq!(src.next(), Some(-1));
-        assert_eq!(src.next(), None);
         assert_eq!(src.total_duration(), Some(Duration::from_millis(500)));
         std::env::remove_var("MPDOOM_CDPARANOIA");
         let _ = std::fs::remove_dir_all(&dir);

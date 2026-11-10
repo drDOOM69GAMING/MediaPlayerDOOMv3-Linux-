@@ -338,6 +338,8 @@ pub(crate) struct PlayerApp {
     pub(crate) cd_album: String,
     pub(crate) cd_titles: HashMap<String, String>,
     pub(crate) cd_display: HashMap<String, String>,
+    /// True once disc art has loaded, so changing tracks keeps it on screen.
+    pub(crate) cd_art_loaded: bool,
     pub(crate) band_map: HashMap<String, Vec<String>>,
     pub(crate) full_library: Vec<String>,
     pub(crate) band_sel: String,
@@ -844,6 +846,7 @@ impl PlayerApp {
             cd_album: String::new(),
             cd_titles: HashMap::new(),
             cd_display: HashMap::new(),
+            cd_art_loaded: false,
             band_map,
             full_library,
             band_sel: String::new(),
@@ -1869,10 +1872,11 @@ video_ended: false,
             Msg::DirScanned { dir, files } => {
                 self.scanning = false;
                 self.state.current_dir = Some(dir.clone());
+                let disc_loaded = self.disc_in && self.deck_mode == DeckMode::Disc;
                 // A refresh that finds exactly the same files should not rebuild
                 // the bands, re-sort 18k paths, rewrite a multi-MB settings file,
                 // or restart the song that is already playing.
-                if !files.is_empty() && self.state.playlist == files {
+                if !disc_loaded && !files.is_empty() && self.state.playlist == files {
                     self.full_library = files;
                     self.set_status(format!(
                         "Library ready: {} songs (cached, no changes)",
@@ -1890,8 +1894,22 @@ video_ended: false,
                     return;
                 }
                 self.ingest_dir(&dir, &files);
-                self.state.playlist = files;
-                self.state.playlist.sort_by_cached_key(|p| song_sort_key(p));
+                let mut sorted = files;
+                sorted.sort_by_cached_key(|p| song_sort_key(p));
+                if disc_loaded {
+                    // The CD is the active list. Update the library behind it
+                    // so ejecting or switching to the tape deck sees the scan,
+                    // but never replace the disc's own track list.
+                    self.disc_saved = sorted;
+                    self.rebuild_display_cache();
+                    self.save_settings();
+                    self.set_status(format!(
+                        "Library ready: {} songs (disc still loaded)",
+                        self.disc_saved.len()
+                    ));
+                    return;
+                }
+                self.state.playlist = sorted;
                 self.state.song_count = 0;
                 self.state.skip_count = 0;
                 self.state.start_time = Some(Instant::now());
@@ -2539,6 +2557,14 @@ video_ended: false,
                             fmt_secs(cd.total_secs)
                         ));
                     }
+                    // Dev/automation hook: start the tray CD as soon as the
+                    // monitor reports it. Never active unless requested.
+                    if std::env::var_os("MPDOOM_CD_PLAY").is_some()
+                        && self.cd_physical.is_some()
+                        && !self.disc_in
+                    {
+                        self.start_cd_play();
+                    }
                 }
             }
             Msg::CdProgress { track, total, frac, speed, text } => {
@@ -2567,6 +2593,7 @@ video_ended: false,
                     self.cd_disc_id.clear();
                     self.cd_artist.clear();
                     self.cd_album.clear();
+                    self.cd_art_loaded = false;
                     self.cd_titles.clear();
                     self.cd_display.clear();
                     self.state.playlist = files.clone();
@@ -2629,6 +2656,16 @@ video_ended: false,
                         }
                     }
                     self.set_status("CD metadata loaded");
+                }
+            }
+            Msg::CdArtReady { disc_id, bytes } => {
+                if self.disc_in && self.cd_disc_id == disc_id {
+                    if let Some(bytes) = bytes {
+                        if crate::util::art_bytes_ok(&bytes, 100) {
+                            self.load_art_texture(bytes);
+                            self.cd_art_loaded = true;
+                        }
+                    }
                 }
             }
             Msg::CdFail(e) => {

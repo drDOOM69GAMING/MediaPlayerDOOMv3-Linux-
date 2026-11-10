@@ -5,8 +5,12 @@
 - PLAY CD now streams each track directly from the optical drive with cdparanoia.
 - Nothing is ripped, cached or written to disk when playing a CD from the tray.
 - CD tracks start from the drive, follow disc order and use the normal transport, tray controls and auto-advance.
+- CD audio is buffered a few seconds ahead and paranoia checking is disabled for playback, removing stutter and long drive stalls.
 - The deck shows a reading-from-drive status while the optical drive spins up.
-- CD artist, album and track titles load in the background without delaying playback.
+- CD artist, album, track titles and album art load in the background without delaying playback.
+- Album art stays visible while moving between tracks on the same disc.
+- The CD deck counts only the loaded disc and hides the library band browser while a disc is loaded.
+- A library scan no longer replaces the CD track list while a disc is loaded.
 - Ejecting the tray stops direct CD playback and restores the saved library.
 - Movie playback now uses a 60 Hz present loop instead of the 30 Hz music UI loop.
 - The video texture is reused for every frame instead of being recreated.

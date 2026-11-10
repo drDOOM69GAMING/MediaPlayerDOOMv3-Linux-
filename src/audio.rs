@@ -660,9 +660,11 @@ impl PlayerApp {
                 self.cd_album.clone()
             };
             self.meta = (title, artist, album);
-            self.art_state = 0;
+            if !self.cd_art_loaded {
+                self.art_state = 0;
+                self.art_tex = None;
+            }
             self.art_local_valid = false;
-            self.art_tex = None;
             self.want_web = false;
             self.web_art_for = None;
             self.lyrics = None;
