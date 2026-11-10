@@ -106,6 +106,11 @@ pub struct VizTap<S> {
     intervals: Vec<f32>,
     bpm: f32,
     beat_phase: f32,
+    beat_env: f32,
+    beat_conf: f32,
+    prev_bars: [f32; VIZ_BANDS],
+    flux_avg: f32,
+    low_avg: f32,
 }
 
 impl<S: rodio::Source> VizTap<S>
@@ -142,6 +147,11 @@ where
             intervals: Vec::with_capacity(8),
             bpm: 120.0,
             beat_phase: 0.0,
+            beat_env: 0.0,
+            beat_conf: 0.0,
+            prev_bars: [0.0; VIZ_BANDS],
+            flux_avg: 0.02,
+            low_avg: -100.0,
         }
     }
 
@@ -200,50 +210,125 @@ where
             self.band_agc[b] = agc + (db - agc) * kagc;
         }
 
+        // Low-band energy (kick/sub region) for a sharper beat trigger than
+        // full-band RMS. A bass drum hit raises this by several dB in one hop.
+        let low_k0 = ((30.0 / fbin).ceil() as usize).max(1);
+        let low_k1 = ((160.0 / fbin).floor() as usize).min(n / 2 - 1);
+        let mut low_power = 0.0f64;
+        for k in low_k0..=low_k1 {
+            let re = self.fft_re[k] as f64;
+            let im = self.fft_im[k] as f64;
+            low_power += re * re + im * im;
+        }
+        let low_db = 10.0 * ((low_power / (low_k1 - low_k0 + 1).max(1) as f64) + 1e-12).log10() as f32;
+
         let rms_win = ((self.acc_rms / self.acc_cnt.max(1) as f32).sqrt() * 4.0).min(1.0);
         let peak = self.rms_peak.max(rms_win * 0.995);
         self.rms_peak = peak.max(0.02);
         let rms_n = (rms_win / self.rms_peak.max(0.02)).clamp(0.0, 1.0);
         self.smooth_rms = self.smooth_rms * 0.75 + rms_n * 0.25;
-        let onset = (self.smooth_rms - self.prev_rms).abs();
+        let rms_rise = (self.smooth_rms - self.prev_rms).max(0.0);
         self.prev_rms = self.smooth_rms;
-
-        // Tempo tracking: strong onsets measure intervals; a median of the last
-        // few yields a stable BPM even with stray transients.
         self.elapsed += VIZ_HOP as f32 / sr;
-        if onset > 0.5 && self.last_onset > 0.0 {
-            let iv = self.elapsed - self.last_onset;
+
+        // Spectral flux: how much new energy appeared since the last hop.
+        // Positive-only so decays do not register as hits.
+        let mut flux = 0.0f32;
+        for b in 0..VIZ_BANDS {
+            let rise = (bars[b] - self.prev_bars[b]).max(0.0);
+            flux += rise;
+            self.prev_bars[b] = bars[b];
+        }
+        flux /= VIZ_BANDS as f32;
+        let flux_ratio = (flux / self.flux_avg.max(0.02)).clamp(0.0, 4.0);
+        let low_rise = (low_db - self.low_avg).max(0.0).min(30.0);
+        let score = ((flux_ratio - 0.8) * 0.35
+            + (low_rise / 12.0) * 0.35
+            + rms_rise * 1.2)
+            .clamp(0.0, 1.0);
+        let is_onset = score > 0.22 && self.elapsed - self.last_onset > 0.14;
+
+        // Tempo tracking: fold intervals into the current beat's octave so a
+        // missed or doubled hit does not halve/double the BPM. Median of the
+        // last few intervals keeps syncopation from dragging the grid around.
+        if is_onset && self.last_onset > 0.0 {
+            let mut iv = self.elapsed - self.last_onset;
+            let beat_len = 60.0 / self.bpm.max(60.0);
+            while iv > beat_len * 1.75 {
+                iv *= 0.5;
+            }
+            while iv < beat_len * 0.55 {
+                iv *= 2.0;
+            }
             if iv > 0.20 && iv < 2.0 {
                 self.intervals.push(iv);
                 if self.intervals.len() > 8 {
                     self.intervals.remove(0);
                 }
-                if !self.intervals.is_empty() {
-                    let mut sorted = self.intervals.clone();
-                    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                    let med = sorted[sorted.len() / 2];
-                    let b = (60.0 / med).clamp(60.0, 200.0);
-                    // Smooth so the estimate glides instead of jumping.
-                    self.bpm = self.bpm * 0.6 + b * 0.4;
+                let mut sorted = self.intervals.clone();
+                sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                let med = sorted[sorted.len() / 2];
+                let mut b = (60.0 / med).clamp(60.0, 200.0);
+                if b > self.bpm * 1.6 {
+                    b *= 0.5;
+                } else if b < self.bpm * 0.65 {
+                    b *= 2.0;
                 }
+                self.bpm = self.bpm * 0.70 + b * 0.30;
             }
         }
-        if onset > 0.5 {
-            // Pull the beat phase toward the transient so the pulse aligns.
-            self.beat_phase *= 0.4;
-            self.last_onset = self.elapsed;
-        }
+
         let bps = self.bpm / 60.0;
-        self.beat_phase = (self.beat_phase + (VIZ_HOP as f32 / sr) * bps).fract();
-        // A decaying pulse that fires on each detected beat.
-        let beat_pulse = (-self.beat_phase * 5.0).exp() * rms_n;
+        let dt = VIZ_HOP as f32 / sr;
+        let old_phase = self.beat_phase;
+        self.beat_phase = (self.beat_phase + dt * bps).fract();
+        let wrapped = self.beat_phase < old_phase;
+
+        if is_onset {
+            // Phase-lock to the real transient. If it lands close to the
+            // predicted beat, pull the grid toward it; off-beat hits still
+            // trigger a thump but do not yank the tempo grid.
+            let err = if self.beat_phase < 0.5 {
+                self.beat_phase
+            } else {
+                self.beat_phase - 1.0
+            };
+            if err.abs() < 0.30 {
+                self.beat_phase = (self.beat_phase - err * 0.70).rem_euclid(1.0);
+            }
+            self.beat_env = 1.0;
+            self.beat_conf = (self.beat_conf + 0.12).min(1.0);
+            self.last_onset = self.elapsed;
+        } else {
+            self.beat_env *= (-dt * 7.0).exp();
+            // Between detected hits, keep a softer predicted beat so steady
+            // four-on-the-floor tracks do not lose the woofer thump.
+            if wrapped && self.beat_conf > 0.55 && self.smooth_rms > 0.03 {
+                self.beat_env = self.beat_env.max(0.45 * self.beat_conf);
+            }
+        }
+        let beat_pulse = self.beat_env.max(score * 0.85).clamp(0.0, 1.0);
+
+        // Give the three low bands a small on-beat lift so the visualizer and
+        // woofers hit together even when the FFT's release is still settling.
+        let bump = (beat_pulse * 0.10).min(0.12);
+        for b in 0..3 {
+            bars[b] = (bars[b] + bump * (1.0 - b as f32 * 0.30)).min(1.0);
+        }
+
+        self.flux_avg = self.flux_avg * 0.90 + flux * 0.10;
+        self.low_avg = if self.low_avg <= -100.0 {
+            low_db
+        } else {
+            self.low_avg * 0.94 + low_db * 0.06
+        };
 
         if let Ok(mut st) = self.out.lock() {
             st.bars = bars;
             st.rms = rms_n;
-            st.onset = onset.clamp(0.0, 1.0);
+            st.onset = score;
             st.bpm = self.bpm;
-            st.beat_pulse = beat_pulse.clamp(0.0, 1.0);
+            st.beat_pulse = beat_pulse;
         }
         self.acc_rms = 0.0;
         self.acc_cnt = 0;
@@ -277,6 +362,139 @@ where
         }
         self.frame_pos = (self.frame_pos + 1) % self.ch;
         Some(v)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    /// Synthetic four-on-the-floor kick: a decaying 55 Hz thump plus a short
+    /// high click. This gives the tracker a clear beat to lock onto.
+    struct ClickTrack {
+        pos: u64,
+        rate: u32,
+        bpm: f32,
+    }
+
+    impl Iterator for ClickTrack {
+        type Item = f32;
+        fn next(&mut self) -> Option<f32> {
+            let rate = self.rate as f32;
+            let beat_len = (60.0 / self.bpm) * rate;
+            let phase = (self.pos as f32) % beat_len;
+            self.pos += 1;
+            let mut v = 0.0;
+            if phase < 420.0 {
+                let t = phase / rate;
+                let env = (-phase / 75.0).exp();
+                v += (2.0 * std::f32::consts::PI * 55.0 * t).sin() * env * 0.9;
+                if phase < 45.0 {
+                    v += (2.0 * std::f32::consts::PI * 2500.0 * t).sin() * env * 0.5;
+                }
+            }
+            Some(v)
+        }
+    }
+
+    impl rodio::Source for ClickTrack {
+        fn current_frame_len(&self) -> Option<usize> {
+            None
+        }
+        fn channels(&self) -> u16 {
+            1
+        }
+        fn sample_rate(&self) -> u32 {
+            self.rate
+        }
+        fn total_duration(&self) -> Option<Duration> {
+            None
+        }
+    }
+
+    struct Silence {
+        pos: u64,
+        rate: u32,
+    }
+    impl Iterator for Silence {
+        type Item = f32;
+        fn next(&mut self) -> Option<f32> {
+            self.pos += 1;
+            Some(0.0)
+        }
+    }
+    impl rodio::Source for Silence {
+        fn current_frame_len(&self) -> Option<usize> {
+            None
+        }
+        fn channels(&self) -> u16 {
+            1
+        }
+        fn sample_rate(&self) -> u32 {
+            self.rate
+        }
+        fn total_duration(&self) -> Option<Duration> {
+            None
+        }
+    }
+
+    fn peak_times(state: &Arc<Mutex<VizState>>, total: usize, rate: u32) -> (Vec<f32>, f32) {
+        let mut peaks = Vec::new();
+        let mut last_peak = -10.0f32;
+        let mut bpm = 0.0;
+        let mut tap = VizTap::new(
+            ClickTrack { pos: 0, rate, bpm: 120.0 },
+            state.clone(),
+        );
+        for i in 0..total {
+            tap.next();
+            if i % 512 == 0 {
+                let (p, b) = {
+                    let st = state.lock().unwrap();
+                    (st.beat_pulse, st.bpm)
+                };
+                let t = i as f32 / rate as f32;
+                if p > 0.5 && t - last_peak > 0.30 {
+                    peaks.push(t);
+                    last_peak = t;
+                }
+                if t > 4.0 {
+                    bpm = b;
+                }
+            }
+        }
+        (peaks, bpm)
+    }
+
+    #[test]
+    fn beat_tracker_locks_to_a_click_track() {
+        let rate = 44_100u32;
+        let state = Arc::new(Mutex::new(VizState::default()));
+        let (peaks, bpm) = peak_times(&state, rate as usize * 10, rate);
+        assert!(peaks.len() >= 8, "too few beats: {:?}", peaks);
+        let intervals: Vec<f32> = peaks.windows(2).map(|w| w[1] - w[0]).collect();
+        for iv in &intervals {
+            assert!(
+                (iv - 0.5).abs() < 0.09,
+                "beat off grid: {:?}",
+                intervals
+            );
+        }
+        assert!((bpm - 120.0).abs() < 10.0, "bpm {}", bpm);
+    }
+
+    #[test]
+    fn silence_does_not_invent_beats() {
+        let rate = 44_100u32;
+        let state = Arc::new(Mutex::new(VizState::default()));
+        let mut tap = VizTap::new(Silence { pos: 0, rate }, state.clone());
+        for _ in 0..rate as usize * 3 {
+            tap.next();
+        }
+        let st = state.lock().unwrap();
+        assert!(st.beat_pulse < 0.2, "silence pulsed: {}", st.beat_pulse);
     }
 }
 

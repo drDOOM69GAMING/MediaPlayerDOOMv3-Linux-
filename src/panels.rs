@@ -384,7 +384,7 @@ impl PlayerApp {
             let playing_now = !self.state.is_paused && (self.state.current_song.is_some() || self.radio_on);
             let en = if playing_now { ((self.viz_rms - 0.10).max(0.0) / 0.90).clamp(0.0, 1.0) } else { 0.0 };
             let kick = if playing_now { self.viz_pop } else { 0.0 };
-            let pulse = (en + kick * 0.6).clamp(0.0, 1.0);
+            let pulse = (en * 0.85 + kick * 0.85).clamp(0.0, 1.0);
             ui.horizontal(|ui| {
                 speaker_woofer(ui, 76.0, th.btn_bg, th.accent, pulse, kick);
                 ui.add_space(10.0);
@@ -2120,6 +2120,7 @@ impl PlayerApp {
                 ui.label(RichText::new("Sleep Timer .......... Auto-close after time").color(dim).monospace());
                 ui.label(RichText::new("Look Up ............. Open song folder in explorer").color(dim).monospace());
                 ui.label(RichText::new("EQ .................. 20 professional curves: Harman, Loudness, Broadcast, Podcast, Vocal Air, Acoustic, Jazz, Classical, Rock, Metal, Hip-Hop, EDM, De-Mud, Dialogue").color(dim).monospace());
+                ui.label(RichText::new("Visualizer .......... Beat-locked 12-band spectrum and twin woofers; kick + spectral-flux onset detector, phase-locked BPM pulse").color(dim).monospace());
                 ui.label(RichText::new("EQ bands ............ ISO 1-octave bands 31 Hz-16 kHz, Q 1.4; auto preamp + soft limiter; preset picker, arrow cycling and FLAT reset").color(dim).monospace());
                 ui.label(RichText::new("EQ graph ............ Real response, ±12 dB grid, band points, curve description and preamp percentage; all changes apply live").color(dim).monospace());
                 ui.add_space(6.0);

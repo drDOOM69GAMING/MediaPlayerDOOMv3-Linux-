@@ -292,7 +292,7 @@ pub fn speaker_woofer(ui: &mut egui::Ui, d: f32, base: Color32, accent: Color32,
     let t = ui.input(|i| i.time) as f32;
     let rattle = (pulse - 0.55 + kick * 0.6).clamp(0.0, 1.0);
     let dx = ((t * 97.0).sin() * 0.5 + (t * 61.0).cos() * 0.5) * rattle * 2.6;
-    let dy = pulse * pulse * 6.0;
+    let dy = pulse * pulse * 6.0 + kick * 2.2;
     let c = c0 + egui::vec2(dx, dy);
     let r = d * 0.5 - 3.0;
     painter.circle_filled(c0, r + 2.0, darken(base, 0.6));
@@ -301,8 +301,8 @@ pub fn speaker_woofer(ui: &mut egui::Ui, d: f32, base: Color32, accent: Color32,
     painter.circle_filled(c0, r * 0.88, darken(base, 0.30));
     painter.circle(c0, r * 0.88, Color32::TRANSPARENT, egui::Stroke::new(1.0, lighten(base, 0.08)));
     painter.circle(c0, r * 0.80, Color32::TRANSPARENT, egui::Stroke::new(1.0, darken(base, 0.5)));
-    let surge = 1.0 + pulse * 0.45 + kick * 0.55;
-    let flex = r * 0.80 * (1.18 + pulse * 0.34 + kick * 0.22);
+    let surge = 1.0 + pulse * 0.45 + kick * 0.65;
+    let flex = r * 0.80 * (1.18 + pulse * 0.34 + kick * 0.30);
     painter.circle(c, flex, Color32::TRANSPARENT, egui::Stroke::new(1.4, mix(base, Color32::BLACK, 0.55 - pulse * 0.35)));
     if pulse > 0.02 {
         painter.circle_filled(c, r * 0.95, accent.linear_multiply(0.05 + pulse * 0.22));

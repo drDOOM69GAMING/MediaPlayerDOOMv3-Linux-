@@ -17,7 +17,7 @@ A retro DOOM-styled media player rendered in egui. Tape, CD, and Radio faces on 
 - **Supported audio**: MP3, FLAC, WAV, M4A/AAC/ALAC, APE (Monkey's Audio), AIFF, OGG/Vorbis, Opus, WMA, WavPack, Musepack and WebM audio. Formats the built-in decoder cannot open (notably M4A and APE) are converted to a cached WAV with ffmpeg on first play, so they seek and play like any other track. Single-file albums described by a **CUE sheet** are expanded into individual tracks
 - **Play order switch**: flip the retro wall switch under BANDS. ON = random shuffle, OFF = normal in-order playback
 - **Smart shuffle**: weighted by your listening history, or plain shuffle
-- **Live visualizer**: a real-time 12-band spectrum with peak caps in the NOW panel, synced to whatever is playing (music or radio). The deck's bass woofers pump with the volume, rattle on heavy bass, shove downward on beats, and pulse an expanding ring on loud hits
+- **Live visualizer**: a real-time 12-band spectrum with peak caps in the NOW panel, synced to whatever is playing (music or radio). A kick-band + spectral-flux onset detector phase-locks a BPM grid; the low bars and twin deck woofers thump together on each beat, with cone motion, bass rattle, downward shove and pulse rings
 - **Recording**: capture the current track or a live stream (REC on the deck)
 - **Video player**: click **Video** to play the matching movie in-app:
   - True fullscreen playback with letterboxing
@@ -203,6 +203,17 @@ This app is built on the work of some incredible open-source projects, and it wo
 - The **Rust** language and its crate ecosystem.
 
 Full details, license texts, and donation links are in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). If you can, consider donating to FFmpeg, yt-dlp, and MKVToolNix - they give this all away for free.
+
+## v3.2.34 changelog
+
+- **Beat-locked visualizer and speakers**
+  - Replaced the RMS-only beat guess with an onset detector using **kick-band energy (30-160 Hz)** plus **spectral flux** across all 12 bands
+  - Added a phase-locked beat grid: detected kicks correct the BPM phase, while steady tracks get a softer predicted beat between hits
+  - BPM intervals are folded into the current beat's octave and median-filtered, so missed/doubled hits no longer halve or double the tempo
+  - The three low spectrum bars get a small on-beat lift, and the twin woofers now thump with the actual kick instead of a generic volume pulse
+  - Stronger cone shove, surround flex and rattle on each beat; silence is gated so no beats are invented
+  - Verified against a synthetic 120 BPM click track: beat intervals stay within 90 ms and BPM within 10 of target
+- Version bump to **v3.2.34**
 
 ## v3.2.33 changelog
 

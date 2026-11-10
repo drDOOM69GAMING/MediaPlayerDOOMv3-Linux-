@@ -720,8 +720,8 @@ impl PlayerApp {
         // the tempo tracker, so the woofers thump on sustained 4-on-the-floor.
         let env_kick = if active { (dr * 3.0).max(0.0).min(1.0) } else { 0.0 };
         let beat_kick = if active { beat_pulse } else { 0.0 };
-        let kick = env_kick.max(beat_kick * 0.9);
-        self.viz_pop = kick.max(self.viz_pop * (1.0 - (-dt * 14.0).exp()));
+        let kick = env_kick.max(beat_kick);
+        self.viz_pop = kick.max(self.viz_pop * (1.0 - (-dt * 10.0).exp()));
         let tr = if active { rms } else { 0.0 };
         self.viz_rms += (tr - self.viz_rms) * (1.0 - (-dt * 15.0).exp());
     }
