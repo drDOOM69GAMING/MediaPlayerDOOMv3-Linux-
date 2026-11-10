@@ -476,14 +476,21 @@ impl PlayerApp {
     }
 
     pub(crate) fn draw_play_switch(&mut self, ui: &mut egui::Ui, th: &ThemePalette) {
+        // Random order is the unpredictable state, so it gets red. Normal
+        // in-order playback is the safe state, so it gets green.
+        let state_col = if self.random_on {
+            Color32::from_rgb(255, 75, 75)
+        } else {
+            Color32::from_rgb(70, 230, 100)
+        };
         ui.vertical_centered(|ui| {
-            ui.label(RichText::new("PLAY ORDER").color(darken(th.accent, 0.35)).monospace().size(8.0));
+            ui.label(RichText::new("PLAY ORDER").color(darken(state_col, 0.25)).monospace().size(8.0));
         });
         let size = egui::vec2(64.0, 118.0);
         let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
         let painter = ui.painter().with_clip_rect(ui.clip_rect());
         painter.rect_filled(rect, 9.0, lighten(th.btn_bg, 0.12));
-        painter.rect_stroke(rect, 9.0, egui::Stroke::new(2.0, th.btn_fg), egui::StrokeKind::Outside);
+        painter.rect_stroke(rect, 9.0, egui::Stroke::new(2.0, state_col), egui::StrokeKind::Outside);
         let corners = [
             rect.min + egui::vec2(6.0, 6.0),
             rect.min + egui::vec2(rect.width() - 6.0, 6.0),
@@ -492,26 +499,26 @@ impl PlayerApp {
         ];
         for s in corners {
             painter.circle_filled(s, 2.6, darken(th.btn_bg, 0.5));
-            if darken(th.btn_fg, 0.3) != Color32::TRANSPARENT {
-                painter.circle_stroke(s, 2.6, egui::Stroke::new(1.0, darken(th.btn_fg, 0.3)));
+            if darken(state_col, 0.3) != Color32::TRANSPARENT {
+                painter.circle_stroke(s, 2.6, egui::Stroke::new(1.0, darken(state_col, 0.3)));
             }
         }
         let groove = rect.shrink2(egui::vec2(19.0, 18.0));
         painter.rect_filled(groove, 5.0, Color32::from_rgb(2, 2, 5));
-        painter.rect_stroke(groove, 5.0, egui::Stroke::new(1.5, darken(th.btn_fg, 0.25)), egui::StrokeKind::Inside);
+        painter.rect_stroke(groove, 5.0, egui::Stroke::new(1.5, darken(state_col, 0.25)), egui::StrokeKind::Inside);
         painter.text(
             egui::pos2(groove.center().x, groove.min.y + 10.0),
             egui::Align2::CENTER_CENTER,
             "ON",
             egui::FontId::monospace(8.0),
-            if self.random_on { th.playing_fg } else { Color32::from_gray(60) },
+            if self.random_on { state_col } else { Color32::from_gray(60) },
         );
         painter.text(
             egui::pos2(groove.center().x, groove.max.y - 10.0),
             egui::Align2::CENTER_CENTER,
             "OFF",
             egui::FontId::monospace(8.0),
-            if !self.random_on { th.playing_fg } else { Color32::from_gray(60) },
+            if !self.random_on { state_col } else { Color32::from_gray(60) },
         );
         let thr = 26.0;
         if resp.dragged() {
@@ -538,22 +545,24 @@ impl PlayerApp {
         let kx = groove.min.x + 4.0;
         let ky = groove.min.y + 4.0 + (1.0 - kf) * (travel.max(0.0));
         let knob = egui::Rect::from_min_size(egui::pos2(kx, ky), egui::vec2(groove.width() - 8.0, knw));
-        let knob_col = if self.random_on { mix(th.btn_bg, th.accent, 0.4) } else { darken(th.btn_bg, 0.2) };
+        let knob_col = mix(th.btn_bg, state_col, if self.random_on { 0.45 } else { 0.32 });
         painter.rect_filled(knob, 6.0, knob_col);
         painter.rect_stroke(
             knob,
             6.0,
-            egui::Stroke::new(1.5, if self.random_on { lighten(th.accent, 0.15) } else { th.btn_fg }),
+            egui::Stroke::new(1.5, lighten(state_col, 0.10)),
             egui::StrokeKind::Inside,
         );
         painter.hline(knob.min.x + 6.0..=knob.max.x - 6.0, knob.center().y, egui::Stroke::new(2.0, darken(knob_col, 0.35)));
         ui.add_space(2.0);
         ui.vertical_centered(|ui| {
+            let mode = if self.random_on { "RANDOM SHUFFLE" } else { "IN ORDER" };
+            ui.label(RichText::new(mode).color(state_col).monospace().size(9.0));
             ui.label(
                 RichText::new("drDOOM69GAMING")
                     .color(th.accent)
                     .monospace()
-                    .size(9.0),
+                    .size(8.0),
             );
         });
     }

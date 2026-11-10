@@ -247,6 +247,17 @@ impl PlayerApp {
         let th = self.theme_colors();
         egui::Panel::left("side_panel").show(ui, |ui| {
             ui.set_max_width(250.0);
+            // Keep the play-order switch pinned at the bottom and put
+            // everything above it in a scrollable column. In a short windowed
+            // layout the fixed art/visualizer/band stack was taller than the
+            // sidebar, so the switch was drawn over the band rows.
+            let switch_h = 175.0;
+            let upper_h = (ui.available_height() - switch_h).max(120.0);
+            egui::ScrollArea::vertical()
+                .id_salt("sidebar_scroll")
+                .auto_shrink([false, false])
+                .max_height(upper_h)
+                .show(ui, |ui| {
             let (w, h) = (210.0, 200.0);
             let (rect, _) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::hover());
             let p = ui.painter().with_clip_rect(rect);
@@ -433,11 +444,6 @@ impl PlayerApp {
                 if bands.is_empty() {
                     ui.label(RichText::new("Add music to build the band list").color(Color32::from_gray(90)).monospace().size(9.0));
                 } else {
-                    egui::ScrollArea::vertical()
-                        .id_salt("band_scroll")
-                        .auto_shrink([false, false])
-                        .max_height(260.0)
-                        .show(ui, |ui| {
                             let mut last_key = String::new();
                             for b in bands.iter() {
                                 let ch = b.chars().next().map(|c| c.to_ascii_uppercase()).unwrap_or('#');
@@ -456,13 +462,12 @@ impl PlayerApp {
                                     sel = b.clone();
                                 }
                             }
-                        });
                     if all_clicked || self.band_sel != sel {
                         self.choose_band(if all_clicked { String::new() } else { sel });
                     }
                 }
             }
-            ui.add_space(4.0);
+            });
             self.draw_play_switch(ui, &th);
         });
     }
