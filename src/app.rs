@@ -405,7 +405,7 @@ impl PlayerApp {
             .unwrap_or_default()
     }
 
-    pub(crate) fn new(cc: &eframe::CreationContext<'_>, startup_video: Option<String>, windowed: bool, startup_mode: Option<String>, startup_dvd: Option<String>, startup_bluray: Option<String>) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    pub(crate) fn new(cc: &eframe::CreationContext<'_>, startup_files: Vec<String>, windowed: bool, startup_mode: Option<String>, startup_dvd: Option<String>, startup_bluray: Option<String>) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         #[cfg(target_os = "windows")]
         apply_taskbar_icon(cc);
         let ctx = cc.egui_ctx.clone();
@@ -927,14 +927,36 @@ video_ended: false,
             Some("tape") => app.set_deck_mode(DeckMode::Tape),
             _ => {}
         }
-        if let Some(v) = startup_video {
-            if Path::new(&v).is_file() {
-                app.enqueue_videos(vec![v]);
-                // Command-line playback is for actually watching something.
-                app.set_video_fs(true);
-            } else {
-                app.set_error(format!("Video not found: {}", v));
+        // Files passed by the desktop or command line. Audio files become
+        // playlist entries and start playing; video files go to the video queue.
+        let mut audio_files: Vec<String> = Vec::new();
+        let mut video_files: Vec<String> = Vec::new();
+        for p in startup_files {
+            if !Path::new(&p).is_file() {
+                app.set_error(format!("File not found: {}", p));
+                continue;
             }
+            if crate::util::is_audio(&p) {
+                audio_files.push(p);
+            } else {
+                video_files.push(p);
+            }
+        }
+        if !audio_files.is_empty() {
+            for p in &audio_files {
+                if !app.state.playlist.contains(p) {
+                    app.state.playlist.push(p.clone());
+                }
+            }
+            app.state.playlist.sort_by_cached_key(|p| song_sort_key(p));
+            app.rebuild_display_cache();
+            app.ingest_bands(&audio_files, None);
+            app.play_song(&audio_files[0]);
+        }
+        if !video_files.is_empty() {
+            app.enqueue_videos(video_files);
+            // Command-line playback is for actually watching something.
+            app.set_video_fs(true);
         }
         if let Some(d) = startup_dvd {
             app.play_dvd_source(&d);
@@ -1818,6 +1840,7 @@ video_ended: false,
                     && !self.state.is_paused
                     && !self.video_on
                     && self.deck_mode == DeckMode::Tape
+                    && self.play_started.is_none()
                     && !self.song_starting
                 {
                     self.skip_song();
@@ -2806,7 +2829,7 @@ impl eframe::App for PlayerApp {
     }
 }
 
-pub fn run(startup_video: Option<String>, windowed: bool, startup_mode: Option<String>, startup_dvd: Option<String>, startup_bluray: Option<String>) -> eframe::Result {
+pub fn run(startup_files: Vec<String>, windowed: bool, startup_mode: Option<String>, startup_dvd: Option<String>, startup_bluray: Option<String>) -> eframe::Result {
 std::panic::set_hook(Box::new(|info| {
         // Expected, caught decode panics (rodio symphonia init-seek bug) are
         // muted here; open_decoder logs a clean decode-skip line instead.
@@ -2841,7 +2864,7 @@ std::panic::set_hook(Box::new(|info| {
         APP_NAME,
         options,
         Box::new(|cc| {
-            let app = PlayerApp::new(cc, startup_video.clone(), windowed, startup_mode.clone(), startup_dvd.clone(), startup_bluray.clone())?;
+            let app = PlayerApp::new(cc, startup_files.clone(), windowed, startup_mode.clone(), startup_dvd.clone(), startup_bluray.clone())?;
             Ok(Box::new(app) as Box<dyn eframe::App>)
         }),
     )

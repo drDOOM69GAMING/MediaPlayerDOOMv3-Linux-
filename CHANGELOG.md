@@ -1,5 +1,16 @@
 # Changelog
 
+## v3.2.37
+
+- Added Set as Default Media Player for audio and video.
+- The Help window exposes a Set as Default Media Player button.
+- Added `mediaplayerofdoom --set-default` and `--set-default-player` command line flags.
+- The action writes the applications menu desktop entry and registers 25 audio and video MIME types with xdg-mime.
+- Desktop launches now detect audio files and play them in the music player.
+- Video files passed by the desktop still open in the video player.
+- Multiple selected files are added to the playlist or video queue.
+- No manual editing of mimeapps.list is required.
+
 ## v3.2.36
 
 - Tray Play/Pause, Stop, Skip and Previous now run through the background playback worker, so they work while the window is hidden and the UI is frozen.

@@ -115,7 +115,14 @@ fn main() -> eframe::Result {
         );
         return Ok(());
     }
-    let mut video: Option<String> = None;
+    if args.iter().any(|a| a == "--set-default" || a == "--set-default-player") {
+        match crate::desktop::set_default_player() {
+            Ok(n) => println!("MediaPlayerDOOM is now the default for {} audio and video file types", n),
+            Err(e) => eprintln!("Could not set default player: {}", e),
+        }
+        return Ok(());
+    }
+    let mut startup_files: Vec<String> = Vec::new();
     let mut dvd: Option<String> = None;
     let mut bluray: Option<String> = None;
     let mut windowed = false;
@@ -150,14 +157,14 @@ fn main() -> eframe::Result {
         }
         if args[i] == "--video" {
             if let Some(p) = args.get(i + 1) {
-                video = Some(p.clone());
+                startup_files.push(p.clone());
                 i += 2;
                 continue;
             }
-        } else if !args[i].starts_with('-') && video.is_none() {
-            video = Some(args[i].clone());
+        } else if !args[i].starts_with('-') {
+            startup_files.push(args[i].clone());
         }
         i += 1;
     }
-    app::run(video, windowed, mode, dvd, bluray)
+    app::run(startup_files, windowed, mode, dvd, bluray)
 }

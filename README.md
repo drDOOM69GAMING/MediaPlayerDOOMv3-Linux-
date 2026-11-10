@@ -1,6 +1,6 @@
 # MediaPlayerDOOM v3 for Linux
 
-![Version](https://img.shields.io/badge/version-3.2.36-blue)
+![Version](https://img.shields.io/badge/version-3.2.37-blue)
 ![Platform](https://img.shields.io/badge/platform-Linux%20x86__64-informational)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -87,6 +87,7 @@ This repository is the Linux port. It is tested on CachyOS and Arch with KDE Pla
 - KDE, GNOME, Xfce and other freedesktop desktops
 - XDG base directory paths for data, cache, recordings and music
 - Hardware acceleration detection for AMD, Intel and NVIDIA
+- **Default media player**: a Set as Default action and `--set-default` command register MediaPlayerDOOM for 25 audio and video MIME types with xdg-mime. Opening an audio file starts the music player, while video files open in the video player
 
 ## Requirements
 

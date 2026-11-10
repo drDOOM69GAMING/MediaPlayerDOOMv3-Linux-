@@ -14,6 +14,36 @@ use crate::util::{data_home, home_dir};
 
 pub const ICON_PNG: &[u8] = include_bytes!("../assets/mediaplayerofdoom.png");
 
+/// MIME types registered for the default media player action. Keep this in
+/// sync with packaging/mediaplayerofdoom.desktop and install.sh.
+pub const MIME_TYPES: [&str; 25] = [
+    "audio/mpeg",
+    "audio/flac",
+    "audio/x-flac",
+    "audio/mp4",
+    "audio/x-m4a",
+    "audio/aac",
+    "audio/ogg",
+    "audio/opus",
+    "audio/x-wav",
+    "audio/wav",
+    "audio/aiff",
+    "audio/x-aiff",
+    "audio/x-ms-wma",
+    "audio/x-ape",
+    "audio/x-wavpack",
+    "audio/x-musepack",
+    "audio/webm",
+    "video/mp4",
+    "video/x-matroska",
+    "video/webm",
+    "video/x-msvideo",
+    "video/mpeg",
+    "video/quicktime",
+    "video/x-ms-wmv",
+    "video/mp2t",
+];
+
 fn log(msg: &str) {
     use std::io::Write as _;
     let path = crate::util::data_dir().join("desktop.log");
@@ -37,6 +67,7 @@ fn quote_exec(path: &Path) -> String {
 
 fn entry_text(exe: &Path, icon: &Path) -> String {
     let exec = quote_exec(exe);
+    let mimes = format!("{};", MIME_TYPES.join(";"));
     format!(
         "[Desktop Entry]\n\
 Type=Application\n\
@@ -47,12 +78,13 @@ Exec={exec} %F\n\
 Icon={icon}\n\
 Terminal=false\n\
 Categories=AudioVideo;Audio;Video;Player;\n\
-MimeType=audio/mpeg;audio/flac;audio/x-flac;audio/x-wav;audio/ogg;audio/opus;audio/mp4;audio/x-m4a;video/mp4;video/x-matroska;video/x-msvideo;video/webm;\n\
+MimeType={mimes}\n\
 Keywords=music;audio;video;player;doom;retro;mp3;flac;mkv;\n\
 StartupNotify=true\n\
 StartupWMClass=mediaplayerofdoom\n",
         exec = exec,
-        icon = icon.display()
+        icon = icon.display(),
+        mimes = mimes
     )
 }
 
@@ -158,4 +190,79 @@ pub fn ensure_desktop_shortcut() -> bool {
     make_launchable(&shortcut);
     log(&format!("created shortcut {}", shortcut.display()));
     true
+}
+
+/// Register MediaPlayerDOOM as the default handler for its audio and video
+/// types. This writes the applications menu launcher and then asks xdg-mime to
+/// point every supported MIME type at it. No root access is needed.
+pub fn set_default_player() -> Result<usize, String> {
+    #[cfg(not(unix))]
+    {
+        return Err("setting the default player is supported on Linux only".into());
+    }
+    #[cfg(unix)]
+    {
+        let Some(exe) = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.canonicalize().ok())
+        else {
+            return Err("could not resolve the application executable".into());
+        };
+        let icon = data_home().join("icons/hicolor/512x512/apps/mediaplayerofdoom.png");
+        if !icon.is_file() {
+            if let Some(parent) = icon.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(&icon, ICON_PNG);
+        }
+        let icon_for_entry = if icon.is_file() {
+            icon
+        } else {
+            PathBuf::from("mediaplayerofdoom")
+        };
+        let apps = data_home().join("applications");
+        if let Err(e) = std::fs::create_dir_all(&apps) {
+            return Err(format!("could not create applications folder: {}", e));
+        }
+        let entry = apps.join("mediaplayerofdoom.desktop");
+        let text = entry_text(&exe, &icon_for_entry);
+        if let Err(e) = std::fs::write(&entry, text) {
+            return Err(format!("could not write desktop entry: {}", e));
+        }
+        make_launchable(&entry);
+        let _ = Command::new("update-desktop-database")
+            .arg(&apps)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+
+        let mut set = 0usize;
+        for mime in MIME_TYPES {
+            match Command::new("xdg-mime")
+                .args(["default", "mediaplayerofdoom.desktop", mime])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+            {
+                Ok(s) if s.success() => set += 1,
+                Ok(_) => {}
+                Err(e) => {
+                    return Err(format!(
+                        "xdg-mime is required to set the default player: {}",
+                        e
+                    ))
+                }
+            }
+        }
+        if set == 0 {
+            return Err("no MIME associations were changed; xdg-mime may be unavailable".into());
+        }
+        log(&format!("set default player for {} MIME types", set));
+        let _ = Command::new("kbuildsycoca6")
+            .arg("--noincremental")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+        Ok(set)
+    }
 }

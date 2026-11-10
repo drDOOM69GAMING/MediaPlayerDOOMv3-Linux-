@@ -2124,6 +2124,19 @@ impl PlayerApp {
                 ui.label(RichText::new("KDE Wayland ......... Hide uses KWin scripting (skipTaskbar + minimize); other desktops fall back to minimize").color(dim).monospace());
                 ui.add_space(6.0);
 
+                ui.label(RichText::new("DEFAULT PLAYER").color(acc).monospace().strong());
+                ui.label(RichText::new("Set default ......... Register MediaPlayerDOOM for audio and video files with xdg-mime; no config editing needed").color(dim).monospace());
+                if retro_btn(ui, "SET AS DEFAULT MEDIA PLAYER", th.playing_fg, th.btn_bg)
+                    .on_hover_text("Set MediaPlayerDOOM as the default handler for supported audio and video file types")
+                    .clicked()
+                {
+                    match crate::desktop::set_default_player() {
+                        Ok(n) => self.set_status(format!("Default media player set for {} file types", n)),
+                        Err(e) => self.set_error(format!("Could not set default player: {}", e)),
+                    }
+                }
+                ui.add_space(6.0);
+
                 ui.label(RichText::new("EXTRAS").color(acc).monospace().strong());
                 ui.label(RichText::new("Sleep Timer .......... Auto-close after time").color(dim).monospace());
                 ui.label(RichText::new("Look Up ............. Open song folder in explorer").color(dim).monospace());
