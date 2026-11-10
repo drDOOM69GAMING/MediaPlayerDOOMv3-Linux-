@@ -31,6 +31,11 @@ impl PlayerApp {
         self.state.is_paused = false;
         self.state.current_song = Some(path.to_string());
         self.song_starting = true;
+        self.tray_paused
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.tray_stopped
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.tray_note_current(path);
         self.playing_pl_idx = self.state.playlist.iter().position(|p| p == path);
         self.playing = Self::playing_display(path);
         self.do_play(path, path);
@@ -156,6 +161,13 @@ impl PlayerApp {
         self.sink.stop();
         self.sink.set_volume(self.state.volume as f32 / 100.0);
         self.song_starting = false;
+        self.tray_paused
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.tray_stopped
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        if let Ok(mut cur) = self.tray_current.lock() {
+            *cur = None;
+        }
         self.reset_auto_advance();
         self.radio_loading = true;
         match spawn_radio_stream(&st.url, &ffmpeg_path()) {

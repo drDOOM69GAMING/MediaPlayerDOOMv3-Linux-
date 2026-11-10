@@ -17,10 +17,17 @@ use crate::util::data_dir;
 /// UI event loop has stopped painting a hidden window.
 static TRAY_CTX: OnceLock<egui::Context> = OnceLock::new();
 static TRAY_HIDDEN: OnceLock<Arc<AtomicBool>> = OnceLock::new();
+static TRAY_CONTROL: OnceLock<Arc<std::sync::Mutex<std::collections::VecDeque<String>>>> =
+    OnceLock::new();
 
-pub fn set_tray_context(ctx: egui::Context, hidden: Arc<AtomicBool>) {
+pub fn set_tray_context(
+    ctx: egui::Context,
+    hidden: Arc<AtomicBool>,
+    control: Arc<std::sync::Mutex<std::collections::VecDeque<String>>>,
+) {
     let _ = TRAY_CTX.set(ctx);
     let _ = TRAY_HIDDEN.set(hidden);
+    let _ = TRAY_CONTROL.set(control);
 }
 
 /// Wayland cannot hide a window with winit (`set_visible` is a no-op), so use
@@ -178,22 +185,32 @@ pub fn notify_song(artist: &str, title: &str, album: &str) {
     };
     #[cfg(target_os = "linux")]
     {
-        let _ = std::process::Command::new("notify-send")
-            .args([
-                "-a",
-                APP_NAME,
-                "-i",
-                "mediaplayerofdoom",
-                "-t",
-                "3500",
-                // Replace the previous song popup instead of stacking a new
-                // one every track. KDE treats this hint as a synchronous tag.
-                "-h",
-                "string:x-canonical-private-synchronous:mediaplayerofdoom",
-            ])
-            .arg(&summary)
-            .arg(&body)
-            .spawn();
+        static LAST_ID: std::sync::Mutex<u32> = std::sync::Mutex::new(0);
+        let mut cmd = std::process::Command::new("notify-send");
+        cmd.args([
+            "-a",
+            APP_NAME,
+            "-i",
+            "mediaplayerofdoom",
+            "-t",
+            "3500",
+            "-p",
+            "-h",
+            "string:x-canonical-private-synchronous:mediaplayerofdoom",
+        ]);
+        if let Ok(last) = LAST_ID.lock() {
+            if *last != 0 {
+                cmd.args(["-r", &last.to_string()]);
+            }
+        }
+        cmd.arg(&summary).arg(&body);
+        if let Ok(out) = cmd.output() {
+            if let Ok(id) = String::from_utf8_lossy(&out.stdout).trim().parse::<u32>() {
+                if let Ok(mut last) = LAST_ID.lock() {
+                    *last = id;
+                }
+            }
+        }
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -258,9 +275,10 @@ mod linux_tray {
     }
 
     fn push(id: &str) {
-        // Show/Hide/Quit must work even when the window is hidden and egui is
+        // Show and Quit must work even when the window is hidden and egui is
         // no longer running `ui()`, so handle them directly from the tray
-        // thread instead of queueing them for the UI.
+        // thread. Hide is queued so the UI can show the notification before it
+        // minimizes.
         if matches!(id, "show" | "quit") {
             if let (Some(ctx), Some(hidden)) = (super::TRAY_CTX.get(), super::TRAY_HIDDEN.get()) {
                 match id {
@@ -282,6 +300,16 @@ mod linux_tray {
                     _ => {}
                 }
                 ctx.request_repaint();
+                return;
+            }
+        }
+        if id != "hide" {
+            // Playback commands go to the background worker so they still work
+            // while the UI loop is frozen in Hide mode.
+            if let Some(control) = super::TRAY_CONTROL.get() {
+                if let Ok(mut q) = control.lock() {
+                    q.push_back(id.to_string());
+                }
                 return;
             }
         }

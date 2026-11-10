@@ -254,6 +254,12 @@ pub(crate) struct PlayerApp {
     pub(crate) auto_active: Arc<AtomicBool>,
     /// Shared with the tray menu. True while the window is hidden to the tray.
     pub(crate) hidden_to_tray: Arc<AtomicBool>,
+    /// Tray playback commands consumed by the background worker when the UI is hidden.
+    pub(crate) tray_control: Arc<std::sync::Mutex<VecDeque<String>>>,
+    pub(crate) tray_paused: Arc<AtomicBool>,
+    pub(crate) tray_stopped: Arc<AtomicBool>,
+    pub(crate) tray_current: Arc<std::sync::Mutex<Option<String>>>,
+    pub(crate) tray_history: Arc<std::sync::Mutex<Vec<String>>>,
     pub(crate) want_web: bool,
     pub(crate) last_drop: Vec<PathBuf>,
     pub(crate) drag_from: Option<usize>,
@@ -896,6 +902,11 @@ video_ended: false,
             auto_now: Arc::new(std::sync::Mutex::new(None)),
             auto_active: Arc::new(AtomicBool::new(false)),
             hidden_to_tray: Arc::new(AtomicBool::new(false)),
+            tray_control: Arc::new(std::sync::Mutex::new(VecDeque::new())),
+            tray_paused: Arc::new(AtomicBool::new(false)),
+            tray_stopped: Arc::new(AtomicBool::new(false)),
+            tray_current: Arc::new(std::sync::Mutex::new(None)),
+            tray_history: Arc::new(std::sync::Mutex::new(Vec::new())),
             want_web: false,
             last_drop: Vec::new(),
             drag_from: None,
@@ -1002,19 +1013,38 @@ video_ended: false,
             app.auto_now.clone(),
             app.auto_active.clone(),
             app.hidden_to_tray.clone(),
+            app.tray_control.clone(),
+            app.tray_paused.clone(),
+            app.tray_stopped.clone(),
+            app.tray_current.clone(),
+            app.tray_history.clone(),
             app.msg_tx.clone(),
         );
-        crate::windows::set_tray_context(ctx.clone(), app.hidden_to_tray.clone());
+        crate::windows::set_tray_context(
+            ctx.clone(),
+            app.hidden_to_tray.clone(),
+            app.tray_control.clone(),
+        );
         // Dev hook: exercise Hide -> Show -> Hide through the real tray path.
         if std::env::var_os("MPDOOM_TRAY_TEST").is_some() {
             std::thread::spawn(|| {
                 std::thread::sleep(Duration::from_secs(3));
                 crate::windows::simulate_tray("hide");
-                std::thread::sleep(Duration::from_secs(6));
+                std::thread::sleep(Duration::from_secs(3));
+                crate::windows::simulate_tray("skip");
+                std::thread::sleep(Duration::from_secs(2));
+                crate::windows::simulate_tray("play_pause");
+                std::thread::sleep(Duration::from_secs(2));
+                crate::windows::simulate_tray("play_pause");
+                std::thread::sleep(Duration::from_secs(2));
+                crate::windows::simulate_tray("stop");
+                std::thread::sleep(Duration::from_secs(2));
+                crate::windows::simulate_tray("play_pause");
+                std::thread::sleep(Duration::from_secs(2));
+                crate::windows::simulate_tray("prev");
+                std::thread::sleep(Duration::from_secs(2));
                 crate::windows::simulate_tray("show");
                 std::thread::sleep(Duration::from_secs(3));
-                crate::windows::simulate_tray("hide");
-                std::thread::sleep(Duration::from_secs(6));
                 crate::windows::simulate_tray("quit");
             });
         }
@@ -2690,6 +2720,7 @@ impl eframe::App for PlayerApp {
 
         self.drain_msg();
         self.sync_auto_track();
+        self.sync_tray_state();
         if self.auto_active.load(Ordering::Relaxed) {
             let low = self
                 .auto_queue

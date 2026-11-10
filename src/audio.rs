@@ -91,12 +91,20 @@ pub struct NotifySource<S> {
     inner: S,
     path: String,
     now: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    current: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    history: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     fired: bool,
 }
 
 impl<S> NotifySource<S> {
-    fn new(inner: S, path: String, now: std::sync::Arc<std::sync::Mutex<Option<String>>>) -> Self {
-        NotifySource { inner, path, now, fired: false }
+    fn new(
+        inner: S,
+        path: String,
+        now: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+        current: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+        history: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    ) -> Self {
+        NotifySource { inner, path, now, current, history, fired: false }
     }
 }
 
@@ -111,6 +119,17 @@ where
             av_log(&format!("auto-advance: started {}", self.path));
             if let Ok(mut slot) = self.now.lock() {
                 *slot = Some(self.path.clone());
+            }
+            if let Ok(mut cur) = self.current.lock() {
+                *cur = Some(self.path.clone());
+            }
+            if let Ok(mut h) = self.history.lock() {
+                if h.last() != Some(&self.path) {
+                    h.push(self.path.clone());
+                    if h.len() > 200 {
+                        h.remove(0);
+                    }
+                }
             }
         }
         self.inner.next()
@@ -143,6 +162,8 @@ fn build_auto_source(
     eq_shared: &std::sync::Arc<std::sync::Mutex<EqShared>>,
     viz_lock: &std::sync::Arc<std::sync::Mutex<VizState>>,
     now: &std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    current: &std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    history: &std::sync::Arc<std::sync::Mutex<Vec<String>>>,
 ) -> Option<(AutoSource, Option<PathBuf>)> {
     let (decoder, wav) = match open_decoder(path) {
         Some(d) => (d, None),
@@ -154,7 +175,16 @@ fn build_auto_source(
     };
     let eq = EqSource::new(decoder, eq_shared.clone());
     let tapped = VizTap::new(eq, viz_lock.clone());
-    Some((NotifySource::new(tapped, path.to_string(), now.clone()), wav))
+    Some((
+        NotifySource::new(
+            tapped,
+            path.to_string(),
+            now.clone(),
+            current.clone(),
+            history.clone(),
+        ),
+        wav,
+    ))
 }
 
 /// Prepare and queue one upcoming track while the current one plays. This is
@@ -169,6 +199,11 @@ pub(crate) fn spawn_auto_advance(
     now: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     active: std::sync::Arc<std::sync::atomic::AtomicBool>,
     hidden: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    control: std::sync::Arc<std::sync::Mutex<VecDeque<String>>>,
+    paused: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    stopped: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    current: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    history: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     tx: Sender<Msg>,
 ) {
     {
@@ -199,6 +234,85 @@ pub(crate) fn spawn_auto_advance(
     }
     std::thread::spawn(move || loop {
         use std::sync::atomic::Ordering;
+        // Background tray transport. These commands arrive while the UI may be
+        // frozen in Hide mode, so they must act on the sink directly.
+        let cmd = control.lock().ok().and_then(|mut q| q.pop_front());
+        if let Some(cmd) = cmd {
+            av_log(&format!("tray-control: {}", cmd));
+            let mut start = |path: String| -> bool {
+                let Some((source, wav)) =
+                    build_auto_source(&path, &eq_shared, &viz_lock, &now, &current, &history)
+                else {
+                    return false;
+                };
+                if let Some(w) = wav {
+                    let _ = tx.send(Msg::Transcoded { display: path.clone(), wav: w });
+                }
+                sink.stop();
+                sink.append(source);
+                sink.play();
+                av_log(&format!("tray-control: started {}", path));
+                paused.store(false, Ordering::Relaxed);
+                stopped.store(false, Ordering::Relaxed);
+                active.store(true, Ordering::Relaxed);
+                true
+            };
+            match cmd.as_str() {
+                "play_pause" => {
+                    if stopped.load(Ordering::Relaxed) || sink.empty() {
+                        let path = current
+                            .lock()
+                            .ok()
+                            .and_then(|c| c.clone())
+                            .or_else(|| queue.lock().ok().and_then(|mut q| q.pop_front()));
+                        if let Some(path) = path {
+                            let _ = start(path);
+                        }
+                    } else if paused.load(Ordering::Relaxed) {
+                        sink.play();
+                        paused.store(false, Ordering::Relaxed);
+                        active.store(true, Ordering::Relaxed);
+                    } else {
+                        sink.pause();
+                        paused.store(true, Ordering::Relaxed);
+                        active.store(false, Ordering::Relaxed);
+                    }
+                }
+                "stop" => {
+                    sink.stop();
+                    paused.store(false, Ordering::Relaxed);
+                    stopped.store(true, Ordering::Relaxed);
+                    active.store(false, Ordering::Relaxed);
+                    if let Ok(mut n) = now.lock() {
+                        *n = None;
+                    }
+                }
+                "skip" => {
+                    let next = queue.lock().ok().and_then(|mut q| q.pop_front());
+                    if let Some(path) = next {
+                        let _ = start(path);
+                    }
+                }
+                "prev" => {
+                    let cur = current.lock().ok().and_then(|c| c.clone());
+                    let prev = {
+                        let mut h = match history.lock() {
+                            Ok(h) => h,
+                            Err(p) => p.into_inner(),
+                        };
+                        if h.last().map(|p| Some(p.as_str()) == cur.as_deref()).unwrap_or(false) {
+                            h.pop();
+                        }
+                        h.pop()
+                    };
+                    if let Some(path) = prev {
+                        let _ = start(path);
+                    }
+                }
+                _ => {}
+            }
+            continue;
+        }
         if !active.load(Ordering::Relaxed) {
             std::thread::sleep(Duration::from_millis(150));
             continue;
@@ -222,7 +336,9 @@ pub(crate) fn spawn_auto_advance(
         if !active.load(Ordering::Relaxed) || gen.load(Ordering::Relaxed) != generation {
             continue;
         }
-        let Some((source, wav)) = build_auto_source(&path, &eq_shared, &viz_lock, &now) else {
+        let Some((source, wav)) =
+            build_auto_source(&path, &eq_shared, &viz_lock, &now, &current, &history)
+        else {
             av_log(&format!("auto-advance: could not open {}", path));
             continue;
         };
@@ -246,7 +362,15 @@ impl PlayerApp {
             return;
         }
         self.reset_auto_advance();
+        if let Ok(mut c) = self.tray_control.lock() {
+            c.clear();
+        }
         self.song_starting = true;
+        self.tray_paused
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.tray_stopped
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.tray_note_current(path);
         self.state.current_song = Some(path.to_string());
         self.playing_pl_idx = self.state.playlist.iter().position(|p| p == path);
         self.eq_resume = None;
@@ -274,6 +398,51 @@ impl PlayerApp {
         }
         self.auto_active
             .store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Remember a path for the background tray controller, so Skip and
+    /// Previous still work while the UI is hidden.
+    pub(crate) fn tray_note_current(&self, path: &str) {
+        if let Ok(mut cur) = self.tray_current.lock() {
+            *cur = Some(path.to_string());
+        }
+        if let Ok(mut h) = self.tray_history.lock() {
+            if h.last().map(|p| p.as_str()) != Some(path) {
+                h.push(path.to_string());
+                if h.len() > 200 {
+                    h.remove(0);
+                }
+            }
+        }
+    }
+
+    /// Pull paused/stopped changes made by the tray controller into the UI
+    /// state after the window is shown again.
+    pub(crate) fn sync_tray_state(&mut self) {
+        if self
+            .tray_stopped
+            .swap(false, std::sync::atomic::Ordering::Relaxed)
+        {
+            self.state.current_song = None;
+            self.playing.clear();
+            self.state.is_paused = false;
+            self.pos = 0.0;
+            self.seek_base = 0.0;
+            self.len_secs = 0.0;
+            self.play_started = None;
+            self.meta = (String::new(), "Unknown".to_string(), "Unknown".to_string());
+            self.art_tex = None;
+            self.art_state = 1;
+            self.set_status("Stopped");
+            return;
+        }
+        let paused = self
+            .tray_paused
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if self.state.is_paused != paused {
+            self.state.is_paused = paused;
+            self.set_status(if paused { "Paused" } else { "Playing" });
+        }
     }
 
     /// Fill the background queue with upcoming paths. The worker only needs
@@ -342,6 +511,11 @@ impl PlayerApp {
         if !crate::cue::exists(&path) {
             return;
         }
+        self.tray_note_current(&path);
+        self.tray_paused
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.tray_stopped
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         self.state.current_song = Some(path.clone());
         self.playing_pl_idx = self.state.playlist.iter().position(|p| p == &path);
         self.state.prev_songs.push(path.clone());
@@ -714,6 +888,10 @@ impl PlayerApp {
         self.sink.pause();
         self.auto_active
             .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.tray_paused
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        self.tray_stopped
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         self.set_status("Paused");
     }
 
@@ -722,6 +900,10 @@ impl PlayerApp {
         self.sink.play();
         self.auto_active
             .store(true, std::sync::atomic::Ordering::Relaxed);
+        self.tray_paused
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.tray_stopped
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         self.refill_auto_advance();
         self.set_status("Playing");
     }
@@ -729,6 +911,16 @@ impl PlayerApp {
     pub(crate) fn stop_music(&mut self) {
         self.song_starting = false;
         self.reset_auto_advance();
+        if let Ok(mut c) = self.tray_control.lock() {
+            c.clear();
+        }
+        self.tray_paused
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.tray_stopped
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        if let Ok(mut cur) = self.tray_current.lock() {
+            *cur = None;
+        }
         self.kill_audio_pipe();
         self.sink.stop();
         self.sink.set_speed(1.0);

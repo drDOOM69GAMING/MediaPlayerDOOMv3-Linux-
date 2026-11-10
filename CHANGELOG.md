@@ -1,5 +1,12 @@
 # Changelog
 
+## v3.2.36
+
+- Tray Play/Pause, Stop, Skip and Previous now run through the background playback worker, so they work while the window is hidden and the UI is frozen.
+- Tray playback commands no longer wait for a UI repaint.
+- Hidden song notifications now replace the previous popup by notification ID instead of stacking.
+- Notification expiry remains 3.5 seconds, with one notification per song.
+
 ## v3.2.35
 
 - Background auto-advance prepares and queues the next track on the audio sink, so playback continues when the window is minimized, obscured or hidden to the tray.
