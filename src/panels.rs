@@ -23,6 +23,23 @@ use crate::{
 
 // Main UI panels: title bar, status bar, side panel, central deck panel and auxiliary windows (radio, help, add-radio, lyrics).
 
+/// Fixed-width label column so the deck rows line up like a boombox panel.
+fn row_label(ui: &mut egui::Ui, text: &str, th: &ThemePalette, h: f32) {
+    ui.allocate_ui_with_layout(
+        egui::vec2(70.0, h),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            ui.label(
+                RichText::new(text)
+                    .color(darken(th.accent, 0.25))
+                    .monospace()
+                    .strong()
+                    .size(9.0),
+            );
+        },
+    );
+}
+
 impl PlayerApp {
     /// Dump button + live progress + cancel, shared by the DVD/Blu-ray decks.
     pub(crate) fn draw_disc_dump(&mut self, ui: &mut egui::Ui, kind: &str, th: &ThemePalette) {
@@ -223,7 +240,8 @@ impl PlayerApp {
                 // Keep the status text from pushing the Exit button and the
                 // shortcut help around as song titles change length.
                 let yt_reserve = if self.yt_pct > -1.0 { 250.0 } else { 0.0 };
-                let status_w = (ui.available_width() - 330.0 - yt_reserve).max(80.0);
+                let tagline_w = 150.0;
+                let status_w = (ui.available_width() - 330.0 - tagline_w - yt_reserve).max(80.0);
                 ui.add_sized(
                     [status_w, 16.0],
                     egui::Label::new(RichText::new(&self.status).color(th.fg).monospace().size(11.0)).truncate(),
@@ -260,6 +278,14 @@ impl PlayerApp {
                             .size(9.0),
                     );
                 }
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new("Support physical media")
+                        .color(th.accent)
+                        .monospace()
+                        .strong()
+                        .size(10.0),
+                );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if retro_btn(ui, "Exit", Color32::from_rgb(255, 110, 110), th.btn_bg).clicked() {
                         let c = self.ctx.clone();
@@ -1192,30 +1218,33 @@ impl PlayerApp {
             }
 
             ui.horizontal(|ui| {
-                ui.label(RichText::new("DECK").color(darken(th.accent, 0.4)).monospace().size(9.0));
+                row_label(ui, "DECK", &th, 24.0);
                 let modes = [(DeckMode::Tape, "TAPE"), (DeckMode::Disc, "CD"), (DeckMode::Dvd, "DVD"), (DeckMode::BluRay, "BLU-RAY"), (DeckMode::Radio, "RADIO")];
                 for (m, lbl) in modes {
                     let on = self.deck_mode == m;
-                    if retro_btn(ui, lbl, if on { th.playing_fg } else { th.btn_fg }, th.btn_bg).clicked() {
+                    if retro_btn_ex(ui, lbl, if on { th.playing_fg } else { th.btn_fg }, th.btn_bg, 64.0, 24.0).clicked() {
                         self.set_deck_mode(m);
                     }
                 }
+                ui.add_space(8.0);
+                ui.label(RichText::new("SOURCE").color(Color32::from_gray(110)).monospace().size(8.0));
             });
 
             ui.add_space(4.0);
             ui.horizontal(|ui| {
-                ui.add_space(2.0);
+                row_label(ui, "TRANSPORT", &th, 42.0);
                 let red = Color32::from_rgb(150, 26, 26);
                 let rec_red = Color32::from_rgb(205, 45, 45);
+                let key_w = 50.0;
                 let wn = ui.input(|i| i.time);
-                let rew = deck_key(ui, "REW", th.btn_fg, th.btn_bg);
+                let rew = deck_key_ex(ui, "REW", th.btn_fg, th.btn_bg, key_w);
                 if rew.drag_started() {
                     self.wind_arm = Some((-1.0, wn));
                 }
-                if deck_key(ui, "PLAY", Color32::from_rgb(255, 235, 235), mix(th.btn_bg, red, 0.45)).clicked() {
+                if deck_key_ex(ui, "PLAY", Color32::from_rgb(255, 235, 235), mix(th.btn_bg, red, 0.45), key_w).clicked() {
                     self.play_press();
                 }
-                let fwd = deck_key(ui, "FWD", th.btn_fg, th.btn_bg);
+                let fwd = deck_key_ex(ui, "FWD", th.btn_fg, th.btn_bg, key_w);
                 if fwd.drag_started() {
                     self.wind_arm = Some((1.0, wn));
                 }
@@ -1244,7 +1273,7 @@ impl PlayerApp {
                         self.set_winding(None);
                     }
                 }
-                if deck_key(ui, "STOP", th.btn_fg, th.btn_bg).clicked() {
+                if deck_key_ex(ui, "STOP", th.btn_fg, th.btn_bg, key_w).clicked() {
                     if self.video_on || self.video_current.is_some() {
                         self.close_video();
                     }
@@ -1256,7 +1285,7 @@ impl PlayerApp {
                 let pause_ready = self.play_started.is_some() || self.state.is_paused || self.radio_on;
                 let pause_col = if pause_ready { Color32::from_rgb(255, 220, 130) } else { darken(th.btn_fg, 0.5) };
                 let pause_lbl = if self.state.is_paused { "RESUME" } else { "PAUSE" };
-                if deck_key(ui, pause_lbl, pause_col, th.btn_bg).clicked() && pause_ready {
+                if deck_key_ex(ui, pause_lbl, pause_col, th.btn_bg, key_w).clicked() && pause_ready {
                     self.toggle_pause();
                 }
                 let rec_lbl = if self.recording && (ui.input(|i| i.time) * 2.0).fract() < 0.5 {
@@ -1264,10 +1293,10 @@ impl PlayerApp {
                 } else {
                     "REC"
                 };
-                if deck_key(ui, rec_lbl, Color32::from_rgb(255, 160, 160), mix(th.btn_bg, rec_red, 0.35)).clicked() {
+                if deck_key_ex(ui, rec_lbl, Color32::from_rgb(255, 160, 160), mix(th.btn_bg, rec_red, 0.35), key_w).clicked() {
                     self.req_record();
                 }
-                if deck_key(ui, "EJECT", th.btn_fg, th.btn_bg).clicked() {
+                if deck_key_ex(ui, "EJECT", th.btn_fg, th.btn_bg, key_w).clicked() {
                     if self.tape_out {
                         self.tape_out = false;
                         self.set_status("Tape in");
@@ -1282,21 +1311,27 @@ impl PlayerApp {
                     }
                 }
                 ui.add_space(8.0);
-                ui.vertical(|ui| {
-                    ui.add_space(2.0);
-                    ui.horizontal(|ui| {
-                        if retro_btn(ui, "Skip", th.playing_fg, th.btn_bg).clicked() { self.skip_song(); }
-                        if retro_btn(ui, "Prev", th.btn_fg, th.btn_bg).clicked() { self.prev_song(); }
-                    });
-                    ui.horizontal(|ui| {
-                        if retro_btn(ui, "Change Dir", th.playing_fg, th.btn_bg).clicked() {
+                ui.separator();
+                ui.add_space(6.0);
+                egui::Grid::new("deck_aux")
+                    .num_columns(2)
+                    .spacing([6.0, 4.0])
+                    .show(ui, |ui| {
+                        if retro_btn_ex(ui, "Skip", th.playing_fg, th.btn_bg, 80.0, 19.0).clicked() {
+                            self.skip_song();
+                        }
+                        if retro_btn_ex(ui, "Prev", th.btn_fg, th.btn_bg, 80.0, 19.0).clicked() {
+                            self.prev_song();
+                        }
+                        ui.end_row();
+                        if retro_btn_ex(ui, "Change Dir", th.playing_fg, th.btn_bg, 80.0, 19.0).clicked() {
                             if let Some(dir) = rfd::FileDialog::new().pick_folder() {
                                 self.scanning = true;
                                 self.set_status("Scanning library...");
                                 let _ = self.lib_tx.send(LibCmd::Scan(dir.to_string_lossy().to_string()));
                             }
                         }
-                        if retro_btn(ui, "Refresh", th.btn_fg, th.btn_bg).clicked() {
+                        if retro_btn_ex(ui, "Refresh", th.btn_fg, th.btn_bg, 80.0, 19.0).clicked() {
                             self.scanning = true;
                             if let Some(d) = self.state.current_dir.clone() {
                                 self.set_status("Scanning library...");
@@ -1306,31 +1341,51 @@ impl PlayerApp {
                                 let _ = self.lib_tx.send(LibCmd::FindMusicFolder);
                             }
                         }
+                        ui.end_row();
                     });
-                });
             });
 
-            ui.add_space(6.0);
-            ui.separator();
             ui.horizontal(|ui| {
-                if retro_btn(ui, "Save", th.btn_fg, th.btn_bg).clicked() { self.save_song(); }
-                if retro_btn(ui, "Clear", th.btn_fg, th.btn_bg).clicked() { self.clear_playlist(); }
-                if retro_btn(ui, "Shuffle", th.playing_fg, th.btn_bg).clicked() { self.shuffle_playlist(); }
-                if retro_btn(ui, "Smart", th.playing_fg, th.btn_bg).clicked() { self.smart_shuffle(); }
-                if retro_btn(ui, "Add", th.btn_fg, th.btn_bg).clicked() {
-                    if let Some(files) = rfd::FileDialog::new().add_filter("Audio", &AUDIO_FORMATS).pick_files() {
-                        let entries: Vec<String> = files.iter().map(|p| p.to_string_lossy().to_string()).collect();
-                        self.set_status("Adding files...");
-                        let _ = self.lib_tx.send(LibCmd::AddMany(entries));
+                row_label(ui, "PLAYLIST", &th, 24.0);
+                egui::Grid::new("deck_playlist_buttons")
+                .num_columns(7)
+                .spacing([6.0, 4.0])
+                .show(ui, |ui| {
+                    if retro_btn_ex(ui, "Save", th.btn_fg, th.btn_bg, 72.0, 24.0).clicked() {
+                        self.save_song();
                     }
-                }
-                if retro_btn(ui, "Convert", th.fg, th.btn_bg)
-                    .on_hover_text("Convert a folder of music to MP3/AAC/FLAC/OGG/Opus/WAV/AIFF/ALAC/WMA")
-                    .clicked()
-                {
-                    self.convert_open = true;
-                }
-                if self.meta_all_active {
+                    if retro_btn_ex(ui, "Clear", th.btn_fg, th.btn_bg, 72.0, 24.0).clicked() {
+                        self.clear_playlist();
+                    }
+                    if retro_btn_ex(ui, "Shuffle", th.playing_fg, th.btn_bg, 72.0, 24.0).clicked() {
+                        self.shuffle_playlist();
+                    }
+                    if retro_btn_ex(ui, "Smart", th.playing_fg, th.btn_bg, 72.0, 24.0).clicked() {
+                        self.smart_shuffle();
+                    }
+                    if retro_btn_ex(ui, "Add", th.btn_fg, th.btn_bg, 72.0, 24.0).clicked() {
+                        if let Some(files) = rfd::FileDialog::new().add_filter("Audio", &AUDIO_FORMATS).pick_files() {
+                            let entries: Vec<String> = files.iter().map(|p| p.to_string_lossy().to_string()).collect();
+                            self.set_status("Adding files...");
+                            let _ = self.lib_tx.send(LibCmd::AddMany(entries));
+                        }
+                    }
+                    if retro_btn_ex(ui, "Convert", th.fg, th.btn_bg, 72.0, 24.0)
+                        .on_hover_text("Convert a folder of music to MP3/AAC/FLAC/OGG/Opus/WAV/AIFF/ALAC/WMA")
+                        .clicked()
+                    {
+                        self.convert_open = true;
+                    }
+                    let meta = retro_btn_ex(ui, "Meta All", th.playing_fg, th.btn_bg, 72.0, 24.0)
+                        .on_hover_text("Fetch tags, cover art (iTunes/Deezer/Cover Art Archive/TheAudioDB/Discogs) and MusicBrainz/Discogs community ratings for every playlist track");
+                    if meta.clicked() && !self.meta_all_active {
+                        self.download_all_meta();
+                    }
+                    ui.end_row();
+                });
+            });
+            if self.meta_all_active {
+                ui.horizontal(|ui| {
                     let scanning = self.meta_all_art_scanning;
                     let frac = if scanning { 0.0 } else { self.meta_all_frac() };
                     let eta = self.meta_all_eta_text();
@@ -1341,23 +1396,16 @@ impl PlayerApp {
                     };
                     ui.add(
                         egui::ProgressBar::new(frac)
-                            .desired_width(220.0)
+                            .desired_width(330.0)
                             .text(label),
                     );
-                    if retro_btn(ui, "CANCEL", Color32::from_rgb(255, 120, 120), th.btn_bg)
+                    if retro_btn_ex(ui, "CANCEL", Color32::from_rgb(255, 120, 120), th.btn_bg, 72.0, 24.0)
                         .on_hover_text("Stop Meta All (already-completed tags/covers/ratings are kept)")
                         .clicked()
                     {
                         self.cancel_meta_all();
                     }
-                } else if retro_btn(ui, "Meta All", th.playing_fg, th.btn_bg)
-                    .on_hover_text("Fetch tags, cover art (iTunes/Deezer/Cover Art Archive/TheAudioDB/Discogs) and MusicBrainz/Discogs community ratings for every playlist track")
-                    .clicked()
-                {
-                    self.download_all_meta();
-                }
-            });
-            if self.meta_all_active {
+                });
                 ui.label(
                     RichText::new(self.meta_all_detail_text())
                         .color(Color32::from_gray(150))
@@ -1367,39 +1415,59 @@ impl PlayerApp {
             }
 
             ui.horizontal(|ui| {
+                row_label(ui, "MODE", &th, 24.0);
                 let accent = |on: bool| if on { th.playing_fg } else { th.btn_fg };
-                if retro_btn(ui, &format!("Repeat: {}", if self.state.repeat_enabled { "On" } else { "Off" }), accent(self.state.repeat_enabled), th.btn_bg).clicked() { self.toggle_repeat(); }
+                if retro_btn_ex(ui, &format!("Repeat: {}", if self.state.repeat_enabled { "On" } else { "Off" }), accent(self.state.repeat_enabled), th.btn_bg, 96.0, 24.0).clicked() {
+                    self.toggle_repeat();
+                }
                 let stars_lbl = if self.rating_filter == 0 { "All".to_string() } else { format!("{}★+", self.rating_filter) };
-                if retro_btn(ui, &format!("★{}", stars_lbl), accent(self.rating_filter > 0), th.btn_bg).on_hover_text("Star filter: auto-play only songs rated this many stars. Click to cycle: All -> 1+ ... -> 5+.").clicked() { self.cycle_rating_filter(); }
+                if retro_btn_ex(ui, &format!("★{}", stars_lbl), accent(self.rating_filter > 0), th.btn_bg, 72.0, 24.0)
+                    .on_hover_text("Star filter: auto-play only songs rated this many stars. Click to cycle: All -> 1+ ... -> 5+.")
+                    .clicked()
+                {
+                    self.cycle_rating_filter();
+                }
             });
 
             ui.horizontal(|ui| {
-                if retro_btn(ui, "Save Pl", th.btn_fg, th.btn_bg).clicked() {
-                    if let Some(p) = rfd::FileDialog::new().set_file_name("playlist.json").add_filter("JSON", &["json"]).save_file() {
-                        let pl = self.state.playlist.clone();
-                        let _ = self.lib_tx.send(LibCmd::SavePlaylist(p.to_string_lossy().to_string(), pl));
+                row_label(ui, "FILES", &th, 24.0);
+                egui::Grid::new("deck_file_buttons")
+                .num_columns(6)
+                .spacing([6.0, 4.0])
+                .show(ui, |ui| {
+                    if retro_btn_ex(ui, "Save Pl", th.btn_fg, th.btn_bg, 72.0, 24.0).clicked() {
+                        if let Some(p) = rfd::FileDialog::new().set_file_name("playlist.json").add_filter("JSON", &["json"]).save_file() {
+                            let pl = self.state.playlist.clone();
+                            let _ = self.lib_tx.send(LibCmd::SavePlaylist(p.to_string_lossy().to_string(), pl));
+                        }
                     }
-                }
-                if retro_btn(ui, "Load Pl", th.btn_fg, th.btn_bg).clicked() {
-                    if let Some(p) = rfd::FileDialog::new().add_filter("JSON", &["json"]).pick_file() {
-                        let _ = self.lib_tx.send(LibCmd::LoadPlaylist(p.to_string_lossy().to_string()));
+                    if retro_btn_ex(ui, "Load Pl", th.btn_fg, th.btn_bg, 72.0, 24.0).clicked() {
+                        if let Some(p) = rfd::FileDialog::new().add_filter("JSON", &["json"]).pick_file() {
+                            let _ = self.lib_tx.send(LibCmd::LoadPlaylist(p.to_string_lossy().to_string()));
+                        }
                     }
-                }
-                if retro_btn(ui, "Look Up", th.btn_fg, th.btn_bg).clicked() {
-                    if let Some(s) = self.state.current_song.clone() {
-                        open_in_explorer(&s);
+                    if retro_btn_ex(ui, "Look Up", th.btn_fg, th.btn_bg, 72.0, 24.0).clicked() {
+                        if let Some(s) = self.state.current_song.clone() {
+                            open_in_explorer(&s);
+                        }
                     }
-                }
-                if retro_btn(ui, "Video", if self.video_on { th.playing_fg } else { th.btn_fg }, th.btn_bg).clicked() {
-                    if self.video_on { self.close_video(); } else { self.play_video(); }
-                }
-                if retro_btn(ui, "Lyrics", th.btn_fg, th.btn_bg).clicked() { self.fetch_lyrics(); }
-                if retro_btn(ui, "Help", th.btn_fg, th.btn_bg).clicked() { self.show_help = true; }
+                    if retro_btn_ex(ui, "Video", if self.video_on { th.playing_fg } else { th.btn_fg }, th.btn_bg, 72.0, 24.0).clicked() {
+                        if self.video_on { self.close_video(); } else { self.play_video(); }
+                    }
+                    if retro_btn_ex(ui, "Lyrics", th.btn_fg, th.btn_bg, 72.0, 24.0).clicked() {
+                        self.fetch_lyrics();
+                    }
+                    if retro_btn_ex(ui, "Help", th.btn_fg, th.btn_bg, 72.0, 24.0).clicked() {
+                        self.show_help = true;
+                    }
+                    ui.end_row();
+                });
             });
 
             ui.horizontal_wrapped(|ui| {
-                if retro_btn(ui, &format!("Theme: {}", self.state.theme), th.playing_fg, th.btn_bg).clicked() { self.cycle_theme(); }
-                if retro_btn(ui, &format!("EQ {}", if self.eq_on { self.eq_name() } else { "off" }), if self.eq_on { th.playing_fg } else { th.btn_fg }, th.btn_bg).clicked() { self.eq_toggle(); }
+                ui.add_space(70.0);
+                if retro_btn_ex(ui, &format!("Theme: {}", self.state.theme), th.playing_fg, th.btn_bg, 150.0, 24.0).clicked() { self.cycle_theme(); }
+                if retro_btn_ex(ui, &format!("EQ {}", if self.eq_on { self.eq_name() } else { "off" }), if self.eq_on { th.playing_fg } else { th.btn_fg }, th.btn_bg, 150.0, 24.0).clicked() { self.eq_toggle(); }
                 ui.label(RichText::new("CURVE:").color(th.fg).monospace().size(10.0));
                 let mut pick: Option<&'static str> = None;
                 egui::ComboBox::from_id_salt("eq_curve_pick")

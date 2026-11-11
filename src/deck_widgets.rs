@@ -5,8 +5,8 @@ use eframe::egui;
 use eframe::egui::{Align2, Color32, FontId, Painter, Pos2, Rect, RichText, Stroke, Ui, Vec2};
 use crate::theme::{darken, hex, lighten, mix, ThemePalette};
 pub fn retro_btn(ui: &mut egui::Ui, label: &str, fg: Color32, base: Color32) -> egui::Response {
-    let w = label.chars().count() as f32 * 7.0 + 24.0;
-    let h = 20.0;
+    let w = label.chars().count() as f32 * 7.2 + 30.0;
+    let h = 23.0;
     retro_btn_ex(ui, label, fg, base, w, h)
 }
 
@@ -17,43 +17,80 @@ pub fn retro_btn_ex(ui: &mut egui::Ui, label: &str, fg: Color32, base: Color32, 
         let hovered = resp.hovered();
         let pressed = resp.is_pointer_button_down_on();
         let off = if pressed { 1.0 } else { 0.0 };
-        let r = rect.shrink(0.5).translate(egui::vec2(off, off));
-        let rr = 2.0;
-        let top = mix(base, Color32::from_rgb(255, 255, 255), if pressed { 0.24 } else if hovered { 0.42 } else { 0.32 });
-        let bot = darken(base, if pressed { 0.50 } else { 0.22 });
-        painter.rect_filled(r, rr, bot);
-        let hh = r.height();
+        let r = rect.shrink(1.0).translate(egui::vec2(0.0, off));
+        let rr = 4.0;
+        // Soft drop shadow, then a two-tone body and a raised face.
         painter.rect_filled(
-            egui::Rect::from_min_max(r.min, egui::pos2(r.max.x, r.min.y + hh * 0.42)),
+            r.translate(egui::vec2(0.0, 1.5)).shrink(0.5),
+            rr,
+            Color32::from_rgba_unmultiplied(0, 0, 0, 100),
+        );
+        let top = mix(
+            base,
+            Color32::WHITE,
+            if pressed { 0.16 } else if hovered { 0.46 } else { 0.34 },
+        );
+        let bot = darken(
+            base,
+            if pressed { 0.48 } else if hovered { 0.04 } else { 0.14 },
+        );
+        painter.rect_filled(r, rr, bot);
+        painter.rect_filled(
+            egui::Rect::from_min_max(r.min, egui::pos2(r.max.x, r.min.y + r.height() * 0.55)),
             rr,
             top,
         );
         let fr = r.shrink(2.0);
-        painter.rect_filled(fr, 1.5, if pressed { darken(base, 0.08) } else { mix(base, Color32::BLACK, 0.13) });
+        let face = if pressed {
+            mix(base, Color32::WHITE, 0.02)
+        } else {
+            mix(base, Color32::WHITE, 0.07)
+        };
+        painter.rect_filled(fr, (rr - 1.0).max(1.0), face);
         painter.line_segment(
-            [fr.left_top(), fr.right_top()],
-            egui::Stroke::new(1.0, if pressed { darken(base, 0.6) } else { lighten(base, 0.45) }),
+            [
+                fr.left_top() + egui::vec2(1.0, 0.0),
+                fr.right_top() - egui::vec2(1.0, 0.0),
+            ],
+            egui::Stroke::new(
+                1.0,
+                if pressed { darken(base, 0.38) } else { lighten(base, 0.62) },
+            ),
         );
         painter.line_segment(
-            [fr.left_top(), fr.left_bottom()],
-            egui::Stroke::new(1.0, if pressed { darken(base, 0.6) } else { lighten(base, 0.3) }),
+            [
+                fr.left_bottom() + egui::vec2(1.0, 0.0),
+                fr.right_bottom() - egui::vec2(1.0, 0.0),
+            ],
+            egui::Stroke::new(1.0, darken(base, 0.68)),
         );
-        painter.line_segment(
-            [fr.right_top(), fr.right_bottom()],
-            egui::Stroke::new(1.0, darken(base, 0.72)),
+        painter.rect_stroke(
+            r,
+            rr,
+            egui::Stroke::new(
+                1.0,
+                if hovered && !pressed {
+                    lighten(base, 0.50)
+                } else {
+                    lighten(base, 0.12)
+                },
+            ),
+            egui::StrokeKind::Inside,
         );
-        painter.line_segment(
-            [fr.left_bottom(), fr.right_bottom()],
-            egui::Stroke::new(1.0, darken(base, 0.78)),
-        );
-        if hovered && !pressed {
-            painter.rect_stroke(fr, 1.5, egui::Stroke::new(1.0, lighten(base, 0.2)), egui::StrokeKind::Inside);
-        }
+        let text_pos = fr.center() + egui::vec2(0.0, off);
+        let font = egui::FontId::monospace(if h > 26.0 { 12.0 } else { 11.0 });
         painter.text(
-            fr.center() + egui::vec2(0.0, off),
+            text_pos + egui::vec2(0.0, 1.0),
             egui::Align2::CENTER_CENTER,
             label,
-            egui::FontId::monospace(if h > 26.0 { 11.5 } else { 10.0 }),
+            font.clone(),
+            Color32::from_rgba_unmultiplied(0, 0, 0, 110),
+        );
+        painter.text(
+            text_pos,
+            egui::Align2::CENTER_CENTER,
+            label,
+            font,
             fg,
         );
     }
@@ -62,52 +99,95 @@ pub fn retro_btn_ex(ui: &mut egui::Ui, label: &str, fg: Color32, base: Color32, 
 
 pub fn deck_key(ui: &mut egui::Ui, label: &str, fg: Color32, base: Color32) -> egui::Response {
     let w = (label.chars().count() as f32 * 6.4 + 20.0).max(40.0);
-    let h = 40.0;
+    deck_key_ex(ui, label, fg, base, w)
+}
+
+pub fn deck_key_ex(
+    ui: &mut egui::Ui,
+    label: &str,
+    fg: Color32,
+    base: Color32,
+    w: f32,
+) -> egui::Response {
+    let h = 42.0;
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::click_and_drag());
     if ui.is_rect_visible(rect) {
         let painter = ui.painter().with_clip_rect(ui.clip_rect());
         let pressed = resp.is_pointer_button_down_on();
         let hovered = resp.hovered();
         let off = if pressed { 1.0 } else { 0.0 };
-        let r = rect.shrink(1.0).translate(egui::vec2(off, off));
-        let top = mix(base, Color32::from_rgb(255, 255, 255), if pressed { 0.24 } else { 0.40 });
-        let bot = darken(base, if pressed { 0.50 } else { 0.22 });
-        let rr = 2.0;
-        painter.rect_filled(r, rr, bot);
-        let hh = r.height();
+        let r = rect.shrink(1.5).translate(egui::vec2(0.0, off));
+        let rr = 4.0;
         painter.rect_filled(
-            egui::Rect::from_min_max(r.min, egui::pos2(r.max.x, r.min.y + hh * 0.42)),
+            r.translate(egui::vec2(0.0, 1.5)).shrink(0.5),
+            rr,
+            Color32::from_rgba_unmultiplied(0, 0, 0, 100),
+        );
+        let top = mix(
+            base,
+            Color32::WHITE,
+            if pressed { 0.20 } else if hovered { 0.50 } else { 0.40 },
+        );
+        let bot = darken(
+            base,
+            if pressed { 0.50 } else if hovered { 0.06 } else { 0.16 },
+        );
+        painter.rect_filled(r, rr, bot);
+        painter.rect_filled(
+            egui::Rect::from_min_max(r.min, egui::pos2(r.max.x, r.min.y + r.height() * 0.55)),
             rr,
             top,
         );
         let fr = r.shrink(3.0);
-        painter.rect_filled(fr, 1.5, if pressed { darken(base, 0.08) } else { mix(base, Color32::BLACK, 0.14) });
-        painter.line_segment(
-            [fr.left_top(), fr.right_top()],
-            egui::Stroke::new(1.0, if pressed { darken(base, 0.6) } else { lighten(base, 0.45) }),
+        painter.rect_filled(
+            fr,
+            2.0,
+            if pressed {
+                mix(base, Color32::WHITE, 0.02)
+            } else {
+                mix(base, Color32::WHITE, 0.06)
+            },
         );
         painter.line_segment(
-            [fr.left_top(), fr.left_bottom()],
-            egui::Stroke::new(1.0, if pressed { darken(base, 0.6) } else { lighten(base, 0.3) }),
+            [
+                fr.left_top() + egui::vec2(1.0, 0.0),
+                fr.right_top() - egui::vec2(1.0, 0.0),
+            ],
+            egui::Stroke::new(
+                1.0,
+                if pressed { darken(base, 0.40) } else { lighten(base, 0.58) },
+            ),
         );
         painter.line_segment(
-            [fr.right_top(), fr.right_bottom()],
-            egui::Stroke::new(1.0, darken(base, 0.72)),
+            [
+                fr.left_bottom() + egui::vec2(1.0, 0.0),
+                fr.right_bottom() - egui::vec2(1.0, 0.0),
+            ],
+            egui::Stroke::new(1.0, darken(base, 0.70)),
         );
-        painter.line_segment(
-            [fr.left_bottom(), fr.right_bottom()],
-            egui::Stroke::new(1.0, darken(base, 0.78)),
+        painter.rect_stroke(
+            r,
+            rr,
+            egui::Stroke::new(
+                1.0,
+                if hovered && !pressed {
+                    lighten(base, 0.45)
+                } else {
+                    lighten(base, 0.12)
+                },
+            ),
+            egui::StrokeKind::Inside,
         );
-        if hovered && !pressed {
-            painter.rect_stroke(fr, 1.5, egui::Stroke::new(1.0, lighten(base, 0.2)), egui::StrokeKind::Inside);
-        }
+        let text_pos = fr.center() + egui::vec2(0.0, off);
+        let font = egui::FontId::monospace(11.0);
         painter.text(
-            fr.center() + egui::vec2(0.0, off),
+            text_pos + egui::vec2(0.0, 1.0),
             egui::Align2::CENTER_CENTER,
             label,
-            egui::FontId::monospace(10.5),
-            fg,
+            font.clone(),
+            Color32::from_rgba_unmultiplied(0, 0, 0, 110),
         );
+        painter.text(text_pos, egui::Align2::CENTER_CENTER, label, font, fg);
     }
     resp
 }

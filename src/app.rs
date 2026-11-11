@@ -739,7 +739,7 @@ impl PlayerApp {
             web_tx,
             yt_tx,
             msg_rx,
-            status: format!("{} v{} - ready", APP_NAME, APP_VERSION),
+            status: format!("{} v{}", APP_NAME, APP_VERSION),
             error: String::new(),
             status_until: None,
             error_until: None,

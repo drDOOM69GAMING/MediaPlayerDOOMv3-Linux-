@@ -1,5 +1,13 @@
 # Changelog
 
+## v3.2.42
+
+- The bottom bar now keeps a Support physical media tagline next to the playback status.
+- Restyled the deck buttons with deeper bevels, rounded corners, clearer hover and pressed states, and larger labels.
+- The transport keys use the same raised button style.
+- The deck controls are now laid out like a boombox panel: a fixed left label column, equal-width transport keys and aligned button rows.
+- The playlist, mode and file buttons line up in columns instead of drifting with label length.
+
 ## v3.2.41
 
 ### Band browser
