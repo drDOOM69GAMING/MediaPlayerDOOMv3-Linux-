@@ -395,6 +395,14 @@ impl PlayerApp {
                 } else {
                     ui.label(RichText::new("---").color(Color32::from_gray(90)).monospace().size(9.0));
                 }
+                if self.state.current_song.is_some() {
+                    if retro_btn_ex(ui, "COVER", th.btn_fg, th.btn_bg, 56.0, 23.0)
+                        .on_hover_text("Choose cover art for this album")
+                        .clicked()
+                    {
+                        self.set_cover_from_file();
+                    }
+                }
             });
 
             let dt = ui.input(|i| i.stable_dt);
@@ -2460,6 +2468,23 @@ impl PlayerApp {
                 );
                 ui.add_space(6.0);
 
+                ui.label(RichText::new("UPDATES").color(acc).monospace().strong());
+                ui.label(RichText::new("Automatic ........... Checked shortly after launch and every six hours").color(dim).monospace());
+                ui.label(RichText::new("Banner .............. A yellow bar at the top; click it to open the release page").color(dim).monospace());
+                ui.label(RichText::new("Nothing installs .... The app only opens the release page; it never downloads or replaces itself").color(dim).monospace());
+                ui.label(RichText::new("Single instance ..... Opening a file while the app is running reuses the same window").color(dim).monospace());
+                if retro_btn(ui, "CHECK FOR UPDATES", th.playing_fg, th.btn_bg)
+                    .on_hover_text("Ask GitHub for the latest release now")
+                    .clicked()
+                {
+                    let _ = self.net_tx.send(NetCmd::CheckUpdate {
+                        current: APP_VERSION.to_string(),
+                        manual: true,
+                    });
+                    self.set_status("Checking GitHub for updates...");
+                }
+                ui.add_space(6.0);
+
                 ui.label(RichText::new("PLAYBACK FORMATS").color(acc).monospace().strong());
                 ui.label(RichText::new("Plays ............... MP3, FLAC, M4A/AAC/ALAC, WAV, APE, AIFF, OGG/Vorbis, Opus, WMA, WavPack, Musepack, WebM audio").color(dim).monospace());
                 ui.label(RichText::new("ffmpeg fallback ..... Formats rodio cannot open directly (M4A, APE, WMA, WavPack, Musepack) are converted to a cached WAV on first play").color(dim).monospace());
@@ -2489,6 +2514,7 @@ impl PlayerApp {
                 ui.label(RichText::new("Song fallback ....... If the album is unknown, search by artist + song title (iTunes/Deezer)").color(dim).monospace());
                 ui.label(RichText::new("Ratings ............. MusicBrainz community 1-5 stars; current album auto-fetched; album fallback").color(dim).monospace());
                 ui.label(RichText::new("Your stars .......... Clicking stars sets a manual rating that Meta All never overwrites").color(dim).monospace());
+                ui.label(RichText::new("Manual cover ........ COVER next to the stars writes a chosen image to every track in that album").color(dim).monospace());
                 ui.label(RichText::new("Clear stars ......... Removes every manual and automatic rating after a confirmation").color(dim).monospace());
                 if retro_btn(ui, "CLEAR ALL STAR RATINGS", Color32::from_rgb(255, 120, 120), th.btn_bg)
                     .on_hover_text("Opens a confirmation before any rating is removed")

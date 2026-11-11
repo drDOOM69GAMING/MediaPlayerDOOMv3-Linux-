@@ -58,6 +58,7 @@ pub(crate) mod network;
 pub(crate) mod panels;
 pub(crate) mod pipe;
 pub(crate) mod settings;
+pub(crate) mod single;
 pub(crate) mod theme;
 pub(crate) mod tools;
 pub(crate) mod types;
@@ -170,5 +171,16 @@ fn main() -> eframe::Result {
         }
         i += 1;
     }
-    app::run(startup_files, windowed, mode, dvd, bluray)
+    // One player owns the audio device and library. A second normal launch
+    // forwards its files to the running window and exits.
+    let instance = if startup_files.is_empty() && (dvd.is_some() || bluray.is_some() || mode.is_some()) {
+        None
+    } else {
+        match crate::single::acquire(&startup_files) {
+            crate::single::Instance::Forwarded => return Ok(()),
+            crate::single::Instance::Primary(listener) => Some(listener),
+            crate::single::Instance::Unavailable => None,
+        }
+    };
+    app::run(startup_files, windowed, mode, dvd, bluray, instance)
 }

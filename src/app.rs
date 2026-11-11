@@ -436,7 +436,7 @@ impl PlayerApp {
             .unwrap_or_default()
     }
 
-    pub(crate) fn new(cc: &eframe::CreationContext<'_>, startup_files: Vec<String>, windowed: bool, startup_mode: Option<String>, startup_dvd: Option<String>, startup_bluray: Option<String>) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    pub(crate) fn new(cc: &eframe::CreationContext<'_>, startup_files: Vec<String>, windowed: bool, startup_mode: Option<String>, startup_dvd: Option<String>, startup_bluray: Option<String>, instance: Option<crate::single::InstanceListener>) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let t_startup = Instant::now();
         av_log("startup: begin");
         #[cfg(target_os = "windows")]
@@ -669,6 +669,9 @@ impl PlayerApp {
         {
             let tx = msg_tx.clone();
             thread::spawn(move || crate::cd::monitor(tx));
+        }
+        if let Some(listener) = instance {
+            crate::single::spawn_listener(listener, msg_tx.clone());
         }
 
         let old_bands = data_dir().join("bands.json");
@@ -1103,6 +1106,7 @@ video_ended: false,
                 loop {
                     let _ = tx.send(NetCmd::CheckUpdate {
                         current: APP_VERSION.to_string(),
+                        manual: false,
                     });
                     std::thread::sleep(Duration::from_secs(6 * 60 * 60));
                 }
@@ -1976,6 +1980,8 @@ video_ended: false,
     pub(crate) fn handle_msg(&mut self, m: Msg) {
         match m {
             Msg::Error(s) => self.set_error(s),
+            Msg::FocusWindow => crate::windows::show_window(&self.ctx),
+            Msg::OpenFiles(files) => self.open_external_files(files),
             Msg::StartupPlay => {
                 if self.deck_mode == DeckMode::Tape
                     && !self.video_on
@@ -2421,6 +2427,12 @@ video_ended: false,
                 }
                 self.update_version = version;
                 self.update_url = url;
+            }
+            Msg::UpdateNone => {
+                self.set_status(format!(
+                    "{} v{} is the latest release",
+                    APP_NAME, APP_VERSION
+                ));
             }
             Msg::YtStatus(s) => {
                 self.status = s;
@@ -2935,6 +2947,96 @@ impl std::ops::Drop for PlayerApp {
 }
 
 impl PlayerApp {
+    /// Let the user replace the album cover with a local image. The image is
+    /// written to the art cache for every track in the same album group, so it
+    /// survives restarts and track changes.
+    pub(crate) fn set_cover_from_file(&mut self) {
+        let Some(cur) = self.state.current_song.clone() else {
+            return;
+        };
+        let Some(picked) = rfd::FileDialog::new()
+            .add_filter("Image", &["jpg", "jpeg", "png", "webp", "bmp"])
+            .pick_file()
+        else {
+            return;
+        };
+        let Ok(bytes) = std::fs::read(&picked) else {
+            self.set_error("Could not read that image");
+            return;
+        };
+        if image::load_from_memory(&bytes).is_err() {
+            self.set_error("That file is not a valid image");
+            return;
+        }
+        let key = self.cover_group_key(&cur);
+        let targets: Vec<String> = self
+            .state
+            .playlist
+            .iter()
+            .filter(|p| self.cover_group_key(p) == key)
+            .cloned()
+            .collect();
+        let targets = if targets.is_empty() {
+            vec![cur.clone()]
+        } else {
+            targets
+        };
+        let mut written = 0usize;
+        for p in &targets {
+            if write_art_cache(p, &bytes) {
+                written += 1;
+            }
+            self.no_art.remove(p);
+        }
+        self.no_art_dirty = true;
+        self.art_local_valid = true;
+        self.load_art_texture(bytes);
+        self.set_status(format!("Cover set for {} track(s)", written));
+    }
+
+    /// Play files forwarded by a second launch. Audio switches to the tape
+    /// deck; video joins the movie queue. The running window is brought back.
+    pub(crate) fn open_external_files(&mut self, files: Vec<String>) {
+        crate::windows::show_window(&self.ctx);
+        let mut audio_files: Vec<String> = Vec::new();
+        let mut video_files: Vec<String> = Vec::new();
+        for p in files {
+            if !Path::new(&p).is_file() {
+                self.set_error(format!("File not found: {}", p));
+                continue;
+            }
+            if crate::util::is_audio(&p) {
+                audio_files.push(p);
+            } else {
+                video_files.push(p);
+            }
+        }
+        if !audio_files.is_empty() {
+            if self.video_on {
+                self.close_video();
+            }
+            if self.radio_on {
+                self.stop_radio();
+            }
+            if self.deck_mode != DeckMode::Tape {
+                self.set_deck_mode(DeckMode::Tape);
+            }
+            for p in &audio_files {
+                if !self.state.playlist.contains(p) {
+                    self.state.playlist.push(p.clone());
+                }
+            }
+            self.state.playlist.sort_by_cached_key(|p| song_sort_key(p));
+            self.rebuild_display_cache();
+            self.ingest_bands(&audio_files, None);
+            self.play_song(&audio_files[0]);
+        }
+        if !video_files.is_empty() {
+            self.enqueue_videos(video_files);
+            self.set_video_fs(true);
+        }
+    }
+
     /// Shared worker setup for folder and album/band conversions.
     fn launch_convert<F>(&mut self, dest: String, text: String, job: F)
     where
@@ -3069,6 +3171,7 @@ impl eframe::App for PlayerApp {
                 let _ = std::fs::remove_file(e.path());
             }
         }
+        let _ = std::fs::remove_file(crate::single::socket_path());
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -3213,7 +3316,7 @@ impl eframe::App for PlayerApp {
     }
 }
 
-pub fn run(startup_files: Vec<String>, windowed: bool, startup_mode: Option<String>, startup_dvd: Option<String>, startup_bluray: Option<String>) -> eframe::Result {
+pub fn run(startup_files: Vec<String>, windowed: bool, startup_mode: Option<String>, startup_dvd: Option<String>, startup_bluray: Option<String>, instance: Option<crate::single::InstanceListener>) -> eframe::Result {
 std::panic::set_hook(Box::new(|info| {
         // Expected, caught decode panics (rodio symphonia init-seek bug) are
         // muted here; open_decoder logs a clean decode-skip line instead.
@@ -3247,8 +3350,8 @@ std::panic::set_hook(Box::new(|info| {
     eframe::run_native(
         APP_NAME,
         options,
-        Box::new(|cc| {
-            let app = PlayerApp::new(cc, startup_files.clone(), windowed, startup_mode.clone(), startup_dvd.clone(), startup_bluray.clone())?;
+        Box::new(move |cc| {
+            let app = PlayerApp::new(cc, startup_files, windowed, startup_mode, startup_dvd, startup_bluray, instance)?;
             Ok(Box::new(app) as Box<dyn eframe::App>)
         }),
     )

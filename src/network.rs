@@ -40,9 +40,15 @@ pub fn net_loop(rx: Receiver<NetCmd>, tx: Sender<Msg>) {
                     let text = fetch_lyrics(&artist, &title);
                     let _ = tx.send(Msg::Lyrics { artist, title, text });
                 }
-                NetCmd::CheckUpdate { current } => {
-                    if let Some((version, url)) = check_latest_release(&current) {
-                        let _ = tx.send(Msg::UpdateAvailable { version, url });
+                NetCmd::CheckUpdate { current, manual } => {
+                    match check_latest_release(&current) {
+                        Some((version, url)) => {
+                            let _ = tx.send(Msg::UpdateAvailable { version, url });
+                        }
+                        None if manual => {
+                            let _ = tx.send(Msg::UpdateNone);
+                        }
+                        None => {}
                     }
                 }
             }

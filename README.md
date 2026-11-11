@@ -1,6 +1,6 @@
 # MediaPlayerDOOM v3 for Linux
 
-![Version](https://img.shields.io/badge/version-3.2.42-blue)
+![Version](https://img.shields.io/badge/version-3.2.43-blue)
 ![Platform](https://img.shields.io/badge/platform-Linux%20x86__64-informational)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -28,6 +28,7 @@ This repository is the Linux port. It is tested on CachyOS and Arch with KDE Pla
 ### Metadata, art and ratings
 
 - Meta All fills tags, and cover art for the whole playlist
+- Manual cover override from the COVER button next to the star rating
 - Local cover and folder art wins over online results
 - Cover sources include iTunes, Deezer, Cover Art Archive, TheAudioDB and Discogs
 - Song title fallback for tracks whose album is unknown
@@ -98,7 +99,8 @@ This repository is the Linux port. It is tested on CachyOS and Arch with KDE Pla
 - XDG base directory paths for data, cache, recordings and music
 - Hardware acceleration detection for AMD, Intel and NVIDIA
 - **Default media player**: a Set as Default action and `--set-default` command register MediaPlayerDOOM for 25 audio and video MIME types with xdg-mime. Opening an audio file starts the music player, while video files open in the video player
-- **Update check**: the app asks GitHub for the latest release shortly after launch and every six hours. When a newer release exists, a clickable banner appears at the top of the window and opens the release page. Nothing downloads or installs without the user
+- **Update check**: the app asks GitHub for the latest release shortly after launch and every six hours. When a newer release exists, a clickable banner appears at the top of the window and opens the release page. A manual Check for Updates button is in Help. Nothing downloads or installs without the user
+- **Single instance**: opening a file or launching the app while it is already running forwards the request to the existing window instead of starting a second player
 
 ## Requirements
 

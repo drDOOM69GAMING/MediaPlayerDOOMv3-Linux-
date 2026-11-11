@@ -1,5 +1,14 @@
 # Changelog
 
+## v3.2.43
+
+- A second launch now forwards its files to the running window instead of starting a second player and a second audio engine.
+- A normal second launch brings the existing window forward.
+- The single-instance socket lives in the app data folder, uses 0600 permissions and is removed on a normal exit; stale sockets are cleaned up on the next launch.
+- Help > System Manual now has a Check for Updates button.
+- The rating row has a COVER button that replaces the current album cover with a local image.
+- A chosen cover is written to the art cache for every track in the same album, so it survives restarts and track changes.
+
 ## v3.2.42
 
 - The bottom bar now keeps a Support physical media tagline next to the playback status.
