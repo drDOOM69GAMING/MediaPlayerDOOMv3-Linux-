@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use lofty::prelude::*;
 use crate::consts::NO_WINDOW;
-use crate::ffmpeg::{bounds_from_chapters, cut_video_file, detect_credit_start, detect_intro_end, fit_video_dims, probe_chapters, probe_dvd_meta, probe_video_duration, probe_video_info, video_audio_levels};
+use crate::ffmpeg::{bounds_from_chapters, cut_video_file, detect_credit_start, detect_intro_end, fit_video_dims, probe_chapters, probe_dvd_meta, probe_video_duration, probe_video_info, probe_video_streams, video_audio_levels};
 use crate::files::*;
 use crate::library::{art_cache_ok, art_cache_path, write_art_cache};
 use crate::log::av_log;
@@ -345,7 +345,7 @@ LibCmd::Scan(dir) => {
                     let _ = tx2.send(Msg::FolderFound { folder });
                 });
             }
-            LibCmd::VideoOpen { path, gen, seek } => {
+            LibCmd::VideoOpen { path, gen, seek, subtitle, probe } => {
                 av_log(&format!("open: RECEIVED gen={} (queue behind previous cmd?)", gen));
                 // A paused reader never reads its pipe, so it can't notice the
                 // old ffmpeg child being killed below and would never exit -
@@ -440,7 +440,7 @@ LibCmd::Scan(dir) => {
                 // MPEG-2 is only 720x480 (cheap), and reinitialising the VAAPI
                 // filter graph after a DVD seek produced green/stuttering
                 // frames on some drives. Decoding still uses VAAPI.
-                let vaapi_filters = hw.get(1) == Some(&"vaapi") && bd;
+                let vaapi_filters = hw.get(1) == Some(&"vaapi") && bd && subtitle.is_none();
                 if vaapi_filters {
                     cmd.args(["-hwaccel_output_format", "vaapi"]);
                 }
@@ -466,7 +466,7 @@ LibCmd::Scan(dir) => {
                 if bd {
                     crate::bluray::configure_command(&mut cmd);
                 }
-                let vf = if vaapi_filters {
+                let mut vf = if vaapi_filters {
                     format!(
                         "scale_vaapi=w={tw}:h={th}:force_original_aspect_ratio=decrease:format=rgba,pad_vaapi=w={tw}:h={th}:x=(ow-iw)/2:y=(oh-ih)/2,hwdownload,format=rgba"
                     )
@@ -483,6 +483,9 @@ LibCmd::Scan(dir) => {
                         "scale={tw}:{th}:force_original_aspect_ratio=decrease,pad={tw}:{th}:(ow-iw)/2:(oh-ih)/2"
                     )
                 };
+                if let Some(sub) = subtitle.as_ref() {
+                    vf = format!("{},{}", vf, crate::ffmpeg::subtitle_filter(sub));
+                }
                 cmd.arg("-i").arg(&input)
                     .args(["-an", "-sn", "-vf", &vf]);
                 // DVD streams often report 29.97 fps while the decoded film
@@ -505,6 +508,14 @@ LibCmd::Scan(dir) => {
                     }
                 };
                 av_log(&format!("open: ffmpeg spawned at {}ms", t_open.elapsed().as_millis()));
+                if probe && !dvd && !bd {
+                    let tx2 = tx.clone();
+                    let p = path.clone();
+                    std::thread::spawn(move || {
+                        let (audio, subs) = probe_video_streams(&p);
+                        let _ = tx2.send(Msg::VideoStreams { gen, audio, subs });
+                    });
+                }
                 if !bd {
                     if let Some(m) = dvd_meta.filter(|m| m.dur > 0.0) {
                         let _ = tx.send(Msg::VideoMeta { gen, dur: m.dur });

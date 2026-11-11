@@ -198,7 +198,8 @@ impl PlayerApp {
         self.video_clock.store(0, std::sync::atomic::Ordering::Relaxed);
         self.video_seek_base = seek.max(0.0);
         av_log(&format!("attach_audio path={} seek={:.3} paused={} tex={}", path, seek, self.video_paused, self.video_tex.is_some()));
-        match spawn_video_audio(path, &ffmpeg_path(), seek) {
+        let audio_map = self.video_audio_map();
+        match spawn_video_audio_mapped(path, &ffmpeg_path(), seek, audio_map.as_deref()) {
             Ok((mut child, pipe)) => {
                 if let Ok(sink) = Sink::try_new(&self._stream_handle) {
                     sink.set_volume(self.video_volume as f32 / 100.0 * 0.9);
@@ -239,6 +240,130 @@ impl PlayerApp {
         }
     }
 
+    /// ffmpeg map for the selected local audio track. Discs keep their own
+    /// English/preferred mapping because their stream indexes are different.
+    pub(crate) fn video_audio_map(&self) -> Option<String> {
+        let path = self.video_current.as_deref()?;
+        if crate::dvd::is_dvd(path) || crate::bluray::is_bluray(path) {
+            return None;
+        }
+        if self.video_audio_tracks.is_empty() {
+            return None;
+        }
+        let i = self.video_audio_sel.min(self.video_audio_tracks.len() - 1);
+        self.video_audio_tracks
+            .get(i)
+            .map(|t| format!("0:a:{}", t.ordinal))
+    }
+
+    pub(crate) fn video_audio_label(&self) -> String {
+        let n = self.video_audio_tracks.len();
+        if n == 0 {
+            return "AUDIO --".to_string();
+        }
+        let i = self.video_audio_sel.min(n - 1);
+        let t = &self.video_audio_tracks[i];
+        let name = if !t.lang.is_empty() {
+            t.lang.to_ascii_uppercase()
+        } else if !t.title.is_empty() {
+            t.title.clone()
+        } else {
+            format!("TRACK {}", t.ordinal + 1)
+        };
+        format!("AUDIO {}/{} {}", i + 1, n, name)
+    }
+
+    pub(crate) fn video_sub_label(&self) -> String {
+        match self.video_sub_sel {
+            Some(i) if i < self.video_subs.len() => {
+                let s = &self.video_subs[i];
+                let name = if !s.lang.is_empty() {
+                    s.lang.to_ascii_uppercase()
+                } else if !s.title.is_empty() {
+                    s.title.clone()
+                } else if s.external {
+                    "EXT".to_string()
+                } else {
+                    format!("#{}", s.ordinal + 1)
+                };
+                format!("SUBS {}", name)
+            }
+            _ => "SUBS OFF".to_string(),
+        }
+    }
+
+    pub(crate) fn cycle_video_audio(&mut self) {
+        if self.video_audio_tracks.len() <= 1 {
+            self.set_status("No other audio tracks in this video");
+            return;
+        }
+        self.video_audio_sel = (self.video_audio_sel + 1) % self.video_audio_tracks.len();
+        let label = self.video_audio_label();
+        let pos = self.video_cur_secs;
+        self.seek_video(pos);
+        self.set_status(label);
+    }
+
+    pub(crate) fn cycle_video_subs(&mut self) {
+        if self.video_subs.is_empty() {
+            self.set_status("No subtitles found; use OPEN SUBS to add one");
+            return;
+        }
+        let next = match self.video_sub_sel {
+            None => Some(0),
+            Some(i) if i + 1 < self.video_subs.len() => Some(i + 1),
+            _ => None,
+        };
+        self.video_sub_sel = next;
+        self.video_subtitle = next.map(|i| {
+            let s = &self.video_subs[i];
+            if s.external {
+                crate::types::VideoSubtitle::External { path: s.path.clone() }
+            } else {
+                crate::types::VideoSubtitle::Embedded {
+                    path: self.video_current.clone().unwrap_or_default(),
+                    ordinal: s.ordinal,
+                }
+            }
+        });
+        let label = self.video_sub_label();
+        let pos = self.video_cur_secs;
+        self.seek_video(pos);
+        self.set_status(label);
+    }
+
+    /// Add a subtitle file the user picked, then turn it on immediately.
+    pub(crate) fn open_external_subs(&mut self) {
+        if self.video_current.is_none() {
+            return;
+        }
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Subtitles", &["srt", "ass", "ssa", "vtt"])
+            .pick_file()
+        else {
+            return;
+        };
+        let path = path.to_string_lossy().to_string();
+        let title = Path::new(&path)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| path.clone());
+        self.video_subs.push(crate::types::SubtitleStreamInfo {
+            ordinal: 0,
+            lang: String::new(),
+            title,
+            path,
+            external: true,
+        });
+        self.video_sub_sel = Some(self.video_subs.len() - 1);
+        self.video_subtitle = Some(crate::types::VideoSubtitle::External {
+            path: self.video_subs[self.video_sub_sel.unwrap()].path.clone(),
+        });
+        let pos = self.video_cur_secs;
+        self.seek_video(pos);
+        self.set_status("External subtitles enabled");
+    }
+
     pub(crate) fn seek_video(&mut self, tsecs: f32) {
         let Some(path) = self.video_current.clone() else { return };
         av_log(&format!("seek_video target={:.3}s (dur={:.3}) path={}", tsecs, self.video_dur_secs, path));
@@ -257,7 +382,7 @@ impl PlayerApp {
         }
         self.video_gen += 1;
         let gen = self.video_gen;
-        let _ = self.lib_tx.send(LibCmd::VideoOpen { path: path.clone(), gen, seek: tsecs });
+        let _ = self.lib_tx.send(LibCmd::VideoOpen { path: path.clone(), gen, seek: tsecs, subtitle: self.video_subtitle.clone(), probe: false });
         self.video_closing = false;
         self.video_paused = false;
         self.video_ended = false;
@@ -307,7 +432,12 @@ impl PlayerApp {
         let gen = self.video_gen;
         let saved_pos = self.video_positions.get(&path).copied().unwrap_or(0.0);
         av_log(&format!("play_video_item path={} saved_pos={:.3}", path, saved_pos));
-        let _ = self.lib_tx.send(LibCmd::VideoOpen { path: path.clone(), gen, seek: saved_pos });
+        self.video_audio_tracks.clear();
+        self.video_audio_sel = 0;
+        self.video_subs.clear();
+        self.video_sub_sel = None;
+        self.video_subtitle = None;
+        let _ = self.lib_tx.send(LibCmd::VideoOpen { path: path.clone(), gen, seek: saved_pos, subtitle: None, probe: true });
         self.video_aspect = self.video_aspects.get(&path).copied().unwrap_or(self.video_aspect_default);
         self.video_on = true;
         self.video_paused = false;
@@ -615,7 +745,7 @@ impl PlayerApp {
                 egui::pos2(scr.max.x, scr.max.y),
             );
             let hovering = mouse.map_or(false, |m| {
-                (m.y <= scr.min.y + 34.0 && m.x >= scr.min.x && m.x <= scr.max.x) || queue_region.contains(m)
+                (m.y <= scr.min.y + 60.0 && m.x >= scr.min.x && m.x <= scr.max.x) || queue_region.contains(m)
             });
             self.video_bar_visible = hovering;
             let mut fs_off = false;
@@ -628,6 +758,9 @@ impl PlayerApp {
             let mut play_idx: Option<usize> = None;
             let mut del_idx: Option<usize> = None;
             let mut clearq = false;
+            let mut audio_cycle = false;
+            let mut subs_cycle = false;
+            let mut open_subs = false;
             // Shift-clicking INTRO / CREDS clears that marker instead of
             // setting it (egui 0.36 has no secondary-click sense).
             let shift = ctx.input(|i| i.modifiers.shift);
@@ -744,6 +877,54 @@ impl PlayerApp {
                                 s.set_volume(vv as f32 / 100.0 * 0.9);
                             }
                             self.save_settings();
+                        }
+                        let bar2 = egui::Rect::from_min_size(
+                            scr.min + egui::vec2(0.0, 30.0),
+                            egui::vec2(sw.min(540.0), 26.0),
+                        );
+                        ui.painter().rect_filled(
+                            bar2,
+                            0.0,
+                            Color32::from_rgba_unmultiplied(0, 0, 0, 140),
+                        );
+                        if ui
+                            .put(
+                                egui::Rect::from_min_size(
+                                    scr.min + egui::vec2(8.0, 33.0),
+                                    egui::vec2(190.0, 20.0),
+                                ),
+                                egui::Button::new(self.video_audio_label()),
+                            )
+                            .on_hover_text("Cycle the audio track")
+                            .clicked()
+                        {
+                            audio_cycle = true;
+                        }
+                        if ui
+                            .put(
+                                egui::Rect::from_min_size(
+                                    scr.min + egui::vec2(206.0, 33.0),
+                                    egui::vec2(180.0, 20.0),
+                                ),
+                                egui::Button::new(self.video_sub_label()),
+                            )
+                            .on_hover_text("Cycle subtitles: off, embedded tracks, sidecar files")
+                            .clicked()
+                        {
+                            subs_cycle = true;
+                        }
+                        if ui
+                            .put(
+                                egui::Rect::from_min_size(
+                                    scr.min + egui::vec2(394.0, 33.0),
+                                    egui::vec2(110.0, 20.0),
+                                ),
+                                egui::Button::new("OPEN SUBS"),
+                            )
+                            .on_hover_text("Load a .srt, .ass, .ssa or .vtt file")
+                            .clicked()
+                        {
+                            open_subs = true;
                         }
                     }
                     if self.video_bar_visible && !self.video_queue.is_empty() {
@@ -872,6 +1053,9 @@ impl PlayerApp {
                 self.save_settings();
                 self.set_status(format!("MOVIE aspect {}: {}", self.video_aspect.label(), stem(self.video_current.as_deref().unwrap_or("-"))));
             }
+            if audio_cycle { self.cycle_video_audio(); }
+            if subs_cycle { self.cycle_video_subs(); }
+            if open_subs { self.open_external_subs(); }
             if prev { self.queue_prev(); }
             if next { self.queue_next(); }
             if togg {
@@ -891,6 +1075,9 @@ impl PlayerApp {
         let mut close = false;
         let mut togg = false;
         let mut aspect_cycle = false;
+        let mut audio_cycle = false;
+        let mut subs_cycle = false;
+        let mut open_subs = false;
         egui::Area::new(egui::Id::new("movie_win"))
             .fixed_pos(self.video_pos)
             .order(egui::Order::Foreground)
@@ -939,6 +1126,17 @@ impl PlayerApp {
                             if ui.button(format!("Aspect {}", self.video_aspect.label())).clicked() { aspect_cycle = true; }
                             if ui.button("Fullscreen [Alt+Enter]").clicked() { self.set_video_fs(true); }
                         });
+                        ui.horizontal(|ui| {
+                            if ui.button(self.video_audio_label()).on_hover_text("Cycle the audio track").clicked() {
+                                audio_cycle = true;
+                            }
+                            if ui.button(self.video_sub_label()).on_hover_text("Cycle subtitles").clicked() {
+                                subs_cycle = true;
+                            }
+                            if ui.button("Open subs").on_hover_text("Load a subtitle file").clicked() {
+                                open_subs = true;
+                            }
+                        });
                     });
             });
         if togg {
@@ -947,6 +1145,9 @@ impl PlayerApp {
         if close {
             self.close_video();
         }
+        if audio_cycle { self.cycle_video_audio(); }
+        if subs_cycle { self.cycle_video_subs(); }
+        if open_subs { self.open_external_subs(); }
         if aspect_cycle {
             self.video_aspect = self.video_aspect.next();
             self.video_aspect_default = self.video_aspect;

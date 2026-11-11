@@ -363,6 +363,12 @@ pub(crate) struct PlayerApp {
     pub(crate) video_paused: bool,
     pub(crate) video_dims: (u32, u32),
     pub(crate) video_tex: Option<egui::TextureHandle>,
+    /// Audio and subtitle tracks reported by ffprobe for the current video.
+    pub(crate) video_audio_tracks: Vec<AudioStreamInfo>,
+    pub(crate) video_audio_sel: usize,
+    pub(crate) video_subs: Vec<SubtitleStreamInfo>,
+    pub(crate) video_sub_sel: Option<usize>,
+    pub(crate) video_subtitle: Option<VideoSubtitle>,
     pub(crate) video_pos: egui::Pos2,
     pub(crate) video_fs: bool,
     pub(crate) video_sink: Option<std::sync::Arc<Sink>>,
@@ -909,6 +915,11 @@ impl PlayerApp {
             video_paused: false,
             video_dims: (640, 360),
             video_tex: None,
+            video_audio_tracks: Vec::new(),
+            video_audio_sel: 0,
+            video_subs: Vec::new(),
+            video_sub_sel: None,
+            video_subtitle: None,
             video_pos: egui::pos2(60.0, 60.0),
             video_fs: false,
             video_sink: None,
@@ -2671,6 +2682,21 @@ video_ended: false,
             Msg::VideoMeta { gen, dur } => {
                 if gen == self.video_gen {
                     self.video_dur_secs = dur;
+                }
+            }
+            Msg::VideoStreams { gen, audio, subs } => {
+                if gen == self.video_gen {
+                    self.video_audio_tracks = audio;
+                    self.video_audio_sel = self
+                        .video_audio_sel
+                        .min(self.video_audio_tracks.len().saturating_sub(1));
+                    self.video_subs = subs;
+                    if let Some(i) = self.video_sub_sel {
+                        if i >= self.video_subs.len() {
+                            self.video_sub_sel = None;
+                            self.video_subtitle = None;
+                        }
+                    }
                 }
             }
             Msg::VideoBounds { gen, path, intro_end, credits_start } => {

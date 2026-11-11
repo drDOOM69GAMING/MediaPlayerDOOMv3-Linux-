@@ -35,6 +35,145 @@ pub fn probe_video_duration(path: &str) -> f32 {
     }
 }
 
+/// Audio and subtitle streams for a local video. Sidecar subtitle files next
+/// to the video are included so the UI can cycle through them too.
+pub fn probe_video_streams(
+    path: &str,
+) -> (
+    Vec<crate::types::AudioStreamInfo>,
+    Vec<crate::types::SubtitleStreamInfo>,
+) {
+    use crate::types::{AudioStreamInfo, SubtitleStreamInfo};
+    let mut audio: Vec<AudioStreamInfo> = Vec::new();
+    let mut subs: Vec<SubtitleStreamInfo> = Vec::new();
+    let fp = ffprobe_path();
+    if fp.is_file() {
+        let out = Command::new(fp)
+            .args([
+                "-v",
+                "error",
+                "-show_entries",
+                "stream=index,codec_type,codec_name,channels:stream_tags=language,title",
+                "-of",
+                "json",
+                path,
+            ])
+            .no_window()
+            .output();
+        if let Ok(o) = out {
+            if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&o.stdout) {
+                if let Some(streams) = json.get("streams").and_then(|v| v.as_array()) {
+                    let (mut ao, mut so) = (0usize, 0usize);
+                    for s in streams {
+                        let kind = s.get("codec_type").and_then(|v| v.as_str()).unwrap_or("");
+                        let tags = s.get("tags");
+                        let lang = tags
+                            .and_then(|t| t.get("language"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let title = tags
+                            .and_then(|t| t.get("title"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        match kind {
+                            "audio" => {
+                                audio.push(AudioStreamInfo {
+                                    ordinal: ao,
+                                    lang,
+                                    title,
+                                    channels: s
+                                        .get("channels")
+                                        .and_then(|v| v.as_u64())
+                                        .unwrap_or(0) as u32,
+                                });
+                                ao += 1;
+                            }
+                            "subtitle" => {
+                                subs.push(SubtitleStreamInfo {
+                                    ordinal: so,
+                                    lang,
+                                    title,
+                                    path: String::new(),
+                                    external: false,
+                                });
+                                so += 1;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Sidecar subtitles: video.srt, video.eng.srt, video.ass, and friends.
+    let p = Path::new(path);
+    if let (Some(dir), Some(stem)) = (p.parent(), p.file_stem().and_then(|s| s.to_str())) {
+        if let Ok(rd) = std::fs::read_dir(dir) {
+            let mut sidecars: Vec<PathBuf> = rd
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| {
+                    let ext = p
+                        .extension()
+                        .and_then(|x| x.to_str())
+                        .unwrap_or("")
+                        .to_ascii_lowercase();
+                    if !matches!(ext.as_str(), "srt" | "ass" | "ssa" | "vtt") {
+                        return false;
+                    }
+                    p.file_stem()
+                        .and_then(|x| x.to_str())
+                        .map(|n| n == stem || n.starts_with(&format!("{}.", stem)))
+                        .unwrap_or(false)
+                })
+                .collect();
+            sidecars.sort();
+            for sc in sidecars {
+                let nstem = sc.file_stem().and_then(|x| x.to_str()).unwrap_or("");
+                let lang = nstem
+                    .strip_prefix(stem)
+                    .unwrap_or("")
+                    .trim_start_matches('.')
+                    .to_string();
+                let title = sc
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| nstem.to_string());
+                subs.push(SubtitleStreamInfo {
+                    ordinal: 0,
+                    lang,
+                    title,
+                    path: sc.to_string_lossy().to_string(),
+                    external: true,
+                });
+            }
+        }
+    }
+    (audio, subs)
+}
+
+/// Build the ffmpeg subtitle filter for a selected track. Text subtitles are
+/// burned into the frame stream so the existing RGBA reader needs no changes.
+pub fn subtitle_filter(sub: &crate::types::VideoSubtitle) -> String {
+    use crate::types::VideoSubtitle;
+    let esc = |p: &str| {
+        p.replace('\\', "\\\\")
+            .replace('\'', "\\'")
+            .replace(':', "\\:")
+    };
+    match sub {
+        VideoSubtitle::External { path } => {
+            format!("subtitles=filename='{}'", esc(path))
+        }
+        VideoSubtitle::Embedded { path, ordinal } => {
+            format!("subtitles=filename='{}':si={}", esc(path), ordinal)
+        }
+    }
+}
+
 pub fn probe_video_info(path: &str) -> (u32, u32, f32) {
     let fp = ffprobe_path();
     if !fp.is_file() {
@@ -639,6 +778,57 @@ mod media_pipeline_tests {
             .expect("ffmpeg should start");
         assert!(st.success(), "ffmpeg failed to generate test media");
         out
+    }
+
+    #[test]
+    fn probes_multiple_audio_and_subtitle_tracks() {
+        let dir = scratch();
+        let srt = dir.join("multi.eng.srt");
+        std::fs::write(
+            &srt,
+            "1\n00:00:00,100 --> 00:00:02,000\nHELLO\n\n",
+        )
+        .unwrap();
+        let out = dir.join("multi.mkv");
+        let st = Command::new(ffmpeg_path())
+            .args([
+                "-hide_banner", "-loglevel", "error", "-y",
+                "-f", "lavfi", "-i", "testsrc=size=320x180:rate=25:duration=2",
+                "-f", "lavfi", "-i", "sine=frequency=440:duration=2",
+                "-f", "lavfi", "-i", "sine=frequency=880:duration=2",
+            ])
+            .arg("-i")
+            .arg(&srt)
+            .args([
+                "-map", "0:v", "-map", "1:a", "-map", "2:a", "-map", "3:s",
+                "-c:v", "mpeg4", "-c:a", "aac", "-c:s", "srt",
+                "-metadata:s:a:0", "language=eng",
+                "-metadata:s:a:1", "language=fra",
+                "-metadata:s:s:0", "language=eng",
+                "-shortest",
+            ])
+            .arg(&out)
+            .status()
+            .expect("ffmpeg should start");
+        assert!(st.success(), "ffmpeg failed to generate multi-stream media");
+
+        let (audio, subs) = probe_video_streams(&out.to_string_lossy());
+        assert_eq!(audio.len(), 2);
+        assert_eq!(audio[0].lang, "eng");
+        assert_eq!(audio[1].lang, "fra");
+        assert!(subs.iter().any(|s| !s.external && s.lang == "eng"));
+        assert!(subs.iter().any(|s| s.external && s.path.ends_with("multi.eng.srt")));
+
+        let embedded = subtitle_filter(&crate::types::VideoSubtitle::Embedded {
+            path: out.to_string_lossy().to_string(),
+            ordinal: 0,
+        });
+        assert!(embedded.contains("si=0"), "filter was {}", embedded);
+        let external = subtitle_filter(&crate::types::VideoSubtitle::External {
+            path: srt.to_string_lossy().to_string(),
+        });
+        assert!(external.contains("multi.eng.srt"), "filter was {}", external);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn envelope(parts: &[(f32, f32)]) -> Vec<f32> {

@@ -1,5 +1,15 @@
 # Changelog
 
+## v3.2.44
+
+- The video player now lists and cycles audio tracks on local video files with the AUDIO button.
+- Embedded subtitles can be selected with the SUBS button.
+- Sidecar subtitle files such as `video.srt`, `video.eng.srt` and `video.ass` are found automatically.
+- OPEN SUBS loads an arbitrary `.srt`, `.ass`, `.ssa` or `.vtt` file.
+- Subtitles are rendered into the video frames, so they work with the existing reader and windowed playback.
+- The video stream probe runs off the UI thread and only when a new file opens, not on every seek.
+- Help and README document the new video controls.
+
 ## v3.2.43
 
 - A second launch now forwards its files to the running window instead of starting a second player and a second audio engine.

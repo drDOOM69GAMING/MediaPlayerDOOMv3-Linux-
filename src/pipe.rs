@@ -74,6 +74,15 @@ pub fn spawn_radio_stream(url: &str, ffmpeg: &Path) -> Result<(Child, PipeSource
 }
 
 pub fn spawn_video_audio(path: &str, ffmpeg: &Path, seek: f32) -> Result<(Child, PipeSource), String> {
+    spawn_video_audio_mapped(path, ffmpeg, seek, None)
+}
+
+pub fn spawn_video_audio_mapped(
+    path: &str,
+    ffmpeg: &Path,
+    seek: f32,
+    audio_map: Option<&str>,
+) -> Result<(Child, PipeSource), String> {
     let dvd = crate::dvd::is_dvd(path);
     let bd = crate::bluray::is_bluray(path);
     let bd_playlist = if bd { crate::bluray::playlist(path) } else { None };
@@ -134,7 +143,10 @@ pub fn spawn_video_audio(path: &str, ffmpeg: &Path, seek: f32) -> Result<(Child,
     }
     args.push("-i".into());
     args.push(input.to_string());
-    if dvd {
+    if let Some(map) = audio_map {
+        args.push("-map".into());
+        args.push(map.to_string());
+    } else if dvd {
         if let Some(map) = crate::ffmpeg::preferred_audio_map(path) {
             args.push("-map".into());
             args.push(map);

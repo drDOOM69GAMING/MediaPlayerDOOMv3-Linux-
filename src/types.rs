@@ -59,6 +59,35 @@ pub struct CdInfo {
     pub total_secs: f32,
 }
 
+/// One audio track of the current video, as reported by ffprobe.
+#[derive(Clone, Debug, Default)]
+pub struct AudioStreamInfo {
+    /// 0-based position among the audio streams, for `-map 0:a:N`.
+    pub ordinal: usize,
+    pub lang: String,
+    pub title: String,
+    pub channels: u32,
+}
+
+/// One subtitle track: either embedded in the video or a sidecar file.
+#[derive(Clone, Debug, Default)]
+pub struct SubtitleStreamInfo {
+    /// 0-based position among the subtitle streams, for the `si` filter option.
+    pub ordinal: usize,
+    pub lang: String,
+    pub title: String,
+    /// Sidecar path for external subtitles; empty for embedded tracks.
+    pub path: String,
+    pub external: bool,
+}
+
+/// Subtitle selection passed to the video reader.
+#[derive(Clone, Debug)]
+pub enum VideoSubtitle {
+    Embedded { path: String, ordinal: usize },
+    External { path: String },
+}
+
 pub enum Msg {
     Error(String),
     StartupPlay,
@@ -114,6 +143,8 @@ pub enum Msg {
     VideoDecodeErr { gen: u64, err: String },
     VideoPos { gen: u64, secs: f32 },
     VideoMeta { gen: u64, dur: f32 },
+    /// Audio and subtitle streams of the current video, probed off the UI thread.
+    VideoStreams { gen: u64, audio: Vec<AudioStreamInfo>, subs: Vec<SubtitleStreamInfo> },
     VideoBounds { gen: u64, path: String, intro_end: f32, credits_start: f32 },
     VideoCutDone { gen: u64, path: String, cut: Option<String>, err: Option<String> },
     CdDetected(Option<CdInfo>),
@@ -148,7 +179,7 @@ pub enum LibCmd {
     Record { display: String, audio: String, dest: String },
     RecordRadio { display: String, url: String, dest: String },
     FindMusicFolder,
-    VideoOpen { path: String, gen: u64, seek: f32 },
+    VideoOpen { path: String, gen: u64, seek: f32, subtitle: Option<VideoSubtitle>, probe: bool },
     VideoClose,
     VideoPause(bool),
     VideoAnalyze { path: String, gen: u64 },

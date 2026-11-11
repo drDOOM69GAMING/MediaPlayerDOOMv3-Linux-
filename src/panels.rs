@@ -2526,6 +2526,14 @@ impl PlayerApp {
                 ui.label(RichText::new("Not everything ...... Songs with no MusicBrainz rating or no available art stay unrated/art-less; final status reports counts").color(dim).monospace());
                 ui.add_space(6.0);
 
+                ui.label(RichText::new("VIDEO PLAYER").color(acc).monospace().strong());
+                ui.label(RichText::new("Audio ............... AUDIO cycles the audio tracks of a local video file").color(dim).monospace());
+                ui.label(RichText::new("Subtitles ........... SUBS cycles off, embedded tracks and sidecar subtitle files").color(dim).monospace());
+                ui.label(RichText::new("Sidecar files ....... video.srt, video.eng.srt, video.ass and similar are found automatically").color(dim).monospace());
+                ui.label(RichText::new("Open subs ........... Load a .srt, .ass, .ssa or .vtt file for the current movie").color(dim).monospace());
+                ui.label(RichText::new("Discs ............... DVD and Blu-ray keep their preferred English audio; external subtitles still work").color(dim).monospace());
+                ui.add_space(6.0);
+
                 ui.label(RichText::new("DVD / BLU-RAY").color(acc).monospace().strong());
                 ui.label(RichText::new("Play ................ Drive or ISO; English audio preferred; subtitles off; fullscreen player with seek bar and STOP").color(dim).monospace());
                 ui.label(RichText::new("DVD seeking ......... Software MPEG-2 decode + CPU filters; metadata probed once so seeks do not thrash the drive").color(dim).monospace());
