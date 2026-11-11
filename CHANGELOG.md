@@ -29,6 +29,8 @@
 - The bottom-left play-order label shows the current mode and the drDOOM69GAMING credit.
 - The play-order switch and credit are pinned to the bottom of the sidebar; the content above them scrolls in short windows so band names never sit under the switch.
 - The play-order switch is red for random shuffle and green for in-order playback.
+- Long song and album titles wrap inside the sidebar instead of widening it.
+- The status bar truncates long status text and keeps the Exit button fixed.
 
 ## v3.2.39
 

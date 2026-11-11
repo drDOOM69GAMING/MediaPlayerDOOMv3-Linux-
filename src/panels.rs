@@ -199,7 +199,15 @@ impl PlayerApp {
             ui.add_space(3.0);
             ui.horizontal(|ui| {
                 ui.add_space(6.0);
-                ui.label(RichText::new(&self.status).color(th.fg).monospace().size(11.0));
+                // Keep the status text from pushing the Exit button and the
+                // shortcut help around as song titles change length.
+                let yt_reserve = if self.yt_pct > -1.0 { 250.0 } else { 0.0 };
+                let status_w = (ui.available_width() - 330.0 - yt_reserve).max(80.0);
+                ui.add_sized(
+                    [status_w, 16.0],
+                    egui::Label::new(RichText::new(&self.status).color(th.fg).monospace().size(11.0)).truncate(),
+                )
+                .on_hover_text(&self.status);
                 if self.yt_pct > -1.0 {
                     let (n, m) = self.yt_item_counter();
                     let status = if !self.yt_speed.is_empty() {
@@ -288,13 +296,15 @@ impl PlayerApp {
                 );
             }
             ui.add_space(6.0);
-            ui.label(RichText::new(&self.meta.0).color(th.fg).monospace().strong().size(13.0));
-            ui.label(RichText::new(&self.meta.1).color(th.accent).monospace().size(11.0));
-            ui.label(RichText::new(&self.meta.2).color(Color32::from_gray(140)).monospace().size(10.0));
+            // Wrap long titles inside the sidebar instead of letting them
+            // widen the panel and shift the deck buttons.
+            ui.add(egui::Label::new(RichText::new(&self.meta.0).color(th.fg).monospace().strong().size(13.0)).wrap());
+            ui.add(egui::Label::new(RichText::new(&self.meta.1).color(th.accent).monospace().size(11.0)).wrap());
+            ui.add(egui::Label::new(RichText::new(&self.meta.2).color(Color32::from_gray(140)).monospace().size(10.0)).wrap());
             ui.add_space(4.0);
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new("NOW").color(th.playing_fg).monospace().size(9.0));
-                ui.label(RichText::new(&self.playing).color(th.playing_fg).monospace().size(12.0));
+                ui.add(egui::Label::new(RichText::new(&self.playing).color(th.playing_fg).monospace().size(12.0)).wrap());
             });
             ui.separator();
             ui.horizontal(|ui| {
@@ -541,11 +551,11 @@ impl PlayerApp {
                         ui.add_space(12.0);
                         ui.vertical(|ui| {
                             if self.disc_in {
-                                ui.label(RichText::new(&self.disc_label).color(th.playing_fg).monospace().strong().size(14.0));
+                                ui.add(egui::Label::new(RichText::new(&self.disc_label).color(th.playing_fg).monospace().strong().size(14.0)).wrap());
                                 ui.add_space(2.0);
                                 ui.label(RichText::new(format!("{} TRACKS  •  CD", self.disc_playlist.len())).color(Color32::from_gray(140)).monospace().size(10.0));
                                 let now = self.state.current_song.clone().map(|s| stem(&s)).unwrap_or_else(|| "--".to_string());
-                                ui.label(RichText::new(format!("♪ {}", now)).color(th.fg).monospace().size(11.0));
+                                ui.add(egui::Label::new(RichText::new(format!("♪ {}", now)).color(th.fg).monospace().size(11.0)).wrap());
                                 ui.horizontal(|ui| {
                                     ui.label(RichText::new("POS").color(darken(th.accent, 0.35)).monospace().size(8.0));
                                     lcd(ui, &fmt_secs(self.pos), th.playing_fg, th.bg);
