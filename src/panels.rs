@@ -322,11 +322,6 @@ impl PlayerApp {
             ui.add(egui::Label::new(RichText::new(&self.meta.0).color(th.fg).monospace().strong().size(13.0)).wrap());
             ui.add(egui::Label::new(RichText::new(&self.meta.1).color(th.accent).monospace().size(11.0)).wrap());
             ui.add(egui::Label::new(RichText::new(&self.meta.2).color(Color32::from_gray(140)).monospace().size(10.0)).wrap());
-            ui.add_space(4.0);
-            ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new("NOW").color(th.playing_fg).monospace().size(9.0));
-                ui.add(egui::Label::new(RichText::new(&self.playing).color(th.playing_fg).monospace().size(12.0)).wrap());
-            });
             ui.separator();
             ui.horizontal(|ui| {
                 ui.label(RichText::new("RATE").color(darken(th.accent, 0.4)).monospace().size(9.0));

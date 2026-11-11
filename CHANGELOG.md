@@ -23,6 +23,7 @@
 
 ### Playback
 
+- Removed the duplicate NOW line under the cover art; the title line already shows the current song.
 - Removed the redundant Playlist Only, Sequential and Dir Seq toggles.
 - The red random / green in-order switch is now the single play-order control.
 - Playback order applies to the loaded list: All songs, one band, or one album.
