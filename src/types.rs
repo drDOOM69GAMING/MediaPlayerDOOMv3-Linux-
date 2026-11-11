@@ -81,6 +81,24 @@ pub struct SubtitleStreamInfo {
     pub external: bool,
 }
 
+/// Subtitle appearance passed to the video reader.
+#[derive(Clone, Copy, Debug)]
+pub struct SubtitleStyle {
+    pub size: u32,
+    pub margin: u32,
+    pub outline: u32,
+}
+
+impl Default for SubtitleStyle {
+    fn default() -> Self {
+        Self {
+            size: 32,
+            margin: 40,
+            outline: 2,
+        }
+    }
+}
+
 /// Subtitle selection passed to the video reader.
 #[derive(Clone, Debug)]
 pub enum VideoSubtitle {
@@ -179,7 +197,7 @@ pub enum LibCmd {
     Record { display: String, audio: String, dest: String },
     RecordRadio { display: String, url: String, dest: String },
     FindMusicFolder,
-    VideoOpen { path: String, gen: u64, seek: f32, subtitle: Option<VideoSubtitle>, probe: bool },
+    VideoOpen { path: String, gen: u64, seek: f32, subtitle: Option<VideoSubtitle>, sub_style: SubtitleStyle, probe: bool },
     VideoClose,
     VideoPause(bool),
     VideoAnalyze { path: String, gen: u64 },

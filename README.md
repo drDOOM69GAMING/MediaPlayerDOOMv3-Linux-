@@ -1,6 +1,6 @@
 # MediaPlayerDOOM v3 for Linux
 
-![Version](https://img.shields.io/badge/version-3.2.44-blue)
+![Version](https://img.shields.io/badge/version-3.2.45-blue)
 ![Platform](https://img.shields.io/badge/platform-Linux%20x86__64-informational)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -74,6 +74,9 @@ This repository is the Linux port. It is tested on CachyOS and Arch with KDE Pla
 - Smooth frame pacing with a 60 Hz movie present loop, a reused video texture, wall-clock presentation and slow audio drift correction
 - Embedded and sidecar subtitles with SUBS cycling and an OPEN SUBS picker
 - Audio track selection on local video files with the AUDIO button
+- Audio and subtitle choices are remembered per video file
+- Optional auto-select of the first English subtitle
+- Subtitle styling with size, bottom margin and outline controls that are saved
 - DUMP TO MKV decrypts and remuxes every title with MakeMKV
 - DVD DUMP TO ISO uses the bundled CachyOS dvdbackup plus genisoimage, with MakeMKV as fallback
 - Blu-ray DUMP TO ISO uses MakeMKV backup with decryption and builds a full disc UDF 2.50 image with menus and extras, using the native writer built into the app

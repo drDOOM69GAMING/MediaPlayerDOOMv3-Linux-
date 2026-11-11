@@ -397,10 +397,14 @@ impl PlayerApp {
                 }
                 if self.state.current_song.is_some() {
                     if retro_btn_ex(ui, "COVER", th.btn_fg, th.btn_bg, 56.0, 23.0)
-                        .on_hover_text("Choose cover art for this album")
+                        .on_hover_text("Choose cover art; Shift-click to reset this album")
                         .clicked()
                     {
-                        self.set_cover_from_file();
+                        if ui.input(|i| i.modifiers.shift) {
+                            self.reset_cover_for_album();
+                        } else {
+                            self.set_cover_from_file();
+                        }
                     }
                 }
             });
@@ -1626,9 +1630,6 @@ impl PlayerApp {
                     resp.request_focus();
                     self.search_focus = false;
                 }
-                if retro_btn(ui, "J", Color32::from_rgb(255, 240, 160), th.btn_bg).clicked() {
-                    self.search_focus = true;
-                }
             });
 
             ui.horizontal(|ui| {
@@ -2515,6 +2516,7 @@ impl PlayerApp {
                 ui.label(RichText::new("Ratings ............. MusicBrainz community 1-5 stars; current album auto-fetched; album fallback").color(dim).monospace());
                 ui.label(RichText::new("Your stars .......... Clicking stars sets a manual rating that Meta All never overwrites").color(dim).monospace());
                 ui.label(RichText::new("Manual cover ........ COVER next to the stars writes a chosen image to every track in that album").color(dim).monospace());
+                ui.label(RichText::new("Reset cover ......... Shift-click COVER to clear the cached art and look it up again").color(dim).monospace());
                 ui.label(RichText::new("Clear stars ......... Removes every manual and automatic rating after a confirmation").color(dim).monospace());
                 if retro_btn(ui, "CLEAR ALL STAR RATINGS", Color32::from_rgb(255, 120, 120), th.btn_bg)
                     .on_hover_text("Opens a confirmation before any rating is removed")
@@ -2531,6 +2533,9 @@ impl PlayerApp {
                 ui.label(RichText::new("Subtitles ........... SUBS cycles off, embedded tracks and sidecar subtitle files").color(dim).monospace());
                 ui.label(RichText::new("Sidecar files ....... video.srt, video.eng.srt, video.ass and similar are found automatically").color(dim).monospace());
                 ui.label(RichText::new("Open subs ........... Load a .srt, .ass, .ssa or .vtt file for the current movie").color(dim).monospace());
+                ui.label(RichText::new("Sub style ........... SUB STYLE sets size, bottom margin and outline; the values are saved").color(dim).monospace());
+                ui.label(RichText::new("Remember ............ The audio and subtitle choice is remembered for each video file").color(dim).monospace());
+                ui.label(RichText::new("Auto English ........ Enable it in SUBTITLE STYLE to turn on the first English subtitle").color(dim).monospace());
                 ui.label(RichText::new("Discs ............... DVD and Blu-ray keep their preferred English audio; external subtitles still work").color(dim).monospace());
                 ui.add_space(6.0);
 
@@ -2586,6 +2591,7 @@ impl PlayerApp {
                 ui.label(RichText::new("F ................... Toggle Fullscreen").color(g).monospace());
                 ui.label(RichText::new("M ................... Mute / Unmute").color(g).monospace());
                 ui.label(RichText::new("L ................... Toggle Lyrics").color(g).monospace());
+                ui.label(RichText::new("J ................... Focus the search field").color(g).monospace());
                 ui.add_space(6.0);
 
                 ui.label(RichText::new("DECK CONTROLS (TAPE MODE)").color(acc).monospace().strong());

@@ -1,5 +1,16 @@
 # Changelog
 
+## v3.2.45
+
+- Added a SUBTITLE STYLE window with size, bottom margin and outline sliders.
+- The style is saved in settings and applied the next time a subtitle is shown.
+- Added a SUB STYLE button to the fullscreen and windowed video controls.
+- The player now remembers the selected audio and subtitle track per video file.
+- Added an Auto-select English subtitles option in the subtitle style window.
+- Shift-click COVER clears the cached cover for the album and starts the normal local/web lookup again.
+- Removed the redundant J button next to Search; the J key still focuses the field.
+- Help documents both controls.
+
 ## v3.2.44
 
 - The video player now lists and cycles audio tracks on local video files with the AUDIO button.

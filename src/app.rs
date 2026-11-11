@@ -369,6 +369,13 @@ pub(crate) struct PlayerApp {
     pub(crate) video_subs: Vec<SubtitleStreamInfo>,
     pub(crate) video_sub_sel: Option<usize>,
     pub(crate) video_subtitle: Option<VideoSubtitle>,
+    pub(crate) video_sub_size: u32,
+    pub(crate) video_sub_margin: u32,
+    pub(crate) video_sub_outline: u32,
+    pub(crate) video_sub_style_open: bool,
+    pub(crate) video_auto_subs: bool,
+    pub(crate) video_audio_choice: HashMap<String, usize>,
+    pub(crate) video_sub_choice: HashMap<String, String>,
     pub(crate) video_pos: egui::Pos2,
     pub(crate) video_fs: bool,
     pub(crate) video_sink: Option<std::sync::Arc<Sink>>,
@@ -472,6 +479,12 @@ impl PlayerApp {
         let mut manual_ratings: HashSet<String> = HashSet::new();
         let mut ratings_schema = 0u32;
         let mut rating_filter = 0u8;
+        let mut subtitle_size = 32u32;
+        let mut subtitle_margin = 40u32;
+        let mut subtitle_outline = 2u32;
+        let mut video_auto_subs = false;
+        let mut video_audio_choice: HashMap<String, usize> = HashMap::new();
+        let mut video_sub_choice: HashMap<String, String> = HashMap::new();
         let mut last_cd_dir: Option<String> = None;
         let mut music_root: Option<String> = None;
         let mut video_positions: HashMap<String, f32> = HashMap::new();
@@ -525,6 +538,12 @@ impl PlayerApp {
                 manual_ratings = s.manual_ratings;
                 ratings_schema = s.ratings_schema;
                 rating_filter = s.rating_filter.min(5);
+                subtitle_size = s.subtitle_size.clamp(8, 96);
+                subtitle_margin = s.subtitle_margin.min(240);
+                subtitle_outline = s.subtitle_outline.min(6);
+                video_auto_subs = s.video_auto_subs;
+                video_audio_choice = s.video_audio_choice;
+                video_sub_choice = s.video_sub_choice;
             }
         }
         av_log(&format!(
@@ -585,6 +604,12 @@ impl PlayerApp {
                 manual_ratings: manual_ratings.clone(),
                 ratings_schema: 1,
                 rating_filter,
+                subtitle_size,
+                subtitle_margin,
+                subtitle_outline,
+                video_auto_subs,
+                video_audio_choice: video_audio_choice.clone(),
+                video_sub_choice: video_sub_choice.clone(),
             };
             if let Ok(text) = serde_json::to_string_pretty(&upgraded) {
                 let _ = std::fs::write(&settings_path, text);
@@ -920,6 +945,13 @@ impl PlayerApp {
             video_subs: Vec::new(),
             video_sub_sel: None,
             video_subtitle: None,
+            video_sub_size: subtitle_size,
+            video_sub_margin: subtitle_margin,
+            video_sub_outline: subtitle_outline,
+            video_sub_style_open: false,
+            video_auto_subs,
+            video_audio_choice,
+            video_sub_choice,
             video_pos: egui::pos2(60.0, 60.0),
             video_fs: false,
             video_sink: None,
@@ -1304,6 +1336,12 @@ video_ended: false,
             manual_ratings: self.manual_ratings.clone(),
             ratings_schema: 1,
             rating_filter: self.rating_filter,
+            subtitle_size: self.video_sub_size,
+            subtitle_margin: self.video_sub_margin,
+            subtitle_outline: self.video_sub_outline,
+            video_auto_subs: self.video_auto_subs,
+            video_audio_choice: self.video_audio_choice.clone(),
+            video_sub_choice: self.video_sub_choice.clone(),
         };
         // Compact JSON: pretty-printing a 18k-track playlist on every save was
         // both slower and several times larger.
@@ -2687,15 +2725,17 @@ video_ended: false,
             Msg::VideoStreams { gen, audio, subs } => {
                 if gen == self.video_gen {
                     self.video_audio_tracks = audio;
-                    self.video_audio_sel = self
-                        .video_audio_sel
-                        .min(self.video_audio_tracks.len().saturating_sub(1));
                     self.video_subs = subs;
-                    if let Some(i) = self.video_sub_sel {
-                        if i >= self.video_subs.len() {
-                            self.video_sub_sel = None;
-                            self.video_subtitle = None;
-                        }
+                    if self.video_audio_tracks.is_empty() {
+                        self.video_audio_sel = 0;
+                    } else {
+                        self.video_audio_sel = self
+                            .video_audio_sel
+                            .min(self.video_audio_tracks.len() - 1);
+                    }
+                    if self.restore_video_choices() {
+                        let pos = self.video_cur_secs;
+                        self.seek_video(pos);
                     }
                 }
             }
@@ -2973,6 +3013,43 @@ impl std::ops::Drop for PlayerApp {
 }
 
 impl PlayerApp {
+    /// Remove the cached cover for the current album and let local/web lookup
+    /// run again. Bound to Shift-click on COVER.
+    pub(crate) fn reset_cover_for_album(&mut self) {
+        let Some(cur) = self.state.current_song.clone() else {
+            return;
+        };
+        let key = self.cover_group_key(&cur);
+        let targets: Vec<String> = self
+            .state
+            .playlist
+            .iter()
+            .filter(|p| self.cover_group_key(p) == key)
+            .cloned()
+            .collect();
+        let targets = if targets.is_empty() {
+            vec![cur.clone()]
+        } else {
+            targets
+        };
+        let mut removed = 0usize;
+        for p in &targets {
+            if std::fs::remove_file(art_cache_path(p)).is_ok() {
+                removed += 1;
+            }
+            self.no_art.remove(p);
+        }
+        self.no_art_dirty = true;
+        self.art_tex = None;
+        self.art_state = 1;
+        self.art_local_valid = false;
+        let _ = self.lib_tx.send(LibCmd::ArtLocal(cur));
+        self.set_status(format!(
+            "Cover cache cleared for {} track(s); looking up art again",
+            removed.max(1)
+        ));
+    }
+
     /// Let the user replace the album cover with a local image. The image is
     /// written to the art cache for every track in the same album group, so it
     /// survives restarts and track changes.
@@ -3332,6 +3409,9 @@ impl eframe::App for PlayerApp {
         }
         if self.video_on {
             self.video_window(&ctx);
+        }
+        if self.video_sub_style_open {
+            self.show_subtitle_style_window(&ctx);
         }
         if self.lyrics.is_some() {
             self.ui_lyrics();

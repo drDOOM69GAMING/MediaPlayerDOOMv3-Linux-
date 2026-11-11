@@ -240,6 +240,76 @@ impl PlayerApp {
         }
     }
 
+    /// Apply the saved audio/subtitle choice (and the auto-English setting)
+    /// after the stream probe arrives. Returns true when playback should be
+    /// re-opened to apply a non-default choice.
+    pub(crate) fn restore_video_choices(&mut self) -> bool {
+        let Some(path) = self.video_current.clone() else {
+            return false;
+        };
+        let mut changed = false;
+
+        let desired_audio = self
+            .video_audio_choice
+            .get(&path)
+            .and_then(|ord| self.video_audio_tracks.iter().position(|t| t.ordinal == *ord))
+            .unwrap_or(0);
+        if desired_audio != self.video_audio_sel {
+            self.video_audio_sel = desired_audio;
+            changed = true;
+        }
+
+        let mut sub_sel: Option<usize> = None;
+        if let Some(key) = self.video_sub_choice.get(&path) {
+            if key != "off" {
+                if let Some(n) = key.strip_prefix("embedded:") {
+                    if let Ok(ord) = n.parse::<usize>() {
+                        sub_sel = self
+                            .video_subs
+                            .iter()
+                            .position(|s| !s.external && s.ordinal == ord);
+                    }
+                } else if let Some(p) = key.strip_prefix("external:") {
+                    sub_sel = self
+                        .video_subs
+                        .iter()
+                        .position(|s| s.external && s.path == p);
+                }
+            }
+        } else if self.video_auto_subs {
+            sub_sel = self.video_subs.iter().position(|s| {
+                crate::ffmpeg::is_english(&s.lang)
+                    || s.title.to_ascii_lowercase().contains("eng")
+            });
+        }
+        if sub_sel != self.video_sub_sel {
+            self.video_sub_sel = sub_sel;
+            changed = true;
+        }
+        self.video_subtitle = self.video_sub_sel.map(|i| {
+            let s = &self.video_subs[i];
+            if s.external {
+                crate::types::VideoSubtitle::External {
+                    path: s.path.clone(),
+                }
+            } else {
+                crate::types::VideoSubtitle::Embedded {
+                    path: path.clone(),
+                    ordinal: s.ordinal,
+                }
+            }
+        });
+        changed
+    }
+
+    pub(crate) fn video_sub_style(&self) -> crate::types::SubtitleStyle {
+        crate::types::SubtitleStyle {
+            size: self.video_sub_size,
+            margin: self.video_sub_margin,
+            outline: self.video_sub_outline,
+        }
+    }
+
     /// ffmpeg map for the selected local audio track. Discs keep their own
     /// English/preferred mapping because their stream indexes are different.
     pub(crate) fn video_audio_map(&self) -> Option<String> {
@@ -298,6 +368,12 @@ impl PlayerApp {
             return;
         }
         self.video_audio_sel = (self.video_audio_sel + 1) % self.video_audio_tracks.len();
+        if let Some(p) = self.video_current.clone() {
+            if let Some(t) = self.video_audio_tracks.get(self.video_audio_sel) {
+                self.video_audio_choice.insert(p, t.ordinal);
+                self.save_settings();
+            }
+        }
         let label = self.video_audio_label();
         let pos = self.video_cur_secs;
         self.seek_video(pos);
@@ -326,6 +402,21 @@ impl PlayerApp {
                 }
             }
         });
+        if let Some(p) = self.video_current.clone() {
+            let key = match next {
+                None => "off".to_string(),
+                Some(i) => {
+                    let s = &self.video_subs[i];
+                    if s.external {
+                        format!("external:{}", s.path)
+                    } else {
+                        format!("embedded:{}", s.ordinal)
+                    }
+                }
+            };
+            self.video_sub_choice.insert(p, key);
+            self.save_settings();
+        }
         let label = self.video_sub_label();
         let pos = self.video_cur_secs;
         self.seek_video(pos);
@@ -359,9 +450,100 @@ impl PlayerApp {
         self.video_subtitle = Some(crate::types::VideoSubtitle::External {
             path: self.video_subs[self.video_sub_sel.unwrap()].path.clone(),
         });
+        if let Some(p) = self.video_current.clone() {
+            let ext = self.video_subs[self.video_sub_sel.unwrap()].path.clone();
+            self.video_sub_choice.insert(p, format!("external:{}", ext));
+            self.save_settings();
+        }
         let pos = self.video_cur_secs;
         self.seek_video(pos);
         self.set_status("External subtitles enabled");
+    }
+
+    /// Small window for subtitle size, bottom margin and outline.
+    pub(crate) fn show_subtitle_style_window(&mut self, ctx: &egui::Context) {
+        if !self.video_sub_style_open {
+            return;
+        }
+        let th = self.theme_colors();
+        let mut open = self.video_sub_style_open;
+        let mut apply = false;
+        let mut close_clicked = false;
+        egui::Window::new("SUBTITLE STYLE")
+            .resizable(false)
+            .collapsible(false)
+            .default_width(330.0)
+            .order(egui::Order::Foreground)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.label(
+                    RichText::new("SIZE")
+                        .color(th.accent)
+                        .monospace()
+                        .size(10.0),
+                );
+                ui.add(
+                    egui::Slider::new(&mut self.video_sub_size, 16..=80)
+                        .text("pt")
+                        .clamping(egui::SliderClamping::Always),
+                );
+                ui.label(
+                    RichText::new("BOTTOM MARGIN")
+                        .color(th.accent)
+                        .monospace()
+                        .size(10.0),
+                );
+                ui.add(
+                    egui::Slider::new(&mut self.video_sub_margin, 10..=180)
+                        .text("px")
+                        .clamping(egui::SliderClamping::Always),
+                );
+                ui.label(
+                    RichText::new("OUTLINE")
+                        .color(th.accent)
+                        .monospace()
+                        .size(10.0),
+                );
+                ui.add(
+                    egui::Slider::new(&mut self.video_sub_outline, 0..=4)
+                        .text("px")
+                        .clamping(egui::SliderClamping::Always),
+                );
+                ui.add_space(4.0);
+                if ui
+                    .checkbox(&mut self.video_auto_subs, "Auto-select English subtitles")
+                    .changed()
+                {
+                    self.save_settings();
+                }
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if retro_btn(ui, "APPLY", th.playing_fg, th.btn_bg).clicked() {
+                        apply = true;
+                    }
+                    if retro_btn(ui, "RESET", th.btn_fg, th.btn_bg).clicked() {
+                        self.video_sub_size = 32;
+                        self.video_sub_margin = 40;
+                        self.video_sub_outline = 2;
+                        apply = true;
+                    }
+                    if retro_btn(ui, "CLOSE", th.btn_fg, th.btn_bg).clicked() {
+                        close_clicked = true;
+                    }
+                });
+            });
+        if close_clicked {
+            open = false;
+        }
+        if apply {
+            self.save_settings();
+            if self.video_sub_sel.is_some() {
+                let pos = self.video_cur_secs;
+                self.seek_video(pos);
+            }
+            self.set_status("Subtitle style updated");
+        }
+        self.video_sub_style_open = open;
     }
 
     pub(crate) fn seek_video(&mut self, tsecs: f32) {
@@ -382,7 +564,7 @@ impl PlayerApp {
         }
         self.video_gen += 1;
         let gen = self.video_gen;
-        let _ = self.lib_tx.send(LibCmd::VideoOpen { path: path.clone(), gen, seek: tsecs, subtitle: self.video_subtitle.clone(), probe: false });
+        let _ = self.lib_tx.send(LibCmd::VideoOpen { path: path.clone(), gen, seek: tsecs, subtitle: self.video_subtitle.clone(), sub_style: self.video_sub_style(), probe: false });
         self.video_closing = false;
         self.video_paused = false;
         self.video_ended = false;
@@ -437,7 +619,7 @@ impl PlayerApp {
         self.video_subs.clear();
         self.video_sub_sel = None;
         self.video_subtitle = None;
-        let _ = self.lib_tx.send(LibCmd::VideoOpen { path: path.clone(), gen, seek: saved_pos, subtitle: None, probe: true });
+        let _ = self.lib_tx.send(LibCmd::VideoOpen { path: path.clone(), gen, seek: saved_pos, subtitle: None, sub_style: self.video_sub_style(), probe: true });
         self.video_aspect = self.video_aspects.get(&path).copied().unwrap_or(self.video_aspect_default);
         self.video_on = true;
         self.video_paused = false;
@@ -761,6 +943,7 @@ impl PlayerApp {
             let mut audio_cycle = false;
             let mut subs_cycle = false;
             let mut open_subs = false;
+            let mut open_sub_style = false;
             // Shift-clicking INTRO / CREDS clears that marker instead of
             // setting it (egui 0.36 has no secondary-click sense).
             let shift = ctx.input(|i| i.modifiers.shift);
@@ -880,7 +1063,7 @@ impl PlayerApp {
                         }
                         let bar2 = egui::Rect::from_min_size(
                             scr.min + egui::vec2(0.0, 30.0),
-                            egui::vec2(sw.min(540.0), 26.0),
+                            egui::vec2(sw.min(660.0), 26.0),
                         );
                         ui.painter().rect_filled(
                             bar2,
@@ -925,6 +1108,19 @@ impl PlayerApp {
                             .clicked()
                         {
                             open_subs = true;
+                        }
+                        if ui
+                            .put(
+                                egui::Rect::from_min_size(
+                                    scr.min + egui::vec2(510.0, 33.0),
+                                    egui::vec2(120.0, 20.0),
+                                ),
+                                egui::Button::new("SUB STYLE"),
+                            )
+                            .on_hover_text("Change subtitle size, position and outline")
+                            .clicked()
+                        {
+                            open_sub_style = true;
                         }
                     }
                     if self.video_bar_visible && !self.video_queue.is_empty() {
@@ -1056,6 +1252,7 @@ impl PlayerApp {
             if audio_cycle { self.cycle_video_audio(); }
             if subs_cycle { self.cycle_video_subs(); }
             if open_subs { self.open_external_subs(); }
+            if open_sub_style { self.video_sub_style_open = true; }
             if prev { self.queue_prev(); }
             if next { self.queue_next(); }
             if togg {
@@ -1078,6 +1275,7 @@ impl PlayerApp {
         let mut audio_cycle = false;
         let mut subs_cycle = false;
         let mut open_subs = false;
+        let mut open_sub_style = false;
         egui::Area::new(egui::Id::new("movie_win"))
             .fixed_pos(self.video_pos)
             .order(egui::Order::Foreground)
@@ -1135,6 +1333,9 @@ impl PlayerApp {
                             }
                             if ui.button("Open subs").on_hover_text("Load a subtitle file").clicked() {
                                 open_subs = true;
+                            }
+                            if ui.button("Sub style").on_hover_text("Subtitle size, position and outline").clicked() {
+                                open_sub_style = true;
                             }
                         });
                     });

@@ -157,19 +157,30 @@ pub fn probe_video_streams(
 
 /// Build the ffmpeg subtitle filter for a selected track. Text subtitles are
 /// burned into the frame stream so the existing RGBA reader needs no changes.
-pub fn subtitle_filter(sub: &crate::types::VideoSubtitle) -> String {
+pub fn subtitle_filter(sub: &crate::types::VideoSubtitle, style: &crate::types::SubtitleStyle) -> String {
     use crate::types::VideoSubtitle;
     let esc = |p: &str| {
         p.replace('\\', "\\\\")
             .replace('\'', "\\'")
             .replace(':', "\\:")
     };
+    let force = format!(
+        "FontSize={},Outline={},Shadow=0,MarginV={},Alignment=2",
+        style.size.clamp(8, 96),
+        style.outline.min(6),
+        style.margin.min(240)
+    );
     match sub {
         VideoSubtitle::External { path } => {
-            format!("subtitles=filename='{}'", esc(path))
+            format!("subtitles=filename='{}':force_style='{}'", esc(path), force)
         }
         VideoSubtitle::Embedded { path, ordinal } => {
-            format!("subtitles=filename='{}':si={}", esc(path), ordinal)
+            format!(
+                "subtitles=filename='{}':si={}:force_style='{}'",
+                esc(path),
+                ordinal,
+                force
+            )
         }
     }
 }
@@ -819,14 +830,20 @@ mod media_pipeline_tests {
         assert!(subs.iter().any(|s| !s.external && s.lang == "eng"));
         assert!(subs.iter().any(|s| s.external && s.path.ends_with("multi.eng.srt")));
 
-        let embedded = subtitle_filter(&crate::types::VideoSubtitle::Embedded {
-            path: out.to_string_lossy().to_string(),
-            ordinal: 0,
-        });
+        let embedded = subtitle_filter(
+            &crate::types::VideoSubtitle::Embedded {
+                path: out.to_string_lossy().to_string(),
+                ordinal: 0,
+            },
+            &crate::types::SubtitleStyle::default(),
+        );
         assert!(embedded.contains("si=0"), "filter was {}", embedded);
-        let external = subtitle_filter(&crate::types::VideoSubtitle::External {
-            path: srt.to_string_lossy().to_string(),
-        });
+        let external = subtitle_filter(
+            &crate::types::VideoSubtitle::External {
+                path: srt.to_string_lossy().to_string(),
+            },
+            &crate::types::SubtitleStyle::default(),
+        );
         assert!(external.contains("multi.eng.srt"), "filter was {}", external);
         let _ = std::fs::remove_dir_all(&dir);
     }

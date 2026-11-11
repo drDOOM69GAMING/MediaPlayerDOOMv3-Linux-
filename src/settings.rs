@@ -83,6 +83,22 @@ pub struct Settings {
     /// the search simply runs again.
     #[serde(default)]
     pub music_root: Option<String>,
+    /// Video subtitle appearance: font size, bottom margin and outline width.
+    #[serde(default = "default_subtitle_size")]
+    pub subtitle_size: u32,
+    #[serde(default = "default_subtitle_margin")]
+    pub subtitle_margin: u32,
+    #[serde(default = "default_subtitle_outline")]
+    pub subtitle_outline: u32,
+    /// Automatically turn on the first English subtitle track.
+    #[serde(default)]
+    pub video_auto_subs: bool,
+    /// Remembered audio track ordinal per video path.
+    #[serde(default)]
+    pub video_audio_choice: HashMap<String, usize>,
+    /// Remembered subtitle choice per video path ("off", "embedded:N", "external:/path").
+    #[serde(default)]
+    pub video_sub_choice: HashMap<String, String>,
 }
 
 pub fn default_video_volume() -> u32 {
@@ -95,6 +111,18 @@ pub fn default_intro_skip() -> f32 {
 
 pub fn default_credits_skip() -> f32 {
     90.0
+}
+
+pub fn default_subtitle_size() -> u32 {
+    32
+}
+
+pub fn default_subtitle_margin() -> u32 {
+    40
+}
+
+pub fn default_subtitle_outline() -> u32 {
+    2
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]

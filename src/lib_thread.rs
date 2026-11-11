@@ -345,7 +345,7 @@ LibCmd::Scan(dir) => {
                     let _ = tx2.send(Msg::FolderFound { folder });
                 });
             }
-            LibCmd::VideoOpen { path, gen, seek, subtitle, probe } => {
+            LibCmd::VideoOpen { path, gen, seek, subtitle, sub_style, probe } => {
                 av_log(&format!("open: RECEIVED gen={} (queue behind previous cmd?)", gen));
                 // A paused reader never reads its pipe, so it can't notice the
                 // old ffmpeg child being killed below and would never exit -
@@ -484,7 +484,7 @@ LibCmd::Scan(dir) => {
                     )
                 };
                 if let Some(sub) = subtitle.as_ref() {
-                    vf = format!("{},{}", vf, crate::ffmpeg::subtitle_filter(sub));
+                    vf = format!("{},{}", vf, crate::ffmpeg::subtitle_filter(sub, &sub_style));
                 }
                 cmd.arg("-i").arg(&input)
                     .args(["-an", "-sn", "-vf", &vf]);
