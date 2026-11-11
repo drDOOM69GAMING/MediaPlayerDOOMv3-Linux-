@@ -1,6 +1,6 @@
 # MediaPlayerDOOM v3 for Linux
 
-![Version](https://img.shields.io/badge/version-3.2.40-blue)
+![Version](https://img.shields.io/badge/version-3.2.41-blue)
 ![Platform](https://img.shields.io/badge/platform-Linux%20x86__64-informational)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -15,8 +15,9 @@ This repository is the Linux port. It is tested on CachyOS and Arch with KDE Pla
 - MP3, FLAC, M4A and AAC, ALAC, APE, WAV, AIFF, OGG, Opus, WMA, WavPack, Musepack and WebM audio
 - Automatic ffmpeg fallback for formats the built-in decoder cannot open, including M4A and APE
 - CUE sheet support that expands single-file APE and FLAC albums into individual tracks
-- Artist and album browser with A to Z bands and a full library view
-- Weighted smart shuffle or plain shuffle, repeat, playlist only and directory sequential modes
+- Artist and album browser with A to Z bands, expandable album lists and a full library view
+- Band names are merged across folder layouts, so loose "Artist - Album" folders join the same artist
+- Weighted smart shuffle or plain shuffle, with one red random / green in-order play-order switch for the loaded list
 - M3U and JSON playlist support
 - Drag to reorder the queue
 - Lyrics lookup
@@ -38,6 +39,8 @@ This repository is the Linux port. It is tested on CachyOS and Arch with KDE Pla
 ### Conversion and CD ripping
 
 - Convert a folder recursively to MP3, AAC, FLAC, OGG, Opus, WAV, AIFF, ALAC or WMA
+- Right-click a band or album in the browser to convert only that selection with the same format and compression choices
+- Clear all star ratings from Help > System Manual, with a confirmation
 - Quality 1 to 10 controls bitrate, FLAC compression, or PCM and ALAC bit depth
 - Tags and embedded cover art are preserved where the container supports them
 - Physical audio CDs are detected automatically and ripped to lossless FLAC with MusicBrainz tags and cover art
@@ -95,6 +98,7 @@ This repository is the Linux port. It is tested on CachyOS and Arch with KDE Pla
 - XDG base directory paths for data, cache, recordings and music
 - Hardware acceleration detection for AMD, Intel and NVIDIA
 - **Default media player**: a Set as Default action and `--set-default` command register MediaPlayerDOOM for 25 audio and video MIME types with xdg-mime. Opening an audio file starts the music player, while video files open in the video player
+- **Update check**: the app asks GitHub for the latest release shortly after launch and every six hours. When a newer release exists, a clickable banner appears at the top of the window and opens the release page. Nothing downloads or installs without the user
 
 ## Requirements
 
@@ -200,7 +204,7 @@ mediaplayerofdoom --windowed
 
 ## Keyboard
 
-`P` play or pause, `S` or `N` skip, `Left` previous, `Right` next, `Shift+Left` and `Shift+Right` seek 10 seconds, `R` record, `+` and `-` volume, `F` fullscreen, `M` mute, `D` deck mode, `V` video, `L` lyrics, `O` playlist only, `B` repeat, `J` search, `T` theme.
+`P` play or pause, `S` or `N` skip, `Left` previous, `Right` next, `Shift+Left` and `Shift+Right` seek 10 seconds, `R` record, `+` and `-` volume, `F` fullscreen, `M` mute, `D` deck mode, `V` video, `L` lyrics, `B` repeat, `J` search, `T` theme.
 
 ## Tray and Hide mode
 

@@ -36,9 +36,6 @@ pub(crate) struct PlayerState {
     pub(crate) playlist: Vec<String>,
     pub(crate) prev_songs: Vec<String>,
     pub(crate) repeat_enabled: bool,
-    pub(crate) playlist_only_mode: bool,
-    pub(crate) playlist_only_sequential: bool,
-    pub(crate) dir_sequential: bool,
     pub(crate) is_paused: bool,
     pub(crate) song_count: u64,
     pub(crate) skip_count: u64,
@@ -61,9 +58,6 @@ impl Default for PlayerState {
             playlist: Vec::new(),
             prev_songs: Vec::new(),
             repeat_enabled: false,
-            playlist_only_mode: false,
-            playlist_only_sequential: false,
-            dir_sequential: false,
             is_paused: false,
             song_count: 0,
             skip_count: 0,
@@ -74,6 +68,17 @@ impl Default for PlayerState {
             song_weights: HashMap::new(),
         }
     }
+}
+
+/// A right-click conversion target chosen in the band browser.
+pub(crate) struct ConvertPick {
+    /// "ALBUM" or "BAND".
+    pub(crate) kind: &'static str,
+    pub(crate) title: String,
+    /// Track count is kept separately because the file list is moved to the
+    /// worker when the conversion starts.
+    pub(crate) count: usize,
+    pub(crate) files: Vec<String>,
 }
 
 pub(crate) struct PlayerApp {
@@ -313,6 +318,11 @@ pub(crate) struct PlayerApp {
     pub(crate) bluray_prot_pending: bool,
     pub(crate) convert_open: bool,
     pub(crate) convert_src: Option<String>,
+    /// Album or band picked from the right-click menu.
+    pub(crate) convert_pick: Option<ConvertPick>,
+    pub(crate) convert_pick_done: bool,
+    /// Confirmation shown before clearing every star rating.
+    pub(crate) clear_ratings_confirm: bool,
     pub(crate) convert_format: crate::convert::ConvertFormat,
     pub(crate) convert_quality: u8,
     pub(crate) convert_active: bool,
@@ -325,6 +335,9 @@ pub(crate) struct PlayerApp {
     /// Dev/automation hook: seek a playing video to this time once, then clear.
     pub(crate) auto_seek: Option<f32>,
     pub(crate) msg_tx: Sender<Msg>,
+    /// Latest GitHub release newer than this build. Empty means none found.
+    pub(crate) update_version: String,
+    pub(crate) update_url: String,
     pub(crate) last_cd_dir: Option<String>,
     /// Remembered library root, so startup doesn't re-walk every drive.
     pub(crate) music_root: Option<String>,
@@ -343,6 +356,8 @@ pub(crate) struct PlayerApp {
     pub(crate) band_map: HashMap<String, Vec<String>>,
     pub(crate) full_library: Vec<String>,
     pub(crate) band_sel: String,
+    pub(crate) expanded_bands: HashSet<String>,
+    pub(crate) album_sel: Option<(String, String)>,
     pub(crate) bands_path: PathBuf,
     pub(crate) video_on: bool,
     pub(crate) video_paused: bool,
@@ -665,7 +680,12 @@ impl PlayerApp {
             let _ = std::fs::remove_file(&old2);
         }
         let bands_path = data_dir().join("bands3.json");
-        let band_map = load_bands(&bands_path);
+        // Repair band entries written by older builds that treated loose
+        // "Artist - Album" folders as separate bands. Tags from the cache let
+        // us also join names like "Eminem The Marshall Mathers LP" to Eminem.
+        let raw_band_map = load_bands(&bands_path);
+        let band_map = canonicalize_bands(raw_band_map.clone(), &meta_cache_boot);
+        let bands_need_save = band_map != raw_band_map;
         // Artwork now has three sources (iTunes, Deezer, Cover Art Archive)
         // and no longer caches blank images. Clear the old "no art" list once
         // so tracks written off by the single-source lookup get another try.
@@ -849,6 +869,9 @@ impl PlayerApp {
             bluray_prot_pending: false,
             convert_open: false,
             convert_src: None,
+            convert_pick: None,
+            convert_pick_done: false,
+            clear_ratings_confirm: false,
             convert_format: crate::convert::ConvertFormat::Same,
             convert_quality: 8,
             convert_active: false,
@@ -862,6 +885,8 @@ impl PlayerApp {
                 .ok()
                 .and_then(|v| v.parse::<f32>().ok()),
             msg_tx: msg_tx.clone(),
+            update_version: String::new(),
+            update_url: String::new(),
             last_cd_dir,
             music_root,
             disc_saved: Vec::new(),
@@ -875,6 +900,8 @@ impl PlayerApp {
             band_map,
             full_library,
             band_sel: String::new(),
+            expanded_bands: HashSet::new(),
+            album_sel: None,
             video_on: false,
             video_paused: false,
             video_dims: (640, 360),
@@ -1064,6 +1091,27 @@ video_ended: false,
             }
         }
         app.rebuild_display_cache();
+        if bands_need_save {
+            app.save_bands();
+        }
+        // Check GitHub shortly after launch, then every six hours. A newer
+        // release only raises the banner; nothing is installed automatically.
+        {
+            let tx = app.net_tx.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_secs(5));
+                loop {
+                    let _ = tx.send(NetCmd::CheckUpdate {
+                        current: APP_VERSION.to_string(),
+                    });
+                    std::thread::sleep(Duration::from_secs(6 * 60 * 60));
+                }
+            });
+        }
+        // Dev/automation hook: open one band's album list for UI checks.
+        if let Ok(b) = std::env::var("MPDOOM_EXPAND_BAND") {
+            app.expanded_bands.insert(b);
+        }
         // Dev/automation hook: start a specific song so rating/art paths can be
         // exercised without navigating the 18k-row playlist.
         if let Some(p) = std::env::var_os("MPDOOM_PLAY_SONG") {
@@ -2364,6 +2412,16 @@ video_ended: false,
                     }
                 }
             }
+            Msg::UpdateAvailable { version, url } => {
+                if version != self.update_version {
+                    self.set_status(format!(
+                        "Update {} available - click the banner to open the release",
+                        version
+                    ));
+                }
+                self.update_version = version;
+                self.update_url = url;
+            }
             Msg::YtStatus(s) => {
                 self.status = s;
                 self.status_until = Some(Instant::now() + Duration::from_secs(8));
@@ -2799,6 +2857,9 @@ video_ended: false,
             Msg::ConvertDone { folder, converted, failed } => {
                 self.finish_convert();
                 self.convert_dest = Some(folder.clone());
+                if self.convert_pick.is_some() {
+                    self.convert_pick_done = true;
+                }
                 self.set_status(format!(
                     "Converted {} file(s){} to {}",
                     converted,
@@ -2808,10 +2869,16 @@ video_ended: false,
             }
             Msg::ConvertFail(e) => {
                 self.finish_convert();
+                if self.convert_pick.is_some() {
+                    self.convert_pick_done = true;
+                }
                 self.set_error(format!("Conversion failed: {}", e));
             }
             Msg::ConvertCancelled => {
                 self.finish_convert();
+                if self.convert_pick.is_some() {
+                    self.convert_pick_done = true;
+                }
                 self.set_status("Conversion cancelled");
             }
             Msg::VideoCutDone { gen, path, cut, err } => {
@@ -2868,14 +2935,19 @@ impl std::ops::Drop for PlayerApp {
 }
 
 impl PlayerApp {
-    pub(crate) fn start_convert(&mut self) {
+    /// Shared worker setup for folder and album/band conversions.
+    fn launch_convert<F>(&mut self, dest: String, text: String, job: F)
+    where
+        F: FnOnce(
+                Sender<Msg>,
+                std::sync::Arc<std::sync::atomic::AtomicBool>,
+            ) -> Result<crate::convert::ConvertResult, String>
+            + Send
+            + 'static,
+    {
         if self.convert_active {
             return;
         }
-        let Some(src) = self.convert_src.clone() else {
-            self.set_error("Choose a music folder first");
-            return;
-        };
         if let Some(h) = self.convert_thread.take() {
             let _ = h.join();
         }
@@ -2884,30 +2956,72 @@ impl PlayerApp {
         self.convert_active = true;
         self.convert_done = 0;
         self.convert_total = 0;
-        self.convert_text = format!("Scanning {}...", src);
-        let fmt = self.convert_format;
-        let quality = self.convert_quality;
-        self.convert_dest = Some(crate::convert::destination_for(&src, fmt).display().to_string());
+        self.convert_text = text;
+        self.convert_dest = Some(dest);
         let tx = self.msg_tx.clone();
         let cancel = self.convert_cancel.clone();
         self.convert_thread = Some(std::thread::spawn(move || {
-            match crate::convert::convert_folder(&src, fmt, quality, &tx, &cancel) {
-                Ok(r) => {
-                    let _ = tx.send(Msg::ConvertDone {
-                        folder: r.folder.display().to_string(),
-                        converted: r.converted,
-                        failed: r.failed,
-                    });
-                }
+            let msg = match job(tx.clone(), cancel.clone()) {
+                Ok(r) => Msg::ConvertDone {
+                    folder: r.folder.display().to_string(),
+                    converted: r.converted,
+                    failed: r.failed,
+                },
                 Err(_) if cancel.load(std::sync::atomic::Ordering::Relaxed) => {
-                    let _ = tx.send(Msg::ConvertCancelled);
+                    Msg::ConvertCancelled
                 }
-                Err(e) => {
-                    let _ = tx.send(Msg::ConvertFail(e));
-                }
-            }
+                Err(e) => Msg::ConvertFail(e),
+            };
+            let _ = tx.send(msg);
         }));
+    }
+
+    pub(crate) fn start_convert(&mut self) {
+        if self.convert_active {
+            return;
+        }
+        let Some(src) = self.convert_src.clone() else {
+            self.set_error("Choose a music folder first");
+            return;
+        };
+        let fmt = self.convert_format;
+        let quality = self.convert_quality;
+        let dest = crate::convert::destination_for(&src, fmt)
+            .display()
+            .to_string();
+        let text = format!("Scanning {}...", src);
+        self.launch_convert(dest, text, move |tx, cancel| {
+            crate::convert::convert_folder(&src, fmt, quality, &tx, &cancel)
+        });
         self.set_status("Converting music...");
+    }
+
+    /// Convert just the album or band picked in the band browser.
+    pub(crate) fn start_convert_selection(
+        &mut self,
+        label: String,
+        files: Vec<String>,
+        format: crate::convert::ConvertFormat,
+    ) {
+        if self.convert_active {
+            self.set_error("A conversion is already running");
+            return;
+        }
+        if files.is_empty() {
+            self.set_error("No tracks to convert");
+            return;
+        }
+        let quality = self.convert_quality;
+        let dest = crate::convert::destination_for_label(&label, format)
+            .display()
+            .to_string();
+        let text = format!("Converting {} track(s)...", files.len());
+        let status = format!("Converting {}...", label);
+        self.convert_pick_done = false;
+        self.launch_convert(dest, text, move |tx, cancel| {
+            crate::convert::convert_files(&files, &label, format, quality, &tx, &cancel)
+        });
+        self.set_status(status);
     }
 
     pub(crate) fn cancel_convert(&mut self) {
@@ -3074,6 +3188,12 @@ impl eframe::App for PlayerApp {
         }
         if self.convert_open {
             self.show_convert_window(&ctx);
+        }
+        if self.convert_pick.is_some() {
+            self.show_convert_pick_window(&ctx);
+        }
+        if self.clear_ratings_confirm {
+            self.show_clear_ratings_window(&ctx);
         }
         if self.show_add_radio {
             self.show_add_radio_window(&ctx);

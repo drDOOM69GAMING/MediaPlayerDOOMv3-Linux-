@@ -237,6 +237,24 @@ pub fn notify_song_path(path: &str) {
     let (title, artist, album) = crate::library::repaired_meta(path, &title, &artist, &album);
     notify_song(&artist, &title, &album);
 }
+/// Open a web link in the user's default browser.
+pub fn open_url(url: &str) {
+    #[cfg(windows)]
+    {
+        let _ = std::process::Command::new("cmd")
+            .args(["/C", "start", "", url])
+            .spawn();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open").arg(url).spawn();
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+    }
+}
+
 pub fn open_in_explorer(path: &str) {
     let disk = crate::cue::disk_path(path);
     let dir = Path::new(&disk).parent().unwrap_or(Path::new("."));

@@ -1,13 +1,14 @@
 ﻿#![allow(unused_imports)]
 #![allow(dead_code)]
 // Library helpers: bands, sorting, tag reading, weighted picks.
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 use lofty::prelude::*;
 use rodio::{Decoder, Source};
 use crate::files::*;
+use crate::settings::MetaCacheEntry;
 use crate::util::*;
 pub fn weighted_pick(pl: &[String], weights: &HashMap<String, f32>) -> String {
     let mut r = rand::random::<f64>();
@@ -215,16 +216,21 @@ pub fn band_of(path: &str) -> String {
     if parent.is_empty() {
         return parent;
     }
+    // "Artist - Album" folders are the most common layout, so split there
+    // before looking at a trailing year or edition in parentheses.
+    if let Some(pos) = parent.find(" - ") {
+        let left = parent[..pos].trim();
+        if !left.is_empty() {
+            return left.to_string();
+        }
+    }
     if let Some(open) = parent.rfind('(') {
         if parent.ends_with(')') {
             let inner = parent[open + 1..parent.len() - 1].trim();
-            if !inner.is_empty() {
+            if !inner.is_empty() && !is_edition_word(inner) {
                 return inner.to_string();
             }
         }
-    }
-    if let Some(pos) = parent.find(" - ") {
-        return parent[..pos].trim().to_string();
     }
     parent
 }
@@ -239,7 +245,7 @@ pub fn band_of_file(path: &str) -> String {
         if let Some(open) = after.rfind('(') {
             if after.ends_with(')') {
                 let artist = after[open + 1..after.len() - 1].trim();
-                if !artist.is_empty() {
+                if !artist.is_empty() && !is_edition_word(artist) {
                     return artist.to_string();
                 }
             }
@@ -247,6 +253,190 @@ pub fn band_of_file(path: &str) -> String {
         return s[..pos].trim().to_string();
     }
     band_of(path)
+}
+
+/// Words that describe an edition or disc number, not an artist. Used when a
+/// folder name ends in parentheses such as "Album (2024)" or "Album (Deluxe)".
+fn is_edition_word(s: &str) -> bool {
+    let t = s.trim().to_ascii_lowercase();
+    if t.is_empty() {
+        return true;
+    }
+    if t.chars().all(|c| c.is_ascii_digit()) {
+        return true;
+    }
+    matches!(
+        t.as_str(),
+        "deluxe"
+            | "deluxe edition"
+            | "deluxe version"
+            | "remaster"
+            | "remastered"
+            | "remastered edition"
+            | "expanded"
+            | "expanded edition"
+            | "special edition"
+            | "limited edition"
+            | "collector's edition"
+            | "collectors edition"
+            | "anniversary edition"
+            | "bonus"
+            | "bonus tracks"
+            | "explicit"
+            | "clean"
+            | "mono"
+            | "stereo"
+            | "cd"
+            | "vinyl"
+    )
+}
+
+/// Turn a top-level folder name into a band name. Album folders are often
+/// named "Artist - Album", and some carry a store or rip suffix such as
+/// "iTunes" or "FLAC". Without this cleanup the same artist appears twice:
+/// once from the real artist folder and once from a loose album folder.
+pub fn band_from_folder_name(name: &str) -> String {
+    let mut n = name.trim();
+    for suffix in [
+        " itunes",
+        " amazon",
+        " mp3",
+        " flac",
+        " wav",
+        " 320",
+        " 320kbps",
+        " discography",
+    ] {
+        if n.to_ascii_lowercase().ends_with(suffix) && n.len() > suffix.len() {
+            n = n[..n.len() - suffix.len()].trim_end();
+            break;
+        }
+    }
+    if let Some(pos) = n.find(" - ") {
+        let left = n[..pos].trim();
+        if !left.is_empty() {
+            n = left;
+        }
+    }
+    n.trim().to_string()
+}
+
+/// Fold a name so "Blink-182", "Blink 182" and "BLINK-182" compare equal.
+fn band_fold(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(|c| c.to_lowercase())
+        .collect()
+}
+
+/// The artist tag most of a band's tracks agree on. Compilations rotate
+/// artists per track and therefore return None.
+fn dominant_tag_artist(
+    files: &[String],
+    meta: &HashMap<String, MetaCacheEntry>,
+) -> Option<String> {
+    let mut counts: HashMap<String, (usize, String)> = HashMap::new();
+    let mut tagged = 0usize;
+    for p in files {
+        let Some(e) = meta.get(p) else { continue };
+        let artist = e.artist.trim();
+        if artist.is_empty() || is_placeholder_meta(artist) {
+            continue;
+        }
+        let low = artist.to_ascii_lowercase();
+        if low == "various" || low == "various artists" {
+            continue;
+        }
+        let fold = band_fold(artist);
+        if fold.is_empty() {
+            continue;
+        }
+        tagged += 1;
+        let entry = counts.entry(fold).or_insert((0, artist.to_string()));
+        entry.0 += 1;
+        if !entry.1.chars().any(|c| c.is_lowercase()) && artist.chars().any(|c| c.is_lowercase())
+        {
+            entry.1 = artist.to_string();
+        }
+    }
+    if tagged == 0 {
+        return None;
+    }
+    let (count, name) = counts
+        .into_iter()
+        .max_by_key(|(_, (c, _))| *c)
+        .map(|(_, value)| value)?;
+    // Require a strict majority so a few guest credits cannot rename the group.
+    if count * 2 > tagged {
+        Some(name)
+    } else {
+        None
+    }
+}
+
+/// Pick the name a band group should be filed under.
+pub fn canonical_band_name(
+    key: &str,
+    files: &[String],
+    meta: &HashMap<String, MetaCacheEntry>,
+) -> String {
+    let mut name = band_from_folder_name(key);
+    // A tag artist that prefixes the folder name means the folder is
+    // "Artist + Album" with no separator, such as
+    // "Eminem The Marshall Mathers LP". Prefer the tag artist.
+    if let Some(artist) = dominant_tag_artist(files, meta) {
+        let fk = band_fold(&name);
+        let fa = band_fold(&artist);
+        if !fa.is_empty() && fk.len() > fa.len() && fk.starts_with(&fa) {
+            name = artist;
+        }
+    }
+    name.trim().to_string()
+}
+
+/// Merge band entries that refer to the same artist. This repairs libraries
+/// built when top-level album folders were treated as separate bands, so
+/// "Disturbed" and "Disturbed - Divisive" become one band with both albums.
+pub fn canonicalize_bands(
+    map: HashMap<String, Vec<String>>,
+    meta: &HashMap<String, MetaCacheEntry>,
+) -> HashMap<String, Vec<String>> {
+    let mut groups: HashMap<String, Vec<(String, Vec<String>)>> = HashMap::new();
+    for (key, files) in map {
+        let name = canonical_band_name(&key, &files, meta);
+        let fold = band_fold(&name);
+        if name.is_empty() || fold.is_empty() {
+            continue;
+        }
+        groups.entry(fold).or_default().push((name, files));
+    }
+    let mut out: HashMap<String, Vec<String>> = HashMap::new();
+    for variants in groups.into_values() {
+        // Keep the spelling used by the most tracks, preferring mixed case
+        // over an all-caps folder name on a tie.
+        let (name, _) = variants
+            .iter()
+            .max_by_key(|(name, files)| {
+                let mixed = name.chars().any(|c| c.is_lowercase()) as u8;
+                (files.len(), mixed)
+            })
+            .cloned()
+            .unwrap_or_else(|| (String::new(), Vec::new()));
+        if name.is_empty() {
+            continue;
+        }
+        let mut paths: Vec<String> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        for (_, files) in variants {
+            for p in files {
+                if seen.insert(p.clone()) {
+                    paths.push(p);
+                }
+            }
+        }
+        out.insert(name, paths);
+    }
+    out
 }
 
 pub fn folder_artist_album(path: &str) -> Option<(String, String)> {
@@ -292,7 +482,7 @@ pub fn folder_artist_album(path: &str) -> Option<(String, String)> {
     Some((name, String::new()))
 }
 
-fn is_disc_dir(name: &str) -> bool {
+pub(crate) fn is_disc_dir(name: &str) -> bool {
     let n = name.trim().to_ascii_lowercase();
     let rest = n
         .strip_prefix("cd")
@@ -562,5 +752,90 @@ mod art_cache_tests {
             .write_to(&mut out, image::ImageFormat::Jpeg)
             .unwrap();
         assert!(!write_art_cache(&song, &out.into_inner()));
+    }
+}
+
+#[cfg(test)]
+mod band_tests {
+    use super::*;
+
+    fn meta_entry(artist: &str) -> MetaCacheEntry {
+        MetaCacheEntry {
+            artist: artist.to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn album_folder_names_are_reduced_to_the_artist() {
+        assert_eq!(band_from_folder_name("Metallica - 72 Seasons"), "Metallica");
+        assert_eq!(
+            band_from_folder_name("Violent Femmes iTunes"),
+            "Violent Femmes"
+        );
+        assert_eq!(band_from_folder_name("TOOL"), "TOOL");
+    }
+
+    #[test]
+    fn year_in_parentheses_does_not_become_the_band() {
+        let path = std::path::PathBuf::from("Music")
+            .join("The Smashing Pumpkins - Aghori Mhori Mei (2024)")
+            .join("01 Edin.flac")
+            .to_string_lossy()
+            .to_string();
+        assert_eq!(band_of(&path), "The Smashing Pumpkins");
+    }
+
+    #[test]
+    fn loose_album_folders_join_the_existing_band() {
+        let mut meta = HashMap::new();
+        meta.insert("d/01.mp3".to_string(), meta_entry("Disturbed"));
+        meta.insert("div/01.mp3".to_string(), meta_entry("Disturbed"));
+        meta.insert("e/01.flac".to_string(), meta_entry("Eminem"));
+        meta.insert("mm/01.flac".to_string(), meta_entry("Eminem"));
+
+        let mut bands = HashMap::new();
+        bands.insert("Disturbed".to_string(), vec!["d/01.mp3".to_string()]);
+        bands.insert(
+            "Disturbed - Divisive".to_string(),
+            vec!["div/01.mp3".to_string()],
+        );
+        bands.insert("Eminem".to_string(), vec!["e/01.flac".to_string()]);
+        bands.insert(
+            "Eminem The Marshall Mathers LP".to_string(),
+            vec!["mm/01.flac".to_string()],
+        );
+
+        let out = canonicalize_bands(bands, &meta);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out.get("Disturbed").map(|v| v.len()), Some(2));
+        assert_eq!(out.get("Eminem").map(|v| v.len()), Some(2));
+    }
+
+    #[test]
+    fn case_and_punctuation_variants_merge_once() {
+        let mut meta = HashMap::new();
+        meta.insert("a/01.mp3".to_string(), meta_entry("Korn"));
+        meta.insert("b/01.mp3".to_string(), meta_entry("Korn"));
+        let mut bands = HashMap::new();
+        bands.insert("KORN".to_string(), vec!["a/01.mp3".to_string()]);
+        bands.insert("Korn".to_string(), vec!["b/01.mp3".to_string()]);
+        let out = canonicalize_bands(bands, &meta);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out.values().next().map(|v| v.len()), Some(2));
+    }
+
+    #[test]
+    fn compilation_artist_rotation_keeps_the_folder_name() {
+        let mut meta = HashMap::new();
+        meta.insert("c/01.mp3".to_string(), meta_entry("Artist One"));
+        meta.insert("c/02.mp3".to_string(), meta_entry("Artist Two"));
+        let mut bands = HashMap::new();
+        bands.insert(
+            "Chef Aid The South Park Album".to_string(),
+            vec!["c/01.mp3".to_string(), "c/02.mp3".to_string()],
+        );
+        let out = canonicalize_bands(bands, &meta);
+        assert!(out.contains_key("Chef Aid The South Park Album"));
     }
 }

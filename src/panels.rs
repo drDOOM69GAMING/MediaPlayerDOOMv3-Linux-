@@ -14,7 +14,7 @@ use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use rand::Rng;
 use rodio::{Decoder, OutputStreamHandle, Sink, Source};
-use crate::app::{PlayerApp, PlayerState};
+use crate::app::{ConvertPick, PlayerApp, PlayerState};
 use crate::{
     consts::*, deck_widgets::*, eq::*, ffmpeg::*, files::*, library::*,
     lib_thread::*, log::*, network::*, pipe::*, settings::*, theme::*,
@@ -173,6 +173,27 @@ impl PlayerApp {
                     );
                 }
             });
+            if !self.update_version.is_empty() {
+                let label = format!(
+                    "UPDATE {} AVAILABLE  -  CLICK TO OPEN THE RELEASE",
+                    self.update_version
+                );
+                let resp = ui.add(
+                    egui::Button::new(
+                        RichText::new(label)
+                            .color(Color32::BLACK)
+                            .monospace()
+                            .strong()
+                            .size(11.0),
+                    )
+                    .fill(Color32::from_rgb(255, 210, 70))
+                    .min_size(egui::vec2(ui.available_width(), 20.0)),
+                );
+                if resp.clicked() {
+                    crate::windows::open_url(&self.update_url);
+                }
+                resp.on_hover_text("Open the latest release on GitHub");
+            }
             ui.horizontal(|ui| {
                 ui.add_space(6.0);
                 ui.label(RichText::new(&self.running).color(th.fg).monospace());
@@ -443,6 +464,9 @@ impl PlayerApp {
                 bands.sort_by_key(|b| b.to_lowercase());
                 let mut sel = self.band_sel.clone();
                 let mut all_clicked = false;
+                let mut pick_band: Option<String> = None;
+                let mut pick_album: Option<(String, String)> = None;
+                let mut pick_context: Option<ConvertPick> = None;
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("BANDS (A-Z)").color(darken(th.accent, 0.35)).monospace().size(8.0));
                     if retro_btn(ui, "All", if sel.is_empty() { th.playing_fg } else { th.btn_fg }, th.btn_bg).clicked() { sel = String::new(); all_clicked = true; }
@@ -466,13 +490,89 @@ impl PlayerApp {
                                     ui.separator();
                                 }
                                 let n = self.band_map.get(b).map(|v| v.len()).unwrap_or(0);
-                                let hit = sel == *b;
-                                let text = format!("{}  ({})", b, n);
-                                if ui.selectable_label(hit, RichText::new(text).color(if hit { th.playing_fg } else { th.fg }).monospace().size(10.0)).clicked() {
-                                    sel = b.clone();
+                                let open = self.expanded_bands.contains(b.as_str());
+                                ui.horizontal(|ui| {
+                                    if ui.small_button(if open { "-" } else { "+" }).clicked() {
+                                        if open {
+                                            self.expanded_bands.remove(b.as_str());
+                                        } else {
+                                            self.expanded_bands.insert(b.to_string());
+                                        }
+                                    }
+                                    let hit = sel == *b && self.album_sel.is_none();
+                                    let text = format!("{}  ({})", truncate_mid(b, 22), n);
+                                    let bresp = ui
+                                        .selectable_label(
+                                            hit,
+                                            RichText::new(text)
+                                                .color(if hit { th.playing_fg } else { th.fg })
+                                                .monospace()
+                                                .size(10.0),
+                                        )
+                                        .on_hover_text(format!("{}\nRight-click to convert", b));
+                                    if bresp.secondary_clicked() {
+                                        let files =
+                                            self.band_map.get(b).cloned().unwrap_or_default();
+                                        pick_context = Some(ConvertPick {
+                                            kind: "BAND",
+                                            title: b.clone(),
+                                            count: files.len(),
+                                            files,
+                                        });
+                                    }
+                                    if bresp.clicked() {
+                                        sel = b.clone();
+                                        pick_band = Some(b.clone());
+                                    }
+                                });
+                                if open {
+                                    for (album, count) in self.band_albums(b) {
+                                        let ahit = self
+                                            .album_sel
+                                            .as_ref()
+                                            .map(|(ab, al)| ab == b && al == &album)
+                                            .unwrap_or(false);
+                                        let text = format!("      {}  ({})", truncate_mid(&album, 22), count);
+                                        let aresp = ui
+                                            .selectable_label(
+                                                ahit,
+                                                RichText::new(text)
+                                                    .color(if ahit {
+                                                        th.playing_fg
+                                                    } else {
+                                                        Color32::from_gray(165)
+                                                    })
+                                                    .monospace()
+                                                    .size(10.0),
+                                            )
+                                            .on_hover_text(format!(
+                                                "{}\nRight-click to convert",
+                                                album
+                                            ));
+                                        if aresp.secondary_clicked() {
+                                            let files = self.album_tracks(b, &album);
+                                            pick_context = Some(ConvertPick {
+                                                kind: "ALBUM",
+                                                title: format!("{} - {}", b, album),
+                                                count: files.len(),
+                                                files,
+                                            });
+                                        }
+                                        if aresp.clicked() {
+                                            pick_album = Some((b.clone(), album.clone()));
+                                        }
+                                    }
                                 }
                             }
-                    if all_clicked || self.band_sel != sel {
+                    if let Some(pick) = pick_context {
+                        self.convert_pick = Some(pick);
+                        self.convert_pick_done = false;
+                    }
+                    if let Some((band, album)) = pick_album {
+                        self.choose_album(band, album);
+                    } else if let Some(band) = pick_band {
+                        self.choose_band(band);
+                    } else if all_clicked || self.band_sel != sel {
                         self.choose_band(if all_clicked { String::new() } else { sel });
                     }
                 }
@@ -1274,9 +1374,6 @@ impl PlayerApp {
             ui.horizontal(|ui| {
                 let accent = |on: bool| if on { th.playing_fg } else { th.btn_fg };
                 if retro_btn(ui, &format!("Repeat: {}", if self.state.repeat_enabled { "On" } else { "Off" }), accent(self.state.repeat_enabled), th.btn_bg).clicked() { self.toggle_repeat(); }
-                if retro_btn(ui, &format!("Playlist Only: {}", if self.state.playlist_only_mode { "On" } else { "Off" }), accent(self.state.playlist_only_mode), th.btn_bg).clicked() { self.toggle_playlist_only(); }
-                if retro_btn(ui, &format!("Sequential: {}", if self.state.playlist_only_sequential { "On" } else { "Off" }), accent(self.state.playlist_only_sequential), th.btn_bg).clicked() { self.toggle_playlist_sequential(); }
-                if retro_btn(ui, &format!("Dir Seq: {}", if self.state.dir_sequential { "On" } else { "Off" }), accent(self.state.dir_sequential), th.btn_bg).clicked() { self.toggle_dir_sequential(); }
                 let stars_lbl = if self.rating_filter == 0 { "All".to_string() } else { format!("{}★+", self.rating_filter) };
                 if retro_btn(ui, &format!("★{}", stars_lbl), accent(self.rating_filter > 0), th.btn_bg).on_hover_text("Star filter: auto-play only songs rated this many stars. Click to cycle: All -> 1+ ... -> 5+.").clicked() { self.cycle_rating_filter(); }
             });
@@ -2040,6 +2137,243 @@ impl PlayerApp {
         self.convert_open = open && !close_requested;
     }
 
+    /// Small conversion window opened by right-clicking an album or band.
+    pub(crate) fn show_convert_pick_window(&mut self, ctx: &egui::Context) {
+        if self.convert_pick.is_none() {
+            return;
+        }
+        let th = self.theme_colors();
+        let mut pick = self.convert_pick.take().unwrap();
+        let mut close = false;
+        let mut chosen: Option<crate::convert::ConvertFormat> = None;
+        egui::Window::new(format!("CONVERT {}", pick.kind))
+            .resizable(false)
+            .collapsible(false)
+            .default_width(340.0)
+            .default_pos(ctx.content_rect().center() - egui::vec2(170.0, 130.0))
+            .show(ctx, |ui| {
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(&pick.title)
+                            .color(th.fg)
+                            .monospace()
+                            .strong()
+                            .size(11.0),
+                    )
+                    .wrap(),
+                );
+                ui.label(
+                    RichText::new(format!(
+                        "{} track(s) to the OS music folder",
+                        pick.count
+                    ))
+                    .color(Color32::from_gray(150))
+                    .monospace()
+                    .size(9.0),
+                );
+                ui.add_space(4.0);
+                if self.convert_active {
+                    let frac = if self.convert_total > 0 {
+                        self.convert_done as f32 / self.convert_total as f32
+                    } else {
+                        0.0
+                    };
+                    ui.add(
+                        egui::ProgressBar::new(frac.clamp(0.0, 1.0))
+                            .desired_width(300.0)
+                            .text(format!("{}/{}", self.convert_done, self.convert_total)),
+                    );
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(&self.convert_text)
+                                .color(th.fg)
+                                .monospace()
+                                .size(9.0),
+                        )
+                        .wrap(),
+                    );
+                    ui.add_space(4.0);
+                    if retro_btn(
+                        ui,
+                        "CANCEL",
+                        Color32::from_rgb(255, 120, 120),
+                        th.btn_bg,
+                    )
+                    .clicked()
+                    {
+                        self.cancel_convert();
+                    }
+                } else if self.convert_pick_done {
+                    ui.label(
+                        RichText::new("DONE")
+                            .color(th.playing_fg)
+                            .monospace()
+                            .strong()
+                            .size(12.0),
+                    );
+                    if let Some(d) = self.convert_dest.clone() {
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(&d)
+                                    .color(Color32::from_gray(150))
+                                    .monospace()
+                                    .size(9.0),
+                            )
+                            .wrap(),
+                        );
+                        if retro_btn(ui, "OPEN FOLDER", th.btn_fg, th.btn_bg).clicked() {
+                            open_in_explorer(&d);
+                        }
+                    }
+                    if retro_btn(ui, "CLOSE", th.btn_fg, th.btn_bg).clicked() {
+                        close = true;
+                    }
+                } else if pick.files.is_empty() {
+                    ui.label(
+                        RichText::new("No tracks selected")
+                            .color(Color32::from_gray(150))
+                            .monospace()
+                            .size(10.0),
+                    );
+                    if retro_btn(ui, "CLOSE", th.btn_fg, th.btn_bg).clicked() {
+                        close = true;
+                    }
+                } else {
+                    ui.label(
+                        RichText::new("COMPRESSION 1-10")
+                            .color(th.accent)
+                            .monospace()
+                            .size(10.0),
+                    );
+                    let qlabel = format!("{} / 10", self.convert_quality);
+                    ui.add(
+                        egui::Slider::new(&mut self.convert_quality, 1..=10)
+                            .text(qlabel)
+                            .clamping(egui::SliderClamping::Always),
+                    );
+                    ui.label(
+                        RichText::new("1 = smallest/fastest, 10 = best quality")
+                            .color(Color32::from_gray(120))
+                            .monospace()
+                            .size(9.0),
+                    );
+                    ui.add_space(6.0);
+                    ui.label(
+                        RichText::new("FORMAT")
+                            .color(th.accent)
+                            .monospace()
+                            .size(10.0),
+                    );
+                    egui::Grid::new("convert_pick_formats")
+                        .num_columns(3)
+                        .spacing([4.0, 4.0])
+                        .show(ui, |ui| {
+                            let mut n = 0usize;
+                            for f in crate::convert::ConvertFormat::ALL
+                                .iter()
+                                .copied()
+                                .filter(|f| *f != crate::convert::ConvertFormat::Same)
+                            {
+                                let dest =
+                                    crate::convert::destination_for_label(&pick.title, f);
+                                if retro_btn(ui, f.label(), th.btn_fg, th.btn_bg)
+                                    .on_hover_text(format!("Save to {}", dest.display()))
+                                    .clicked()
+                                {
+                                    chosen = Some(f);
+                                }
+                                n += 1;
+                                if n % 3 == 0 {
+                                    ui.end_row();
+                                }
+                            }
+                        });
+                    ui.add_space(4.0);
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(format!(
+                                "SAVE TO  {}",
+                                crate::convert::music_dir().display()
+                            ))
+                            .color(Color32::from_gray(125))
+                            .monospace()
+                            .size(9.0),
+                        )
+                        .wrap(),
+                    );
+                    if retro_btn(ui, "CLOSE", th.btn_fg, th.btn_bg).clicked() {
+                        close = true;
+                    }
+                }
+            });
+        if let Some(f) = chosen {
+            if !self.convert_active {
+                self.convert_format = f;
+                let files = std::mem::take(&mut pick.files);
+                self.start_convert_selection(pick.title.clone(), files, f);
+            }
+        }
+        if close {
+            self.convert_pick_done = false;
+        } else {
+            self.convert_pick = Some(pick);
+        }
+    }
+
+    /// Confirmation before every star rating is removed.
+    pub(crate) fn show_clear_ratings_window(&mut self, ctx: &egui::Context) {
+        if !self.clear_ratings_confirm {
+            return;
+        }
+        let th = self.theme_colors();
+        let mut close = false;
+        egui::Window::new("CLEAR STAR RATINGS")
+            .resizable(false)
+            .collapsible(false)
+            .default_width(370.0)
+            .default_pos(ctx.content_rect().center() - egui::vec2(185.0, 80.0))
+            .show(ctx, |ui| {
+                ui.label(
+                    RichText::new(format!("Clear all {} star ratings?", self.ratings.len()))
+                        .color(th.fg)
+                        .monospace()
+                        .strong()
+                        .size(11.0),
+                );
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(
+                            "Manual and automatic ratings are removed. This cannot be undone.",
+                        )
+                        .color(Color32::from_gray(150))
+                        .monospace()
+                        .size(9.0),
+                    )
+                    .wrap(),
+                );
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if retro_btn(
+                        ui,
+                        "CLEAR ALL",
+                        Color32::from_rgb(255, 120, 120),
+                        th.btn_bg,
+                    )
+                    .clicked()
+                    {
+                        self.clear_all_ratings();
+                        close = true;
+                    }
+                    if retro_btn(ui, "CANCEL", th.btn_fg, th.btn_bg).clicked() {
+                        close = true;
+                    }
+                });
+            });
+        if close {
+            self.clear_ratings_confirm = false;
+        }
+    }
+
     pub(crate) fn show_help_window(&mut self, ctx: &egui::Context) {
         egui::Window::new("SYSTEM MANUAL")
             .resizable(true)
@@ -2069,6 +2403,16 @@ impl PlayerApp {
                 ui.label(RichText::new("CUE sheets .......... Single-file .ape/.flac images with a .cue are expanded into individual tracks (tags, art, seeking and conversion)").color(dim).monospace());
                 ui.add_space(6.0);
 
+                ui.label(RichText::new("PLAYBACK ORDER").color(acc).monospace().strong());
+                ui.label(RichText::new("Switch .............. Red = random shuffle; green = in order").color(dim).monospace());
+                ui.label(RichText::new("Scope ............... The loaded list: All songs, one band, or one album").color(dim).monospace());
+                ui.label(RichText::new("Band / album ........ + expands a band; click an album to load and play it").color(dim).monospace());
+                ui.label(RichText::new("Smart ............... Weighted shuffle that favors songs you play more").color(dim).monospace());
+                ui.label(RichText::new("Repeat .............. Repeat the loaded list").color(dim).monospace());
+                ui.label(RichText::new("Star filter ......... Limit playback to songs rated this many stars or more").color(dim).monospace());
+                ui.label(RichText::new("Old toggles ......... Playlist Only, Sequential and Dir Seq were removed; the switch and the album browser replace them").color(dim).monospace());
+                ui.add_space(6.0);
+
                 ui.label(RichText::new("CONVERT MUSIC").color(acc).monospace().strong());
                 ui.label(RichText::new("Convert button ...... Convert a folder recursively (MP3, AAC, FLAC, OGG, Opus, WAV, AIFF, ALAC, WMA, or same as source)").color(dim).monospace());
                 ui.label(RichText::new("Quality 1-10 ........ Lossy: bitrate; FLAC: compression level; WAV/AIFF/ALAC: bit depth").color(dim).monospace());
@@ -2082,6 +2426,13 @@ impl PlayerApp {
                 ui.label(RichText::new("Song fallback ....... If the album is unknown, search by artist + song title (iTunes/Deezer)").color(dim).monospace());
                 ui.label(RichText::new("Ratings ............. MusicBrainz community 1-5 stars; current album auto-fetched; album fallback").color(dim).monospace());
                 ui.label(RichText::new("Your stars .......... Clicking stars sets a manual rating that Meta All never overwrites").color(dim).monospace());
+                ui.label(RichText::new("Clear stars ......... Removes every manual and automatic rating after a confirmation").color(dim).monospace());
+                if retro_btn(ui, "CLEAR ALL STAR RATINGS", Color32::from_rgb(255, 120, 120), th.btn_bg)
+                    .on_hover_text("Opens a confirmation before any rating is removed")
+                    .clicked()
+                {
+                    self.clear_ratings_confirm = true;
+                }
                 ui.label(RichText::new("Metadata repair ..... Missing title/artist/album and track-number-only tags are filled from the filename/folder").color(dim).monospace());
                 ui.label(RichText::new("Not everything ...... Songs with no MusicBrainz rating or no available art stay unrated/art-less; final status reports counts").color(dim).monospace());
                 ui.add_space(6.0);

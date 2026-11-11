@@ -575,19 +575,7 @@ impl PlayerApp {
         // A loaded disc always plays in track order: no shuffle, no folder
         // filter and no star filter. This is the whole point of the CD deck.
         let disc_order = self.disc_in && self.deck_mode == DeckMode::Disc;
-        let mut pl = self.state.playlist.clone();
-        if !disc_order && self.state.dir_sequential {
-            if let Some(dir) = &self.state.current_dir {
-                let filtered: Vec<String> = pl
-                    .iter()
-                    .filter(|p| Path::new(p).parent() == Some(Path::new(dir)))
-                    .cloned()
-                    .collect();
-                if !filtered.is_empty() {
-                    pl = filtered;
-                }
-            }
-        }
+        let pl = self.state.playlist.clone();
         if pl.is_empty() {
             return;
         }
@@ -908,6 +896,21 @@ impl PlayerApp {
         self.save_settings();
     }
 
+    /// Remove every star rating, including manual ones, and turn the star
+    /// filter off so the playlist is not left filtered to nothing.
+    pub(crate) fn clear_all_ratings(&mut self) {
+        let n = self.ratings.len();
+        self.ratings.clear();
+        self.manual_ratings.clear();
+        self.rating_filter = 0;
+        self.save_settings();
+        self.set_status(format!(
+            "Cleared {} star rating{}",
+            n,
+            if n == 1 { "" } else { "s" }
+        ));
+    }
+
     /// Cycle the star filter: All -> 1+ -> 2+ -> ... -> 5+ -> All.
     pub(crate) fn cycle_rating_filter(&mut self) {
         self.rating_filter = (self.rating_filter + 1) % 6;
@@ -972,35 +975,10 @@ impl PlayerApp {
             let i = self.state.current_song.as_deref().map(cur_pos).unwrap_or(0);
             let ni = (i + 1) % slots.len();
             (slots[ni].1.clone(), Some(slots[ni].0))
-        } else if self.state.playlist_only_mode && self.state.playlist_only_sequential {
-            let ni = self.state.song_count as usize % slots.len();
-            (slots[ni].1.clone(), Some(slots[ni].0))
         } else if !self.random_on {
             let i = self.state.current_song.as_deref().map(cur_pos).unwrap_or(0);
             let ni = (i + 1) % slots.len();
             (slots[ni].1.clone(), Some(slots[ni].0))
-        } else if self.state.playlist_only_mode {
-            (random_next(self.state.current_song.as_deref(), &slot_paths, &weights), None)
-        } else if self.state.dir_sequential {
-            if let Some(dir) = self.state.current_dir.clone() {
-                // Use the already-loaded playlist instead of re-walking the
-            // folder on every skip (a large HDD folder made each skip slow).
-                let files: Vec<String> = pl
-                    .iter()
-                    .filter(|f| Path::new(f).parent() == Some(Path::new(&dir)))
-                    .cloned()
-                    .collect();
-                let rated: Vec<String> = files.iter().filter(|f| min == 0 || self.song_rating(f) >= min).cloned().collect();
-                if !rated.is_empty() {
-                    let picked = rated[self.state.song_count as usize % rated.len()].clone();
-                    let pi = pl.iter().position(|p| *p == picked);
-                    (picked, pi)
-                } else {
-                    (random_next(self.state.current_song.as_deref(), &slot_paths, &weights), None)
-                }
-            } else {
-                (random_next(self.state.current_song.as_deref(), &slot_paths, &weights), None)
-            }
         } else {
             (random_next(self.state.current_song.as_deref(), &slot_paths, &weights), None)
         };

@@ -40,6 +40,11 @@ pub fn net_loop(rx: Receiver<NetCmd>, tx: Sender<Msg>) {
                     let text = fetch_lyrics(&artist, &title);
                     let _ = tx.send(Msg::Lyrics { artist, title, text });
                 }
+                NetCmd::CheckUpdate { current } => {
+                    if let Some((version, url)) = check_latest_release(&current) {
+                        let _ = tx.send(Msg::UpdateAvailable { version, url });
+                    }
+                }
             }
         }));
     }
@@ -1136,6 +1141,61 @@ pub fn fetch_lyrics(artist: &str, title: &str) -> Option<String> {
     json.get("lyrics").and_then(|l| l.as_str()).map(|s| s.to_string())
 }
 
+/// Numeric parts of a version string. A leading `v` and any suffix such as
+/// `-beta` are ignored, so `v3.2.41` and `3.2.41-rc1` both read as 3.2.41.
+fn version_parts(s: &str) -> Vec<u32> {
+    s.trim()
+        .trim_start_matches('v')
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|p| !p.is_empty())
+        .map(|p| p.parse::<u32>().unwrap_or(0))
+        .collect()
+}
+
+/// True when `latest` is a later release than `current`.
+pub fn version_newer(latest: &str, current: &str) -> bool {
+    let a = version_parts(latest);
+    let b = version_parts(current);
+    for i in 0..a.len().max(b.len()) {
+        let x = a.get(i).copied().unwrap_or(0);
+        let y = b.get(i).copied().unwrap_or(0);
+        if x != y {
+            return x > y;
+        }
+    }
+    false
+}
+
+/// Ask GitHub for the latest release. Returns `(version, release page)` only
+/// when it is newer than the running build; a rate-limited or offline request
+/// simply returns `None` and the app carries on.
+pub fn check_latest_release(current: &str) -> Option<(String, String)> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .user_agent(format!("{}/{} (update check)", APP_NAME, APP_VERSION))
+        .build()
+        .ok()?;
+    let res = client
+        .get("https://api.github.com/repos/drDOOM69GAMING/MediaPlayerDOOMv3-Linux-/releases/latest")
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .ok()?;
+    if !res.status().is_success() {
+        return None;
+    }
+    let json: serde_json::Value = res.json().ok()?;
+    let tag = json.get("tag_name").and_then(|v| v.as_str())?;
+    let url = json
+        .get("html_url")
+        .and_then(|v| v.as_str())
+        .unwrap_or("https://github.com/drDOOM69GAMING/MediaPlayerDOOMv3-Linux-/releases/latest");
+    if version_newer(tag, current) {
+        Some((tag.trim_start_matches('v').to_string(), url.to_string()))
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod art_tests {
     use super::*;
@@ -1411,5 +1471,21 @@ mod art_tests {
         image::DynamicImage::ImageRgba8(img).write_to(&mut png, image::ImageFormat::Png).unwrap();
         assert!(!art_bytes_ok(&png.into_inner(), 32), "solid placeholder must be rejected");
         assert!(!art_bytes_ok(b"not an image at all", 1));
+    }
+}
+
+#[cfg(test)]
+mod update_tests {
+    use super::*;
+
+    #[test]
+    fn newer_versions_win_and_equal_versions_do_not() {
+        assert!(version_newer("v3.2.41", "3.2.40"));
+        assert!(!version_newer("v3.2.40", "3.2.40"));
+        assert!(!version_newer("3.2.39", "3.2.40"));
+        assert!(version_newer("3.10.0", "3.9.9"));
+        assert!(version_newer("3.2.41-rc1", "3.2.40"));
+        assert!(!version_newer("3.2.41", "3.2.41-rc1"));
+        assert!(!version_newer("", "3.2.41"));
     }
 }

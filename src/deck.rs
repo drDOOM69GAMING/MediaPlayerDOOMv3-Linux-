@@ -399,8 +399,34 @@ impl PlayerApp {
             }
         }
         if changed {
+            self.canonicalize_bands_now();
             self.sort_bands_library();
             self.save_bands();
+        }
+    }
+
+    /// Merge band entries that are the same artist under different names.
+    /// Keeps the current selection pointing at a band that still exists.
+    pub(crate) fn canonicalize_bands_now(&mut self) {
+        let sel = self.band_sel.clone();
+        let sel_files = self.band_map.get(&sel).cloned();
+        let map = std::mem::take(&mut self.band_map);
+        self.band_map = crate::library::canonicalize_bands(map, &self.meta_cache);
+        if !sel.is_empty() && !self.band_map.contains_key(&sel) {
+            let renamed = sel_files
+                .map(|files| crate::library::canonical_band_name(&sel, &files, &self.meta_cache))
+                .unwrap_or_default();
+            if self.band_map.contains_key(&renamed) {
+                self.band_sel = renamed;
+            } else {
+                self.band_sel.clear();
+            }
+        }
+        let album_band = self.album_sel.as_ref().map(|(b, _)| b.clone());
+        if let Some(band) = album_band {
+            if !self.band_map.contains_key(&band) {
+                self.album_sel = None;
+            }
         }
     }
 
@@ -442,14 +468,20 @@ impl PlayerApp {
                 if dp.parent() == Some(root) {
                     band_of_file(f)
                 } else {
-                    dp.strip_prefix(root)
+                    let comp = dp
+                        .strip_prefix(root)
                         .ok()
                         .and_then(|rel| rel.components().next())
                         .map(|c| c.as_os_str().to_string_lossy().to_string())
-                        .unwrap_or_else(|| root_name.clone())
+                        .unwrap_or_else(|| root_name.clone());
+                    if crate::library::is_disc_dir(&comp) {
+                        crate::library::band_from_folder_name(&root_name)
+                    } else {
+                        crate::library::band_from_folder_name(&comp)
+                    }
                 }
             } else {
-                root_name.clone()
+                crate::library::band_from_folder_name(&root_name)
             };
             if band.is_empty() { continue; }
             if lib_seen.insert(f.clone()) {
@@ -464,6 +496,7 @@ impl PlayerApp {
             }
         }
         if changed {
+            self.canonicalize_bands_now();
             self.sort_bands_library();
             self.save_bands();
         }
@@ -594,6 +627,7 @@ impl PlayerApp {
 
     pub(crate) fn choose_band(&mut self, band: String) {
         self.band_sel = band.clone();
+        self.album_sel = None;
         self.disc_in = false;
         self.state.playlist = if band.is_empty() {
             self.all_songs_ordered()
@@ -621,10 +655,91 @@ impl PlayerApp {
         }
     }
 
+    /// Album rows under one band, with track counts.
+    pub(crate) fn band_albums(&self, band: &str) -> Vec<(String, usize)> {
+        let Some(songs) = self.band_map.get(band) else {
+            return Vec::new();
+        };
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        for p in songs {
+            *counts.entry(self.album_label(p)).or_insert(0) += 1;
+        }
+        let mut out: Vec<(String, usize)> = counts.into_iter().collect();
+        out.sort_by_key(|(a, _)| a.to_lowercase());
+        out
+    }
+
+    /// Tracks of one album inside a band, used by the right-click converter.
+    pub(crate) fn album_tracks(&self, band: &str, album: &str) -> Vec<String> {
+        self.band_map
+            .get(band)
+            .map(|songs| {
+                songs
+                    .iter()
+                    .filter(|p| self.album_label(p) == album)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn album_label(&self, p: &str) -> String {
+        if let Some((_, album)) = crate::library::folder_artist_album(p) {
+            if !album.trim().is_empty() && !is_placeholder_meta(&album) {
+                return album;
+            }
+        }
+        let mut artist = self.meta_cache.get(p).map(|e| e.artist.clone()).unwrap_or_default();
+        let mut album = self.meta_cache.get(p).map(|e| e.album.clone()).unwrap_or_default();
+        merge_folder_meta(&mut artist, &mut album, p);
+        if album.trim().is_empty() || is_placeholder_meta(&album) {
+            Path::new(p)
+                .parent()
+                .and_then(|d| d.file_name())
+                .map(|f| f.to_string_lossy().to_string())
+                .unwrap_or_else(|| "Unknown Album".to_string())
+        } else {
+            album
+        }
+    }
+
+    pub(crate) fn choose_album(&mut self, band: String, album: String) {
+        self.band_sel = band.clone();
+        self.album_sel = Some((band.clone(), album.clone()));
+        self.disc_in = false;
+        let mut songs: Vec<String> = self
+            .band_map
+            .get(&band)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|p| self.album_label(p) == album)
+            .collect();
+        songs.sort_by_cached_key(|p| song_sort_key(p));
+        self.state.playlist = songs;
+        self.rebuild_display_cache();
+        self.save_settings();
+        self.set_status(format!(
+            "{} - {}: {} songs",
+            band,
+            album,
+            self.state.playlist.len()
+        ));
+        if self.radio_on {
+            self.stop_radio();
+        }
+        if !self.state.playlist.is_empty() && !self.state.is_paused {
+            let first = self.state.playlist[0].clone();
+            self.play_song(&first);
+        }
+    }
+
     pub(crate) fn clear_bands(&mut self) {
         self.band_map.clear();
         self.full_library.clear();
         self.band_sel = String::new();
+        self.expanded_bands.clear();
+        self.album_sel = None;
         self.save_bands();
         self.set_status("Band library cleared");
     }

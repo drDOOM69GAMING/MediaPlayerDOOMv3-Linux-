@@ -88,21 +88,6 @@ impl PlayerApp {
         self.set_status(format!("Repeat {}", if self.state.repeat_enabled { "On" } else { "Off" }));
     }
 
-    pub(crate) fn toggle_playlist_only(&mut self) {
-        self.state.playlist_only_mode = !self.state.playlist_only_mode;
-        self.set_status(format!("Playlist Only: {}", if self.state.playlist_only_mode { "On" } else { "Off" }));
-    }
-
-    pub(crate) fn toggle_playlist_sequential(&mut self) {
-        self.state.playlist_only_sequential = !self.state.playlist_only_sequential;
-        self.set_status(format!("Sequential: {}", if self.state.playlist_only_sequential { "On" } else { "Off" }));
-    }
-
-    pub(crate) fn toggle_dir_sequential(&mut self) {
-        self.state.dir_sequential = !self.state.dir_sequential;
-        self.set_status(format!("Dir Seq: {}", if self.state.dir_sequential { "On" } else { "Off" }));
-    }
-
     pub(crate) fn smart_shuffle(&mut self) {
         if self.state.playlist.len() < 3 {
             self.set_error("Need more songs in playlist");
@@ -336,7 +321,6 @@ impl PlayerApp {
                     'l' | 'L' => self.fetch_lyrics(),
                     't' | 'T' => self.cycle_theme(),
                     'c' | 'C' => self.stop_music(),
-                    'o' | 'O' => self.toggle_playlist_only(),
                     'b' | 'B' => self.toggle_repeat(),
                     'j' | 'J' => self.search_focus = true,
                     _ => {}

@@ -82,6 +82,8 @@ pub enum Msg {
     /// On-demand rating for the currently playing album (no Meta All run).
     CurrentRating { path: String, album_stars: u8, tracks: Vec<(String, u8)> },
     Lyrics { artist: String, title: String, text: Option<String> },
+    /// A newer GitHub release exists. `version` is the tag without the `v`.
+    UpdateAvailable { version: String, url: String },
     YtStatus(String),
     YtLog(String),
     /// Progress of the whole job: which stage is running, and a label for it.
@@ -158,6 +160,8 @@ pub enum NetCmd {
     /// Fallback for a track with no usable album: search by song title.
     WebArtSong { gen: u64, paths: Vec<String>, artist: String, title: String },
     Lyrics(String, String),
+    /// Compare the running version with the latest GitHub release.
+    CheckUpdate { current: String },
 }
 
 /// One album's worth of ratings to look up on MusicBrainz.

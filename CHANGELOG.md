@@ -1,5 +1,41 @@
 # Changelog
 
+## v3.2.41
+
+### Band browser
+
+- Each band row has a + and - expander that lists that band's albums with track counts.
+- Selecting an album loads only that album and starts its first track.
+- Band grouping now merges the same artist across folder layouts, so an existing `Disturbed` folder and a loose `Disturbed - Divisive` folder become one band with both albums.
+- Folder names ending in a year, an edition name or a store suffix no longer create separate artists.
+- Existing band libraries are repaired once on load, without losing any tracks.
+
+### Conversion
+
+- Right-click a band or an album in the browser to convert just that selection.
+- The small conversion window lists MP3, AAC, FLAC, OGG Vorbis, Opus, WAV, AIFF, ALAC and WMA with compression 1 to 10.
+- Output goes to the OS music folder as `<name> (<format>)`, keeping one subfolder per album when a whole band is converted.
+
+### Ratings
+
+- Help > System Manual now has a Clear All Star Ratings action.
+- It asks for confirmation, removes manual and automatic ratings, and turns the star filter off.
+
+### Playback
+
+- Removed the redundant Playlist Only, Sequential and Dir Seq toggles.
+- The red random / green in-order switch is now the single play-order control.
+- Playback order applies to the loaded list: All songs, one band, or one album.
+- Smart shuffle still weights the random order toward songs you play more.
+- The O shortcut was removed.
+
+### Updates
+
+- The app checks the latest GitHub release shortly after launch and every six hours.
+- When a newer release exists, a yellow banner appears at the top of the window.
+- Clicking the banner opens the release page in the default browser.
+- No update is downloaded or installed automatically.
+
 ## v3.2.40
 
 - Blu-ray DUMP TO ISO now writes a genuine UDF 2.50 image natively, inside the app.

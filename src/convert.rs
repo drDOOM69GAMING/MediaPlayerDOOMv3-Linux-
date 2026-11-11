@@ -3,6 +3,7 @@
 // level; finished files go to the OS music folder.
 #![allow(dead_code)]
 
+use std::collections::HashSet;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -287,6 +288,20 @@ pub fn destination_for(src: &str, format: ConvertFormat) -> PathBuf {
     base.join(format!("{} ({})", picked, format.folder_label()))
 }
 
+/// Destination named after an album or band, e.g. `~/Music/Disturbed (MP3)`.
+pub fn destination_for_label(label: &str, format: ConvertFormat) -> PathBuf {
+    if let Ok(d) = std::env::var("MPDOOM_CONVERT_DEST") {
+        return PathBuf::from(d);
+    }
+    let picked = crate::util::sanitize_win(label);
+    let picked = if picked.trim().is_empty() {
+        "Converted".to_string()
+    } else {
+        picked
+    };
+    music_dir().join(format!("{} ({})", picked, format.folder_label()))
+}
+
 #[derive(Clone)]
 pub struct ConvertResult {
     pub folder: PathBuf,
@@ -316,10 +331,77 @@ pub fn convert_folder_to(
     if !Path::new(src).is_dir() {
         return Err(format!("{} is not a folder", src));
     }
-    let files_all = collect_audio_cancellable(src, cancel);
+    let files = collect_audio_cancellable(src, cancel);
     if cancel.load(Ordering::Relaxed) {
         return Err("cancelled".into());
     }
+    convert_list(files, Path::new(src), format, quality, dest_root, tx, cancel)
+}
+
+/// Convert selected tracks (one album or one band) instead of a whole folder.
+pub fn convert_files(
+    files: &[String],
+    label: &str,
+    format: ConvertFormat,
+    quality: u8,
+    tx: &Sender<Msg>,
+    cancel: &AtomicBool,
+) -> Result<ConvertResult, String> {
+    let dest = destination_for_label(label, format);
+    convert_files_to(files, format, quality, &dest, tx, cancel)
+}
+
+pub fn convert_files_to(
+    files: &[String],
+    format: ConvertFormat,
+    quality: u8,
+    dest_root: &Path,
+    tx: &Sender<Msg>,
+    cancel: &AtomicBool,
+) -> Result<ConvertResult, String> {
+    let mut seen: HashSet<String> = HashSet::new();
+    let files: Vec<String> = files
+        .iter()
+        .filter(|p| seen.insert((*p).clone()))
+        .cloned()
+        .collect();
+    if files.is_empty() {
+        return Err("No supported audio files selected".into());
+    }
+    // Keep each album folder relative to the deepest folder every selected
+    // track shares. An album selection therefore lands flat in its output
+    // folder, while a band with several albums keeps one subfolder per album.
+    let rel_base = common_parent(&files).unwrap_or_else(|| PathBuf::from("."));
+    convert_list(files, &rel_base, format, quality, dest_root, tx, cancel)
+}
+
+fn common_parent(files: &[String]) -> Option<PathBuf> {
+    let mut iter = files.iter().map(|p| {
+        Path::new(&crate::cue::disk_path(p))
+            .parent()
+            .unwrap_or_else(|| Path::new("/"))
+            .to_path_buf()
+    });
+    let mut common = iter.next()?;
+    for parent in iter {
+        while !parent.starts_with(&common) {
+            if !common.pop() {
+                break;
+            }
+        }
+    }
+    Some(common)
+}
+
+fn convert_list(
+    files_all: Vec<String>,
+    rel_base: &Path,
+    format: ConvertFormat,
+    quality: u8,
+    dest_root: &Path,
+    tx: &Sender<Msg>,
+    cancel: &AtomicBool,
+) -> Result<ConvertResult, String> {
     // If the user picked a folder that contains the destination (e.g. their
     // whole Music folder), don't re-convert previous output.
     let dest_canon = dest_root
@@ -362,7 +444,7 @@ pub fn convert_folder_to(
             // Keep the album folder, but name each output after its CUE track.
             let base = Path::new(&source_disk);
             let parent_rel = base
-                .strip_prefix(Path::new(src))
+                .strip_prefix(rel_base)
                 .ok()
                 .and_then(|p| p.parent())
                 .map(|p| p.to_path_buf())
@@ -374,7 +456,7 @@ pub fn convert_folder_to(
             ))
         } else {
             Path::new(file)
-                .strip_prefix(Path::new(src))
+                .strip_prefix(rel_base)
                 .ok()
                 .filter(|p| !p.as_os_str().is_empty())
                 .map(|p| p.to_path_buf())
@@ -811,6 +893,41 @@ mod tests {
                 out_file.display()
             );
         }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn selected_tracks_keep_their_album_folders() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("mpdoom-convert-selection-{}", stamp));
+        let album_a = root.join("src").join("Album A");
+        let album_b = root.join("src").join("Album B");
+        std::fs::create_dir_all(&album_a).unwrap();
+        std::fs::create_dir_all(&album_b).unwrap();
+        let mut files = Vec::new();
+        for (dir, freq) in [(&album_a, 440), (&album_b, 660)] {
+            let wav = dir.join("tone.wav");
+            let st = Command::new(ffmpeg_path())
+                .args(["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i"])
+                .arg(format!("sine=frequency={}:duration=0.3", freq))
+                .args(["-c:a", "pcm_s16le"])
+                .arg(&wav)
+                .status()
+                .expect("generate wav");
+            assert!(st.success());
+            files.push(wav.to_string_lossy().to_string());
+        }
+        let out = root.join("out");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let cancel = AtomicBool::new(false);
+        let r = convert_files_to(&files, ConvertFormat::Mp3, 8, &out, &tx, &cancel)
+            .expect("convert selected files");
+        assert_eq!(r.converted, 2);
+        assert!(out.join("Album A").join("tone.mp3").is_file());
+        assert!(out.join("Album B").join("tone.mp3").is_file());
         let _ = std::fs::remove_dir_all(&root);
     }
 }
