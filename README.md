@@ -1,6 +1,6 @@
 # MediaPlayerDOOM v3 for Linux
 
-![Version](https://img.shields.io/badge/version-3.2.46-blue)
+![Version](https://img.shields.io/badge/version-3.2.48-blue)
 ![Platform](https://img.shields.io/badge/platform-Linux%20x86__64-informational)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -15,7 +15,7 @@ This repository is the Linux port. It is tested on CachyOS and Arch with KDE Pla
 - MP3, FLAC, M4A and AAC, ALAC, APE, WAV, AIFF, OGG, Opus, WMA, WavPack, Musepack and WebM audio
 - Automatic ffmpeg fallback for formats the built-in decoder cannot open, including M4A and APE
 - CUE sheet support that expands single-file APE and FLAC albums into individual tracks
-- Artist and album browser with A to Z bands, expandable album lists and a full library view
+- Artist and album browser with A to Z bands, a live band filter, expandable album lists and a full library view
 - Band names are merged across folder layouts, so loose "Artist - Album" folders join the same artist
 - Weighted smart shuffle or plain shuffle, with one red random / green in-order play-order switch for the loaded list
 - M3U and JSON playlist support
@@ -24,6 +24,7 @@ This repository is the Linux port. It is tested on CachyOS and Arch with KDE Pla
 - Recording of the current track or radio stream
 - Uninterrupted auto-advance that keeps playing while the window is minimized or hidden
 - Fast startup from the cached library, with the background scan deferred and low-priority
+- Incremental library scans reuse unchanged directory listings, so rescans do not re-read the whole drive
 
 ### Metadata, art and ratings
 

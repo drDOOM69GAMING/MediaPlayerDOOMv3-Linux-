@@ -493,7 +493,13 @@ impl PlayerApp {
             // A loaded disc is its own list. Hide the library band browser so
             // the CD deck shows only the disc, not the whole music folder.
             if !(self.deck_mode == DeckMode::Disc && self.disc_in) {
-                let mut bands: Vec<String> = self.band_map.keys().cloned().collect();
+                let q = self.band_query.trim().to_lowercase();
+                let mut bands: Vec<String> = self
+                    .band_map
+                    .keys()
+                    .cloned()
+                    .filter(|b| q.is_empty() || b.to_lowercase().contains(&q))
+                    .collect();
                 bands.sort_by_key(|b| b.to_lowercase());
                 let mut sel = self.band_sel.clone();
                 let mut all_clicked = false;
@@ -508,8 +514,30 @@ impl PlayerApp {
                         sel = String::new();
                     }
                 });
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.band_query)
+                            .hint_text("filter bands")
+                            .desired_width(188.0)
+                            .font(egui::TextStyle::Monospace),
+                    );
+                    if !self.band_query.is_empty()
+                        && ui.small_button("X").on_hover_text("Clear band filter").clicked()
+                    {
+                        self.band_query.clear();
+                    }
+                });
                 if bands.is_empty() {
-                    ui.label(RichText::new("Add music to build the band list").color(Color32::from_gray(90)).monospace().size(9.0));
+                    ui.label(
+                        RichText::new(if q.is_empty() {
+                            "Add music to build the band list"
+                        } else {
+                            "No bands match that filter"
+                        })
+                        .color(Color32::from_gray(90))
+                        .monospace()
+                        .size(9.0),
+                    );
                 } else {
                             let mut last_key = String::new();
                             for b in bands.iter() {
@@ -2496,6 +2524,7 @@ impl PlayerApp {
                 ui.label(RichText::new("Switch .............. Red = random shuffle; green = in order").color(dim).monospace());
                 ui.label(RichText::new("Scope ............... The loaded list: All songs, one band, or one album").color(dim).monospace());
                 ui.label(RichText::new("Band / album ........ + expands a band; click an album to load and play it").color(dim).monospace());
+                ui.label(RichText::new("Band filter ......... Type above the band list to filter A-Z names; X clears it").color(dim).monospace());
                 ui.label(RichText::new("Smart ............... Weighted shuffle that favors songs you play more").color(dim).monospace());
                 ui.label(RichText::new("Repeat .............. Repeat the loaded list").color(dim).monospace());
                 ui.label(RichText::new("Star filter ......... Limit playback to songs rated this many stars or more").color(dim).monospace());
@@ -2578,6 +2607,7 @@ impl PlayerApp {
                 ui.label(RichText::new("Ratings missing ..... MusicBrainz, Discogs and TheAudioDB have no rating for that track/album; no public star feed covers everything").color(dim).monospace());
                 ui.label(RichText::new("Covers missing ...... No local/web match; Meta All retries every run and reports the count without art").color(dim).monospace());
                 ui.label(RichText::new("Dump slow ........... Optical CAV/riplock; check the live MB/s and ETA; dirty discs are slower").color(dim).monospace());
+                ui.label(RichText::new("Library scan ........ Unchanged folders are cached by mtime; delete scan_cache.json in the app data folder to force a full walk").color(dim).monospace());
                 ui.add_space(8.0);
 
                 ui.label(RichText::new("KEYBOARD SHORTCUTS").color(acc).monospace().strong());

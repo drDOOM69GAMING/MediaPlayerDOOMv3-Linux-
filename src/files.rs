@@ -1,12 +1,13 @@
 ﻿#![allow(unused_imports)]
 #![allow(dead_code)]
 // Audio file collection, tagging, transcoding, recording, art discovery.
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::Sender;
+use std::sync::Mutex;
 use lofty::prelude::*;
 use crate::consts::NO_WINDOW;
 use crate::tools::*;
@@ -148,7 +149,123 @@ fn walk_audio_cancellable(
     }
 }
 
-pub fn collect_audio_report(dir: &str, tx: &Sender<Msg>) -> Vec<String> {
+/// One directory remembered by an incremental scan. `mtime` changes when
+/// entries are added, removed or renamed, which is exactly when the listing
+/// must be re-read.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Default)]
+struct ScanDirEntry {
+    mtime: u64,
+    /// Audio and CUE files directly in this directory.
+    files: Vec<String>,
+    dirs: Vec<String>,
+}
+
+static SCAN_CACHE_LOCK: Mutex<()> = Mutex::new(());
+
+fn scan_cache_path() -> PathBuf {
+    crate::util::data_dir().join("scan_cache.json")
+}
+
+fn load_scan_cache(path: &Path) -> HashMap<String, ScanDirEntry> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return HashMap::new();
+    };
+    serde_json::from_str(&text).unwrap_or_default()
+}
+
+fn save_scan_cache(path: &Path, cache: &HashMap<String, ScanDirEntry>) {
+    if let Ok(text) = serde_json::to_string(cache) {
+        let _ = std::fs::write(path, text);
+    }
+}
+
+fn dir_mtime(dir: &Path) -> u64 {
+    std::fs::metadata(dir)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0)
+}
+
+fn walk_audio_cached<F: FnMut(usize)>(
+    dir: &Path,
+    out: &mut Vec<String>,
+    cues: &mut Vec<String>,
+    progress: &mut F,
+    visited: &mut HashSet<PathBuf>,
+    cache: &HashMap<String, ScanDirEntry>,
+    new_cache: &mut HashMap<String, ScanDirEntry>,
+) {
+    let canon = dir.canonicalize().ok();
+    if let Some(c) = &canon {
+        if !visited.insert(c.clone()) {
+            return;
+        }
+    }
+    let key = dir.to_string_lossy().to_string();
+    let mtime = dir_mtime(dir);
+
+    if mtime != 0 {
+        if let Some(entry) = cache.get(&key) {
+            if entry.mtime == mtime {
+                for f in &entry.files {
+                    if is_audio(f) {
+                        out.push(f.clone());
+                        progress(out.len() + cues.len());
+                    } else if crate::cue::is_cue_file(f) {
+                        cues.push(f.clone());
+                    }
+                }
+                for d in &entry.dirs {
+                    walk_audio_cached(Path::new(d), out, cues, progress, visited, cache, new_cache);
+                }
+                new_cache.insert(key, entry.clone());
+                return;
+            }
+        }
+    }
+
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let mut files: Vec<String> = Vec::new();
+    let mut dirs: Vec<String> = Vec::new();
+    for e in rd.flatten() {
+        let Ok(ft) = e.file_type() else { continue };
+        let p = e.path();
+        let name = p.file_name().map(|n| n.to_string_lossy().to_string());
+        if ft.is_dir() || (ft.is_symlink() && p.is_dir()) {
+            if let Some(n) = &name {
+                if skip_scan_dir(n) {
+                    continue;
+                }
+            }
+            dirs.push(p.to_string_lossy().to_string());
+        } else if ft.is_file() || (ft.is_symlink() && p.is_file()) {
+            let s = p.to_string_lossy().to_string();
+            if is_audio(&s) {
+                out.push(s.clone());
+                files.push(s);
+                progress(out.len() + cues.len());
+            } else if crate::cue::is_cue_file(&s) {
+                cues.push(s.clone());
+                files.push(s);
+            }
+        }
+    }
+    for d in &dirs {
+        walk_audio_cached(Path::new(d), out, cues, progress, visited, cache, new_cache);
+    }
+    new_cache.insert(key, ScanDirEntry { mtime, files, dirs });
+}
+
+fn collect_audio_report_cached(
+    dir: &str,
+    tx: &Sender<Msg>,
+    cache_path: &Path,
+) -> Vec<String> {
+    let _guard = SCAN_CACHE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let cache = load_scan_cache(cache_path);
+    let mut new_cache: HashMap<String, ScanDirEntry> = HashMap::new();
     let mut out = Vec::new();
     let mut cues = Vec::new();
     let mut last = std::time::Instant::now();
@@ -159,10 +276,30 @@ pub fn collect_audio_report(dir: &str, tx: &Sender<Msg>) -> Vec<String> {
         }
     };
     let mut visited = HashSet::new();
-    walk_audio(Path::new(dir), &mut out, &mut cues, &mut progress, &mut visited);
+    walk_audio_cached(
+        Path::new(dir),
+        &mut out,
+        &mut cues,
+        &mut progress,
+        &mut visited,
+        &cache,
+        &mut new_cache,
+    );
+    if !new_cache.is_empty() {
+        // Merge instead of replacing: AddMany may scan one subfolder and must
+        // not throw away cache entries for the rest of the library.
+        let mut merged = cache;
+        merged.extend(new_cache);
+        save_scan_cache(cache_path, &merged);
+    }
     expand_cues(&mut out, cues);
     out.sort();
     out
+}
+
+pub fn collect_audio_report(dir: &str, tx: &Sender<Msg>) -> Vec<String> {
+    let path = scan_cache_path();
+    collect_audio_report_cached(dir, tx, &path)
 }
 
 fn normalized_path_key(path: &str) -> String {
@@ -621,6 +758,42 @@ mod file_pipeline_tests {
         let rec = record_with_ffmpeg(&a.to_string_lossy(), &ffmpeg_path(), &dest).expect("record");
         assert!(rec.is_file());
         assert!(std::fs::metadata(&rec).unwrap().len() > 4096);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn incremental_scan_reuses_and_invalidates_directory_cache() {
+        let dir = scratch();
+        let root = dir.join("Music");
+        let album = root.join("Artist").join("Album");
+        std::fs::create_dir_all(&album).unwrap();
+        let a = album.join("a.mp3");
+        let b = album.join("b.mp3");
+        std::fs::write(&a, b"x").unwrap();
+        let cache = dir.join("scan_cache.json");
+        let (tx, _rx) = std::sync::mpsc::channel();
+
+        let first = collect_audio_report_cached(&root.to_string_lossy(), &tx, &cache);
+        assert_eq!(first.len(), 1);
+        assert!(cache.is_file(), "scan cache should be written");
+
+        // Unchanged: the cached listing must still return the same file.
+        let again = collect_audio_report_cached(&root.to_string_lossy(), &tx, &cache);
+        assert_eq!(again, first);
+
+        // New file: the album directory mtime changes, so the listing refreshes.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        std::fs::write(&b, b"y").unwrap();
+        let after_add = collect_audio_report_cached(&root.to_string_lossy(), &tx, &cache);
+        assert_eq!(after_add.len(), 2);
+
+        // Deleted file: same invalidation path must drop it.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        std::fs::remove_file(&a).unwrap();
+        let after_del = collect_audio_report_cached(&root.to_string_lossy(), &tx, &cache);
+        assert_eq!(after_del.len(), 1);
+        assert!(after_del[0].ends_with("b.mp3"));
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

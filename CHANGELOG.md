@@ -1,5 +1,19 @@
 # Changelog
 
+## v3.2.48
+
+- Added a live filter above the A to Z band list.
+- Typing filters the band names immediately; X clears the filter.
+- The filter does not affect the playlist or the normal search field.
+
+## v3.2.47
+
+- Library scans now cache each directory listing by modification time.
+- Unchanged folders are reused; adding, removing or renaming an entry invalidates only that folder.
+- The cache is merged, so scanning one added folder does not discard the rest of the library cache.
+- The cache lives in `scan_cache.json` in the app data folder; deleting it forces a full walk.
+- Added a test for cache reuse and invalidation after adding and deleting files.
+
 ## v3.2.46
 
 - CD mode now supports in-track seeking with FWD and REW.
