@@ -23,24 +23,7 @@ use crate::{
 
 // Main UI panels: title bar, status bar, side panel, central deck panel and auxiliary windows (radio, help, add-radio, lyrics).
 
-const US_STATES: &[&str] = &[
-    "Alabama", "Alaska", "Arizona", "Arkansas", "California", "Colorado",
-    "Connecticut", "Delaware", "District of Columbia", "Florida", "Georgia",
-    "Hawaii", "Idaho", "Illinois", "Indiana", "Iowa", "Kansas", "Kentucky",
-    "Louisiana", "Maine", "Maryland", "Massachusetts", "Michigan", "Minnesota",
-    "Mississippi", "Missouri", "Montana", "Nebraska", "Nevada", "New Hampshire",
-    "New Jersey", "New Mexico", "New York", "North Carolina", "North Dakota",
-    "Ohio", "Oklahoma", "Oregon", "Pennsylvania", "Rhode Island",
-    "South Carolina", "South Dakota", "Tennessee", "Texas", "Utah", "Vermont",
-    "Virginia", "Washington", "West Virginia", "Wisconsin", "Wyoming",
-];
 
-const CA_REGIONS: &[&str] = &[
-    "Alberta", "British Columbia", "Manitoba", "New Brunswick",
-    "Newfoundland and Labrador", "Northwest Territories", "Nova Scotia",
-    "Nunavut", "Ontario", "Prince Edward Island", "Quebec", "Saskatchewan",
-    "Yukon",
-];
 
 /// Fixed-width label column so the deck rows line up like a boombox panel.
 fn row_label(ui: &mut egui::Ui, text: &str, th: &ThemePalette, h: f32) {
@@ -1023,6 +1006,30 @@ impl PlayerApp {
                                 if retro_btn(ui, "SCAN", th.playing_fg, th.btn_bg).clicked() {
                                     self.scan_radio(ui.input(|i| i.time));
                                 }
+                                let sa_label = if self.radio_scan_all_loading {
+                                    "SCAN ALL..."
+                                } else if self.radio_scan_all_active {
+                                    "STOP SCAN"
+                                } else {
+                                    "SCAN ALL"
+                                };
+                                if retro_btn(
+                                    ui,
+                                    sa_label,
+                                    if self.radio_scan_all_active || self.radio_scan_all_loading {
+                                        th.playing_fg
+                                    } else {
+                                        th.btn_fg
+                                    },
+                                    th.btn_bg,
+                                )
+                                .on_hover_text(
+                                    "Load the most popular stations from every U.S. state and Canadian province, then preview each one for 10 seconds",
+                                )
+                                .clicked()
+                                {
+                                    self.start_scan_all();
+                                }
                                 if retro_btn(ui, "TUNE+", th.btn_fg, th.btn_bg).clicked() {
                                     self.tune_radio_to(self.radio_freq + if self.radio_band == "AM" { 10.0 } else { 0.1 }, ui.input(|i| i.time));
                                 }
@@ -1036,6 +1043,40 @@ impl PlayerApp {
                                     self.record_radio();
                                 }
                             });
+                            if self.radio_scan_all_loading {
+                                ui.label(
+                                    RichText::new(format!(
+                                        "SCAN ALL  loading {}/{} regions...",
+                                        self.radio_scan_all_done, self.radio_scan_all_total
+                                    ))
+                                    .color(th.playing_fg)
+                                    .monospace()
+                                    .size(9.0),
+                                );
+                            } else if self.radio_scan_all_active {
+                                let len = self.radio_scan_all_queue.len();
+                                let pos = self
+                                    .radio_playing_idx
+                                    .and_then(|i| {
+                                        self.radio_scan_all_queue.iter().position(|x| *x == i)
+                                    })
+                                    .map(|p| p + 1)
+                                    .unwrap_or(0);
+                                let name = self
+                                    .radio_playing_idx
+                                    .and_then(|i| self.radio_presets.get(i))
+                                    .map(|s| s.name.clone())
+                                    .unwrap_or_default();
+                                ui.label(
+                                    RichText::new(format!(
+                                        "SCAN ALL  {}/{}  {}",
+                                        pos, len, name
+                                    ))
+                                    .color(th.playing_fg)
+                                    .monospace()
+                                    .size(9.0),
+                                );
+                            }
                             ui.add_space(4.0);
                             ui.horizontal(|ui| {
                                 ui.label(RichText::new("PRESETS").color(darken(th.accent, 0.35)).monospace().size(9.0));
@@ -2256,6 +2297,30 @@ impl PlayerApp {
                     if retro_btn(ui, "SCAN", th.playing_fg, th.btn_bg).clicked() {
                         self.scan_radio(ui.input(|i| i.time));
                     }
+                    let sa_label = if self.radio_scan_all_loading {
+                        "SCAN ALL..."
+                    } else if self.radio_scan_all_active {
+                        "STOP SCAN"
+                    } else {
+                        "SCAN ALL"
+                    };
+                    if retro_btn(
+                        ui,
+                        sa_label,
+                        if self.radio_scan_all_active || self.radio_scan_all_loading {
+                            th.playing_fg
+                        } else {
+                            th.btn_fg
+                        },
+                        th.btn_bg,
+                    )
+                    .on_hover_text(
+                        "Scan every U.S. state and Canadian province; each station previews for 10 seconds",
+                    )
+                    .clicked()
+                    {
+                        self.start_scan_all();
+                    }
                     if retro_btn(ui, if playing { "PAUSE" } else { "PLAY" }, th.playing_fg, th.btn_bg).clicked() {
                         if self.state.is_paused {
                             self.unpause_music();
@@ -2270,6 +2335,37 @@ impl PlayerApp {
                         self.record_radio();
                     }
                 });
+                if self.radio_scan_all_loading {
+                    ui.label(
+                        RichText::new(format!(
+                            "SCAN ALL  loading {}/{} regions...",
+                            self.radio_scan_all_done, self.radio_scan_all_total
+                        ))
+                        .color(th.playing_fg)
+                        .monospace()
+                        .size(9.0),
+                    );
+                } else if self.radio_scan_all_active {
+                    let len = self.radio_scan_all_queue.len();
+                    let pos = self
+                        .radio_playing_idx
+                        .and_then(|i| {
+                            self.radio_scan_all_queue.iter().position(|x| *x == i)
+                        })
+                        .map(|p| p + 1)
+                        .unwrap_or(0);
+                    let name = self
+                        .radio_playing_idx
+                        .and_then(|i| self.radio_presets.get(i))
+                        .map(|s| s.name.clone())
+                        .unwrap_or_default();
+                    ui.label(
+                        RichText::new(format!("SCAN ALL  {}/{}  {}", pos, len, name))
+                            .color(th.playing_fg)
+                            .monospace()
+                            .size(9.0),
+                    );
+                }
                 ui.add_space(4.0);
                 ui.separator();
                 let rows: Vec<(usize, f32, String)> = self
@@ -2833,6 +2929,7 @@ impl PlayerApp {
                 ui.label(RichText::new("FM / AM ............. Switch band").color(dim).monospace());
                 ui.label(RichText::new("TUNE- / TUNE+ ........ Step frequency").color(dim).monospace());
                 ui.label(RichText::new("SCAN ................ Auto-scan for stations").color(dim).monospace());
+                ui.label(RichText::new("SCAN ALL ............ Load popular stations from every U.S. state and Canadian province, then preview each for 10 seconds").color(dim).monospace());
                 ui.label(RichText::new("+ ADD ............... Add a station (name / band / freq / URL)").color(dim).monospace());
                 ui.label(RichText::new("BROWSE STATES ....... Popular stations for every U.S. state and Canadian province/territory").color(dim).monospace());
                 ui.label(RichText::new("Click dial .......... Tune to frequency").color(dim).monospace());

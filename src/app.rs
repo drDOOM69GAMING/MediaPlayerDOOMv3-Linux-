@@ -296,6 +296,14 @@ pub(crate) struct PlayerApp {
     pub(crate) radio_state_cache: std::collections::HashMap<(String, String), Vec<crate::types::RadioStationInfo>>,
     pub(crate) radio_state_pending: bool,
     pub(crate) radio_state_error: String,
+    pub(crate) radio_scan_all_gen: u64,
+    pub(crate) radio_scan_all_loading: bool,
+    pub(crate) radio_scan_all_active: bool,
+    pub(crate) radio_scan_all_done: usize,
+    pub(crate) radio_scan_all_total: usize,
+    pub(crate) radio_scan_all_queue: Vec<usize>,
+    pub(crate) radio_scan_all_pos: usize,
+    pub(crate) radio_scan_next_at: Option<Instant>,
     pub(crate) add_name: String,
     pub(crate) add_band: String,
     pub(crate) add_freq: String,
@@ -909,6 +917,14 @@ impl PlayerApp {
             radio_state_cache: std::collections::HashMap::new(),
             radio_state_pending: false,
             radio_state_error: String::new(),
+            radio_scan_all_gen: 0,
+            radio_scan_all_loading: false,
+            radio_scan_all_active: false,
+            radio_scan_all_done: 0,
+            radio_scan_all_total: 0,
+            radio_scan_all_queue: Vec::new(),
+            radio_scan_all_pos: 0,
+            radio_scan_next_at: None,
             add_name: String::new(),
             add_band: "FM".to_string(),
             add_freq: String::new(),
@@ -3011,6 +3027,44 @@ video_ended: false,
                     self.radio_state_error.clear();
                 }
                 self.radio_state_cache.insert((country, region), stations);
+            }
+            Msg::RadioScanAllProgress { gen, done, total } => {
+                if gen != self.radio_scan_all_gen {
+                    return;
+                }
+                self.radio_scan_all_loading = true;
+                self.radio_scan_all_done = self.radio_scan_all_done.max(done);
+                self.radio_scan_all_total = total.max(self.radio_scan_all_total);
+                self.set_status(format!(
+                    "SCAN ALL: loading stations {}/{} regions...",
+                    done, total
+                ));
+            }
+            Msg::RadioScanAllDone { gen, stations } => {
+                if gen != self.radio_scan_all_gen {
+                    return;
+                }
+                self.radio_scan_all_loading = false;
+                let mut queue = Vec::new();
+                for st in stations {
+                    let idx = self.add_web_preset(&st.name, &st.url);
+                    if !queue.contains(&idx) {
+                        queue.push(idx);
+                    }
+                }
+                if queue.is_empty() {
+                    self.radio_scan_all_active = false;
+                    self.radio_scan_all_queue.clear();
+                    self.set_error("SCAN ALL: no stations returned");
+                } else {
+                    let n = queue.len();
+                    self.radio_scan_all_queue = queue;
+                    self.radio_scan_all_pos = 0;
+                    self.radio_scan_all_active = true;
+                    self.radio_scan_next_at = Some(Instant::now());
+                    self.radio_last_start = Instant::now() - Duration::from_secs(2);
+                    self.set_status(format!("SCAN ALL: previewing {} stations", n));
+                }
             }
             Msg::BlurayProtection { source, info } => {
                 self.bluray_prot_pending = false;

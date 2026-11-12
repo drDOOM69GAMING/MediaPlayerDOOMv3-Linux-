@@ -2761,7 +2761,7 @@ dependencies = [
 
 [[package]]
 name = "mediaplayerofdoom"
-version = "3.2.66"
+version = "3.2.67"
 dependencies = [
  "anyhow",
  "cpal",

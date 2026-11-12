@@ -48,6 +48,10 @@ pub fn net_loop(rx: Receiver<NetCmd>, tx: Sender<Msg>) {
                     let stations = fetch_state_stations(&country, &region);
                     let _ = tx.send(Msg::RadioStateStations { country, region, stations });
                 }
+                NetCmd::RadioScanAll { gen } => {
+                    let stations = fetch_all_state_stations(&tx, gen);
+                    let _ = tx.send(Msg::RadioScanAllDone { gen, stations });
+                }
                 NetCmd::CheckUpdate { current, manual } => {
                     match check_latest_release(&current) {
                         Some((version, url)) => {
@@ -289,6 +293,60 @@ fn filter_state_stations(text: &str) -> Vec<crate::types::RadioStationInfo> {
             break;
         }
         out.push(st);
+    }
+    out
+}
+
+/// Load a compact scan pool from every state and province. Four stations per
+/// region keeps a full scan under a few hundred entries while still covering
+/// all of the USA and Canada.
+fn fetch_all_state_stations(tx: &Sender<Msg>, gen: u64) -> Vec<crate::types::RadioStationInfo> {
+    let mut regions: Vec<(&str, &str)> = Vec::new();
+    for r in crate::settings::US_STATES {
+        regions.push(("US", r));
+    }
+    for r in crate::settings::CA_REGIONS {
+        regions.push(("CA", r));
+    }
+    let total = regions.len();
+    let cursor = std::sync::atomic::AtomicUsize::new(0);
+    let done = std::sync::atomic::AtomicUsize::new(0);
+    let results: std::sync::Mutex<Vec<Option<Vec<crate::types::RadioStationInfo>>>> =
+        std::sync::Mutex::new((0..total).map(|_| None).collect());
+    // Six concurrent lookups keep the whole USA + Canada scan to roughly ten
+    // seconds instead of one request per region on the single net thread.
+    std::thread::scope(|scope| {
+        for _ in 0..6 {
+            let tx = tx.clone();
+            let cursor = &cursor;
+            let done = &done;
+            let results = &results;
+            let regions = &regions;
+            scope.spawn(move || loop {
+                let i = cursor.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if i >= regions.len() {
+                    break;
+                }
+                let (country, region) = regions[i];
+                let list = fetch_state_stations(country, region);
+                if let Ok(mut guard) = results.lock() {
+                    guard[i] = Some(list);
+                }
+                let n = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                let _ = tx.send(Msg::RadioScanAllProgress { gen, done: n, total });
+            });
+        }
+    });
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    if let Ok(guard) = results.into_inner() {
+        for list in guard.into_iter().flatten() {
+            for st in list.into_iter().take(4) {
+                if seen.insert(st.url.clone()) {
+                    out.push(st);
+                }
+            }
+        }
     }
     out
 }
@@ -1878,6 +1936,15 @@ mod poster_tests {
 #[cfg(test)]
 mod radio_state_tests {
     use super::*;
+
+    #[test]
+    #[ignore]
+    fn live_scan_all_stations() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let list = fetch_all_state_stations(&tx, 0);
+        assert!(list.len() > 100, "scan pool too small: {}", list.len());
+        eprintln!("scan pool: {} stations, first={}", list.len(), list[0].name);
+    }
 
     #[test]
     #[ignore]

@@ -140,6 +140,27 @@ pub struct RadioStation {
     pub url: String,
 }
 
+/// U.S. states plus Washington DC, used by the radio station browser and SCAN ALL.
+pub const US_STATES: &[&str] = &[
+    "Alabama", "Alaska", "Arizona", "Arkansas", "California", "Colorado",
+    "Connecticut", "Delaware", "District of Columbia", "Florida", "Georgia",
+    "Hawaii", "Idaho", "Illinois", "Indiana", "Iowa", "Kansas", "Kentucky",
+    "Louisiana", "Maine", "Maryland", "Massachusetts", "Michigan", "Minnesota",
+    "Mississippi", "Missouri", "Montana", "Nebraska", "Nevada", "New Hampshire",
+    "New Jersey", "New Mexico", "New York", "North Carolina", "North Dakota",
+    "Ohio", "Oklahoma", "Oregon", "Pennsylvania", "Rhode Island",
+    "South Carolina", "South Dakota", "Tennessee", "Texas", "Utah", "Vermont",
+    "Virginia", "Washington", "West Virginia", "Wisconsin", "Wyoming",
+];
+
+/// Canadian provinces and territories.
+pub const CA_REGIONS: &[&str] = &[
+    "Alberta", "British Columbia", "Manitoba", "New Brunswick",
+    "Newfoundland and Labrador", "Northwest Territories", "Nova Scotia",
+    "Nunavut", "Ontario", "Prince Edward Island", "Quebec", "Saskatchewan",
+    "Yukon",
+];
+
 pub fn default_radio() -> Vec<RadioStation> {
     vec![
         RadioStation { name: "KEXP Indie/Rock".into(), band: "FM".into(), freq: 90.3, url: "http://live-mp3-128.kexp.org/kexp128.mp3".into() },

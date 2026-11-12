@@ -191,6 +191,8 @@ pub enum Msg {
     DiscDumpCancelled,
     BlurayProtection { source: String, info: Option<crate::bluray::DiscProtection> },
     RadioStateStations { country: String, region: String, stations: Vec<RadioStationInfo> },
+    RadioScanAllProgress { gen: u64, done: usize, total: usize },
+    RadioScanAllDone { gen: u64, stations: Vec<RadioStationInfo> },
     ConvertProgress { done: usize, total: usize, text: String },
     ConvertDone { folder: String, converted: usize, failed: usize },
     ConvertFail(String),
@@ -235,6 +237,8 @@ pub enum NetCmd {
     CheckUpdate { current: String, manual: bool },
     /// Top broadcast stations for a U.S. state or Canadian province.
     RadioStateStations { country: String, region: String },
+    /// Load the top stations from every U.S. state and Canadian province.
+    RadioScanAll { gen: u64 },
 }
 
 /// One album's worth of ratings to look up on MusicBrainz.

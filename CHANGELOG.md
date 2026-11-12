@@ -1,5 +1,14 @@
 # Changelog
 
+## v3.2.67
+
+- Added **SCAN ALL** to radio mode. It loads the top stations from every U.S. state and Canadian province/territory, then previews each station for 10 seconds and loops.
+- The full scan pool is about 250 stations, built with six parallel region lookups (~10 seconds).
+- SCAN ALL shows live progress while loading, the current station position/count while scanning, and turns into **STOP SCAN**.
+- Manual tuning, SCAN, STOP, and picking a station from the state browser cancel SCAN ALL.
+- Scan results use hidden WEB presets, deduplicated by URL, so the FM/AM dial stays clean.
+- Added a generation counter so an interrupted scan cannot start later in the background.
+
 ## v3.2.66
 
 - Radio mode now has a **BROWSE STATES** browser covering all 50 U.S. states, Washington DC, and all 13 Canadian provinces and territories.
