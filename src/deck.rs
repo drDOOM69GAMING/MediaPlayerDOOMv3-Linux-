@@ -270,7 +270,8 @@ impl PlayerApp {
             self.set_error("SCAN ALL: no stations available");
             return;
         }
-        // State/browser stations first, then the FM/AM presets.
+        // SCAN ALL covers the state/browser stations. FM and AM presets stay
+        // on the normal SCAN button so SCAN ALL can never fall back to them.
         let mut queue: Vec<usize> = self
             .radio_presets
             .iter()
@@ -278,13 +279,9 @@ impl PlayerApp {
             .filter(|(_, s)| s.band.eq_ignore_ascii_case("WEB"))
             .map(|(i, _)| i)
             .collect();
-        queue.extend(
-            self.radio_presets
-                .iter()
-                .enumerate()
-                .filter(|(_, s)| !s.band.eq_ignore_ascii_case("WEB"))
-                .map(|(i, _)| i),
-        );
+        if queue.is_empty() {
+            queue = (0..self.radio_presets.len()).collect();
+        }
         queue.shuffle(&mut rand::rng());
         self.radio_scan_all_queue = queue;
         self.radio_scan_all_pos = 0;
@@ -321,9 +318,73 @@ impl PlayerApp {
         self.state.is_paused = false;
     }
 
-    /// Manual dial movement while SCAN ALL is on leaves the scan mode and
-    /// tunes normally. Without this the dial appeared dead because SCAN ALL
-    /// deliberately suppresses the automatic tuner.
+    /// Dial movement inside SCAN ALL selects the nearest station in the scan
+    /// pool and keeps the mode enabled. FM/AM stations use their real
+    /// frequency; web-only stations use their position across the dial.
+    pub(crate) fn scan_all_dial_select(&mut self, freq: f32, now: f64) {
+        let len = self.radio_scan_all_queue.len();
+        if len == 0 {
+            return;
+        }
+        // The scan pool is normally web-only; make the dial use the FM scale
+        // even if the previous mode left the receiver on AM.
+        let web_only = self.radio_scan_all_queue.iter().all(|&i| {
+            self.radio_presets
+                .get(i)
+                .map(|s| s.band.eq_ignore_ascii_case("WEB"))
+                .unwrap_or(true)
+        });
+        if web_only {
+            self.radio_band = "FM".to_string();
+        }
+        let (lo, hi) = self.radio_band_range();
+        let span = hi - lo;
+        let mut best: Option<(usize, f32)> = None;
+        for (q, &idx) in self.radio_scan_all_queue.iter().enumerate() {
+            let Some(st) = self.radio_presets.get(idx) else { continue };
+            let pos = if st.band.eq_ignore_ascii_case("FM") || st.band.eq_ignore_ascii_case("AM") {
+                st.freq
+            } else if len > 1 {
+                lo + span * (q as f32 / (len - 1) as f32)
+            } else {
+                lo
+            };
+            let d = (pos - freq).abs();
+            if best.map(|(_, bd)| d < bd).unwrap_or(true) {
+                best = Some((q, d));
+            }
+        }
+        let Some((q, _)) = best else { return };
+        let idx = self.radio_scan_all_queue[q];
+        let Some(st) = self.radio_presets.get(idx).cloned() else { return };
+        if st.band.eq_ignore_ascii_case("FM") || st.band.eq_ignore_ascii_case("AM") {
+            self.radio_band = st.band;
+            self.radio_freq = st.freq;
+        } else {
+            self.radio_band = "FM".to_string();
+            let (lo, hi) = self.radio_band_range();
+            self.radio_freq = if len > 1 {
+                lo + (hi - lo) * (q as f32 / (len - 1) as f32)
+            } else {
+                lo
+            };
+        }
+        // A dial release/click is a deliberate single action; bypass the
+        // short duplicate-start guard so it responds immediately.
+        if self.radio_last_start.elapsed() < Duration::from_millis(1200) {
+            self.radio_last_start = Instant::now() - Duration::from_secs(2);
+        }
+        self.start_radio(idx);
+        if self.radio_playing_idx == Some(idx) {
+            self.radio_scan_all_pos = (q + 1) % len;
+        }
+        self.radio_tuned = self.radio_playing_idx;
+        self.radio_last_moved = now;
+        let name = st.name;
+        self.set_status(format!("SCAN ALL {}/{}  {}", q + 1, len, name));
+    }
+
+    /// Manual dial movement outside SCAN ALL tunes normally.
     pub(crate) fn dial_tune(&mut self, freq: f32, now: f64) {
         let was_scan = self.radio_scan_all_active || self.radio_scan_all_loading;
         if was_scan {
