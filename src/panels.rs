@@ -23,6 +23,25 @@ use crate::{
 
 // Main UI panels: title bar, status bar, side panel, central deck panel and auxiliary windows (radio, help, add-radio, lyrics).
 
+const US_STATES: &[&str] = &[
+    "Alabama", "Alaska", "Arizona", "Arkansas", "California", "Colorado",
+    "Connecticut", "Delaware", "District of Columbia", "Florida", "Georgia",
+    "Hawaii", "Idaho", "Illinois", "Indiana", "Iowa", "Kansas", "Kentucky",
+    "Louisiana", "Maine", "Maryland", "Massachusetts", "Michigan", "Minnesota",
+    "Mississippi", "Missouri", "Montana", "Nebraska", "Nevada", "New Hampshire",
+    "New Jersey", "New Mexico", "New York", "North Carolina", "North Dakota",
+    "Ohio", "Oklahoma", "Oregon", "Pennsylvania", "Rhode Island",
+    "South Carolina", "South Dakota", "Tennessee", "Texas", "Utah", "Vermont",
+    "Virginia", "Washington", "West Virginia", "Wisconsin", "Wyoming",
+];
+
+const CA_REGIONS: &[&str] = &[
+    "Alberta", "British Columbia", "Manitoba", "New Brunswick",
+    "Newfoundland and Labrador", "Northwest Territories", "Nova Scotia",
+    "Nunavut", "Ontario", "Prince Edward Island", "Quebec", "Saskatchewan",
+    "Yukon",
+];
+
 /// Fixed-width label column so the deck rows line up like a boombox panel.
 fn row_label(ui: &mut egui::Ui, text: &str, th: &ThemePalette, h: f32) {
     ui.allocate_ui_with_layout(
@@ -990,7 +1009,7 @@ impl PlayerApp {
                             });
                             ui.add_space(4.0);
                             lcd(ui, &fmt_freq(self.radio_freq), th.playing_fg, th.bg);
-                            let stname = self.radio_tuned.and_then(|i| self.radio_presets.get(i)).map(|s| s.name.clone());
+                            let stname = self.radio_tuned.or(self.radio_playing_idx).and_then(|i| self.radio_presets.get(i)).map(|s| s.name.clone());
                             let playing = self.radio_on && !self.state.is_paused;
                             ui.label(RichText::new(stname.as_deref().unwrap_or("-- STATIC --")).color(if playing { th.playing_fg } else { Color32::from_gray(110) }).monospace().size(13.0));
                             if playing {
@@ -1022,6 +1041,12 @@ impl PlayerApp {
                                 ui.label(RichText::new("PRESETS").color(darken(th.accent, 0.35)).monospace().size(9.0));
                                 if retro_btn(ui, "+ ADD", th.playing_fg, th.btn_bg).clicked() {
                                     self.show_add_radio = true;
+                                }
+                                if retro_btn(ui, "BROWSE STATES", th.playing_fg, th.btn_bg)
+                                    .on_hover_text("Most popular stations for every U.S. state and Canadian province/territory")
+                                    .clicked()
+                                {
+                                    self.show_radio_states = true;
                                 }
                             });
                             ui.horizontal_wrapped(|ui| {
@@ -2211,7 +2236,7 @@ impl PlayerApp {
                         self.radio_last_moved = ui.input(|i| i.time);
                     }
                 }
-                let stname = self.radio_tuned.and_then(|i| self.radio_presets.get(i)).map(|s| s.name.clone());
+                let stname = self.radio_tuned.or(self.radio_playing_idx).and_then(|i| self.radio_presets.get(i)).map(|s| s.name.clone());
                 let playing = self.radio_on && !self.state.is_paused;
                 ui.horizontal(|ui| {
                     lcd(ui, &fmt_freq(self.radio_freq), th.playing_fg, th.bg);
@@ -2809,6 +2834,7 @@ impl PlayerApp {
                 ui.label(RichText::new("TUNE- / TUNE+ ........ Step frequency").color(dim).monospace());
                 ui.label(RichText::new("SCAN ................ Auto-scan for stations").color(dim).monospace());
                 ui.label(RichText::new("+ ADD ............... Add a station (name / band / freq / URL)").color(dim).monospace());
+                ui.label(RichText::new("BROWSE STATES ....... Popular stations for every U.S. state and Canadian province/territory").color(dim).monospace());
                 ui.label(RichText::new("Click dial .......... Tune to frequency").color(dim).monospace());
                 ui.label(RichText::new("Drag dial ........... Sweep, auto-locks nearest station").color(dim).monospace());
                 ui.add_space(6.0);
@@ -2869,6 +2895,228 @@ impl PlayerApp {
                 }
                     });
             });
+    }
+
+    /// Browse the most popular stations for every U.S. state and Canadian
+    /// province/territory. Results come from Radio Browser, ranked by votes;
+    /// recognisable broadcast call signs are shown first, and internet-only
+    /// networks are filtered out.
+    pub(crate) fn show_radio_states_window(&mut self, ctx: &egui::Context) {
+        let th = self.theme_colors();
+        if self.show_radio_states {
+            let key = (
+                self.radio_state_country.clone(),
+                self.radio_state_region.clone(),
+            );
+            if !self.radio_state_cache.contains_key(&key) && !self.radio_state_pending {
+                self.radio_state_pending = true;
+                self.radio_state_error.clear();
+                let _ = self.net_tx.send(NetCmd::RadioStateStations {
+                    country: key.0,
+                    region: key.1,
+                });
+            }
+        }
+        let mut open = self.show_radio_states;
+        egui::Window::new("STATIONS BY STATE / PROVINCE")
+            .resizable(true)
+            .collapsible(false)
+            .default_size([780.0, 540.0])
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    let us = self.radio_state_country == "US";
+                    if retro_btn(ui, "USA", if us { th.playing_fg } else { th.btn_fg }, th.btn_bg).clicked() && !us {
+                        self.radio_state_country = "US".to_string();
+                        self.radio_state_region = "Missouri".to_string();
+                        self.radio_state_error.clear();
+                    }
+                    let ca = self.radio_state_country == "CA";
+                    if retro_btn(ui, "CANADA", if ca { th.playing_fg } else { th.btn_fg }, th.btn_bg).clicked() && !ca {
+                        self.radio_state_country = "CA".to_string();
+                        self.radio_state_region = "Ontario".to_string();
+                        self.radio_state_error.clear();
+                    }
+                    ui.add_space(12.0);
+                    ui.label(RichText::new("FILTER:").color(th.fg).monospace().size(9.0));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.radio_state_query)
+                            .hint_text("state or province")
+                            .desired_width(180.0)
+                            .font(egui::TextStyle::Monospace),
+                    );
+                });
+                ui.add_space(6.0);
+                ui.separator();
+                let regions: &[&str] = if self.radio_state_country == "US" {
+                    US_STATES
+                } else {
+                    CA_REGIONS
+                };
+                let query = self.radio_state_query.trim().to_ascii_lowercase();
+                ui.horizontal_top(|ui| {
+                    ui.vertical(|ui| {
+                        ui.set_min_width(200.0);
+                        ui.set_max_width(210.0);
+                        egui::ScrollArea::vertical()
+                            .id_salt("radio_states_regions")
+                            .max_height(430.0)
+                            .show(ui, |ui| {
+                                for &region in regions {
+                                    if !query.is_empty()
+                                        && !region.to_ascii_lowercase().contains(&query)
+                                    {
+                                        continue;
+                                    }
+                                    let selected = self.radio_state_region == region;
+                                    if ui
+                                        .selectable_label(
+                                            selected,
+                                            RichText::new(region)
+                                                .color(if selected {
+                                                    th.playing_fg
+                                                } else {
+                                                    Color32::from_gray(165)
+                                                })
+                                                .monospace()
+                                                .size(10.0),
+                                        )
+                                        .clicked()
+                                    {
+                                        self.radio_state_region = region.to_string();
+                                        self.radio_state_error.clear();
+                                        let key = (
+                                            self.radio_state_country.clone(),
+                                            region.to_string(),
+                                        );
+                                        if !self.radio_state_cache.contains_key(&key) {
+                                            self.radio_state_pending = true;
+                                            let _ = self.net_tx.send(NetCmd::RadioStateStations {
+                                                country: key.0,
+                                                region: key.1,
+                                            });
+                                        }
+                                    }
+                                }
+                            });
+                    });
+                    ui.separator();
+                    ui.vertical(|ui| {
+                        let key = (
+                            self.radio_state_country.clone(),
+                            self.radio_state_region.clone(),
+                        );
+                        ui.label(
+                            RichText::new(format!(
+                                "{}  •  {}",
+                                self.radio_state_region,
+                                if self.radio_state_country == "US" { "USA" } else { "CANADA" }
+                            ))
+                            .color(th.accent)
+                            .monospace()
+                            .strong()
+                            .size(13.0),
+                        );
+                        ui.label(
+                            RichText::new("Ranked by popularity; broadcast call signs shown first")
+                                .color(Color32::from_gray(115))
+                                .monospace()
+                                .size(8.0),
+                        );
+                        ui.add_space(4.0);
+                        if self.radio_state_pending {
+                            ui.label(
+                                RichText::new("LOADING STATIONS...")
+                                    .color(Color32::from_gray(150))
+                                    .monospace()
+                                    .size(10.0),
+                            );
+                        } else if !self.radio_state_error.is_empty() {
+                            ui.label(
+                                RichText::new(&self.radio_state_error)
+                                    .color(Color32::from_rgb(255, 160, 120))
+                                    .monospace()
+                                    .size(10.0),
+                            );
+                        } else if let Some(list) = self.radio_state_cache.get(&key).cloned() {
+                            if list.is_empty() {
+                                ui.label(
+                                    RichText::new("No stations found for this region")
+                                        .color(Color32::from_gray(140))
+                                        .monospace()
+                                        .size(10.0),
+                                );
+                            }
+                            egui::ScrollArea::vertical()
+                                .id_salt("radio_states_results")
+                                .max_height(430.0)
+                                .show(ui, |ui| {
+                                    for st in &list {
+                                        ui.horizontal(|ui| {
+                                            ui.vertical(|ui| {
+                                                ui.label(
+                                                    RichText::new(&st.name)
+                                                        .color(th.fg)
+                                                        .monospace()
+                                                        .strong()
+                                                        .size(10.0),
+                                                );
+                                                let mut meta = String::new();
+                                                if !st.codec.is_empty() {
+                                                    meta.push_str(&st.codec);
+                                                }
+                                                if st.bitrate > 0 {
+                                                    if !meta.is_empty() {
+                                                        meta.push(' ');
+                                                    }
+                                                    meta.push_str(&format!("{}k", st.bitrate));
+                                                }
+                                                if st.votes > 0 {
+                                                    if !meta.is_empty() {
+                                                        meta.push_str(" • ");
+                                                    }
+                                                    meta.push_str(&format!("{} votes", st.votes));
+                                                }
+                                                if !meta.is_empty() {
+                                                    ui.label(
+                                                        RichText::new(meta)
+                                                            .color(Color32::from_gray(120))
+                                                            .monospace()
+                                                            .size(8.0),
+                                                    );
+                                                }
+                                            });
+                                            ui.with_layout(
+                                                egui::Layout::right_to_left(egui::Align::Center),
+                                                |ui| {
+                                                    if retro_btn(
+                                                        ui,
+                                                        "▶ PLAY",
+                                                        th.playing_fg,
+                                                        th.btn_bg,
+                                                    )
+                                                    .clicked()
+                                                    {
+                                                        self.play_web_station(&st.name, &st.url);
+                                                    }
+                                                },
+                                            );
+                                        });
+                                        ui.separator();
+                                    }
+                                });
+                        } else {
+                            ui.label(
+                                RichText::new("Select a state or province to load its stations")
+                                    .color(Color32::from_gray(120))
+                                    .monospace()
+                                    .size(10.0),
+                            );
+                        }
+                    });
+                });
+            });
+        self.show_radio_states = open;
     }
 
     pub(crate) fn show_add_radio_window(&mut self, ctx: &egui::Context) {

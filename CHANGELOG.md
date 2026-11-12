@@ -1,5 +1,14 @@
 # Changelog
 
+## v3.2.66
+
+- Radio mode now has a **BROWSE STATES** browser covering all 50 U.S. states, Washington DC, and all 13 Canadian provinces and territories.
+- Stations come from the Radio Browser API, ranked by votes. Recognisable broadcast call signs and frequencies are shown first; internet-only networks are filtered out.
+- Each region loads up to 12 stations with codec, bitrate and vote count. PLAY starts the stream immediately.
+- Browser stations are stored as hidden WEB presets, deduplicated by URL, so the FM/AM dial and preset list stay clean.
+- Added a live filter for the state/province list and a search box.
+- Added a unit test for the broadcast/internet-only filtering.
+
 ## v3.2.65
 
 - Video and audio ffmpeg children now receive `PR_SET_PDEATHSIG`, so a killed or crashed player cannot leave a reader holding the optical drive.

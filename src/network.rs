@@ -44,6 +44,10 @@ pub fn net_loop(rx: Receiver<NetCmd>, tx: Sender<Msg>) {
                     let bytes = fetch_movie_poster(&title);
                     let _ = tx.send(Msg::DiscPoster { key, bytes });
                 }
+                NetCmd::RadioStateStations { country, region } => {
+                    let stations = fetch_state_stations(&country, &region);
+                    let _ = tx.send(Msg::RadioStateStations { country, region, stations });
+                }
                 NetCmd::CheckUpdate { current, manual } => {
                     match check_latest_release(&current) {
                         Some((version, url)) => {
@@ -172,6 +176,154 @@ fn http_client() -> Option<reqwest::blocking::Client> {
         .user_agent(format!("{}/{} (album art lookup)", APP_NAME, APP_VERSION))
         .build()
         .ok()
+}
+
+// ---------------------------------------------------------------------------
+// Radio station browser (Radio Browser API)
+// ---------------------------------------------------------------------------
+
+fn station_client() -> Option<reqwest::blocking::Client> {
+    reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(25))
+        .user_agent(format!("{}/{} (radio station browser)", APP_NAME, APP_VERSION))
+        .build()
+        .ok()
+}
+
+fn station_is_internet_only(name: &str) -> bool {
+    const BLOCK: &[&str] = &[
+        "soma fm", "somafm", "radio paradise", "radioparadise", "rdmix",
+        "smooth jazz", "christian rock dot net", "christian power praise",
+        "christian hard rock", "christmas hits", "classic vinyl", "frisky",
+        "love radio", "1.fm", "181.fm", "di.fm", "laut.fm", "zeno",
+        "nightride", "a-1 audio", "thejazzgroove", "jazzgroove",
+    ];
+    let n = name.to_ascii_lowercase();
+    n.trim_start().starts_with('#') || BLOCK.iter().any(|b| n.contains(b))
+}
+
+fn station_call_re() -> &'static regex::Regex {
+    use std::sync::OnceLock;
+    static CALL: OnceLock<regex::Regex> = OnceLock::new();
+    CALL.get_or_init(|| {
+        regex::Regex::new(r"^(?:(?:K|W)[A-Z]{2,3}|C[FK][A-Z]{2,3})\b").unwrap()
+    })
+}
+
+fn station_freq_re() -> &'static regex::Regex {
+    use std::sync::OnceLock;
+    static FREQ: OnceLock<regex::Regex> = OnceLock::new();
+    FREQ.get_or_init(|| {
+        regex::Regex::new(r"\b\d{2,3}\.\d\b|\b\d{3,4}\s?AM\b|\b\d{2,3}\s?FM\b").unwrap()
+    })
+}
+
+fn station_is_broadcast(name: &str) -> bool {
+    station_call_re().is_match(name) || station_freq_re().is_match(name)
+}
+
+/// Strong broadcast match: a call sign or a dial frequency, as opposed to an
+/// internet-only station that merely mentions a state in its name.
+fn station_is_strong(name: &str) -> bool {
+    station_freq_re().is_match(name)
+        || (station_call_re().is_match(name)
+            && (name.contains(", ") || name.contains("FM") || name.contains("AM")))
+}
+
+/// Filter the Radio Browser response down to recognisable broadcast stations,
+/// then fill with the remaining popular entries so every region has results.
+fn filter_state_stations(text: &str) -> Vec<crate::types::RadioStationInfo> {
+    let Ok(list) = serde_json::from_str::<Vec<serde_json::Value>>(text) else {
+        return Vec::new();
+    };
+    let mut broadcast = Vec::new();
+    let mut call_only = Vec::new();
+    let mut other = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for v in list {
+        let name = v.get("name").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+        let url = v
+            .get("url_resolved")
+            .and_then(|x| x.as_str())
+            .filter(|u| !u.trim().is_empty())
+            .or_else(|| v.get("url").and_then(|x| x.as_str()))
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if name.is_empty() || url.is_empty() || !url.starts_with("http") {
+            continue;
+        }
+        if station_is_internet_only(&name) {
+            continue;
+        }
+        let key = name.to_ascii_lowercase();
+        if !seen.insert(key) {
+            continue;
+        }
+        let info = crate::types::RadioStationInfo {
+            name,
+            url,
+            codec: v.get("codec").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+            bitrate: v.get("bitrate").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
+            votes: v.get("votes").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
+            state: v.get("state").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        };
+        if station_is_strong(&info.name) {
+            broadcast.push(info);
+        } else if station_is_broadcast(&info.name) {
+            call_only.push(info);
+        } else {
+            other.push(info);
+        }
+    }
+    let mut out = broadcast;
+    out.truncate(8);
+    for st in call_only {
+        if out.len() >= 10 {
+            break;
+        }
+        out.push(st);
+    }
+    for st in other {
+        if out.len() >= 12 {
+            break;
+        }
+        out.push(st);
+    }
+    out
+}
+
+fn fetch_state_stations(country: &str, region: &str) -> Vec<crate::types::RadioStationInfo> {
+    let Some(client) = station_client() else {
+        return Vec::new();
+    };
+    for host in [
+        "https://all.api.radio-browser.info",
+        "https://de1.api.radio-browser.info",
+        "https://nl1.api.radio-browser.info",
+    ] {
+        let res = client
+            .get(format!("{}/json/stations/search", host))
+            .query(&[
+                ("countrycode", country),
+                ("state", region),
+                ("order", "votes"),
+                ("reverse", "true"),
+                ("limit", "250"),
+                ("hidebroken", "true"),
+            ])
+            .send();
+        let Ok(res) = res else { continue };
+        if !res.status().is_success() {
+            continue;
+        }
+        let Ok(text) = res.text() else { continue };
+        let stations = filter_state_stations(&text);
+        if !stations.is_empty() {
+            return stations;
+        }
+    }
+    Vec::new()
 }
 
 // ---------------------------------------------------------------------------
@@ -1720,5 +1872,45 @@ mod poster_tests {
             assert!(b.len() > 1000, "poster bytes {} for {title}", b.len());
             eprintln!("{title}: {} bytes", b.len());
         }
+    }
+}
+
+#[cfg(test)]
+mod radio_state_tests {
+    use super::*;
+
+    #[test]
+    #[ignore]
+    fn live_state_stations() {
+        for (country, region) in [("US", "Missouri"), ("US", "New York"), ("CA", "Ontario")] {
+            let list = fetch_state_stations(country, region);
+            assert!(!list.is_empty(), "no stations for {region}");
+            eprintln!("{region}: {} stations, first={}", list.len(), list[0].name);
+        }
+    }
+
+    #[test]
+    fn broadcast_detection() {
+        for n in ["WNYC 93.9 FM", "WBBR 1130 \"Bloomberg Radio\" New York", "Z100 WHTZ FM 100.3", "CFRB News/Talk 1010", "CILQ 107.1 Q107", "KUSC 91.5 Los Angeles"] {
+            assert!(station_is_broadcast(n), "should be broadcast: {n}");
+        }
+        for n in ["Calm Radio - Solo Piano", "Megarock Radio 320k", "SomaFM Groove Salad"] {
+            assert!(!station_is_broadcast(n), "should not be broadcast: {n}");
+        }
+    }
+
+    #[test]
+    fn filters_internet_only_and_keeps_broadcast_stations() {
+        let json = r#"[
+          {"name":"SomaFM Groove Salad","url_resolved":"https://ice.somafm.com/x","votes":9999,"codec":"MP3","bitrate":128,"state":"California"},
+          {"name":"KUSC 91.5 Los Angeles","url_resolved":"https://example.com/kusc","votes":800,"codec":"AAC","bitrate":96,"state":"California"},
+          {"name":"102.7 KIIS FM Los Angeles","url_resolved":"https://example.com/kiis","votes":1400,"codec":"MP3","bitrate":128,"state":"California"},
+          {"name":"Some Internet Radio","url_resolved":"https://example.com/net","votes":500,"codec":"MP3","bitrate":128,"state":"California"}
+        ]"#;
+        let out = filter_state_stations(json);
+        assert!(out.iter().any(|s| s.name.contains("KUSC")));
+        assert!(out.iter().any(|s| s.name.contains("KIIS")));
+        assert!(!out.iter().any(|s| s.name.contains("SomaFM")));
+        assert!(out.len() >= 3, "falls back to popular entries");
     }
 }

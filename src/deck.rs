@@ -207,6 +207,31 @@ impl PlayerApp {
         }
     }
 
+    /// Play a station from the by-state browser without touching the FM/AM
+    /// dial. It is kept as a hidden WEB preset (deduplicated by URL) so the
+    /// now-playing name, recording and stream watchdog work normally.
+    pub(crate) fn play_web_station(&mut self, name: &str, url: &str) {
+        let name = name.trim();
+        let url = url.trim();
+        if url.is_empty() {
+            return;
+        }
+        if let Some(idx) = self.radio_presets.iter().position(|s| s.url == url) {
+            self.start_radio(idx);
+            return;
+        }
+        self.radio_presets.push(RadioStation {
+            name: name.to_string(),
+            band: "WEB".to_string(),
+            freq: 0.0,
+            url: url.to_string(),
+        });
+        save_radio(&self.radio_presets);
+        let idx = self.radio_presets.len() - 1;
+        self.start_radio(idx);
+        self.set_status(format!("♪ {}", name));
+    }
+
     pub(crate) fn stop_radio(&mut self) {
         if let Some(mut c) = self.radio_proc.take() {
             let _ = c.kill();
@@ -235,12 +260,25 @@ impl PlayerApp {
         if !ever_tuned && !self.radio_on {
             return;
         }
-        let target = self.radio_tuned_at();
-        self.radio_tuned = target;
-        if now - self.radio_last_moved > 0.7 {
-            if let Some(t) = target {
-                if self.radio_playing_idx != Some(t) || (self.radio_playing_idx.is_none() && !self.radio_on) {
-                    self.start_radio(t);
+        let web_playing = self
+            .radio_playing_idx
+            .and_then(|i| self.radio_presets.get(i))
+            .map(|s| s.band.eq_ignore_ascii_case("WEB"))
+            .unwrap_or(false);
+        if web_playing {
+            // Keep the browser station selected; the dial must not retune to
+            // an FM preset at the old frequency.
+            self.radio_tuned = self.radio_playing_idx;
+        } else {
+            let target = self.radio_tuned_at();
+            self.radio_tuned = target;
+            if now - self.radio_last_moved > 0.7 {
+                if let Some(t) = target {
+                    if self.radio_playing_idx != Some(t)
+                        || (self.radio_playing_idx.is_none() && !self.radio_on)
+                    {
+                        self.start_radio(t);
+                    }
                 }
             }
         }

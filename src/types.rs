@@ -106,6 +106,17 @@ pub enum VideoSubtitle {
     External { path: String },
 }
 
+/// One station returned by the by-state/province browser.
+#[derive(Clone, Debug)]
+pub struct RadioStationInfo {
+    pub name: String,
+    pub url: String,
+    pub codec: String,
+    pub bitrate: u32,
+    pub votes: u32,
+    pub state: String,
+}
+
 pub enum Msg {
     Error(String),
     StartupPlay,
@@ -179,6 +190,7 @@ pub enum Msg {
     DiscDumpFail(String),
     DiscDumpCancelled,
     BlurayProtection { source: String, info: Option<crate::bluray::DiscProtection> },
+    RadioStateStations { country: String, region: String, stations: Vec<RadioStationInfo> },
     ConvertProgress { done: usize, total: usize, text: String },
     ConvertDone { folder: String, converted: usize, failed: usize },
     ConvertFail(String),
@@ -221,6 +233,8 @@ pub enum NetCmd {
     DiscPoster { key: String, title: String },
     /// Compare the running version with the latest GitHub release.
     CheckUpdate { current: String, manual: bool },
+    /// Top broadcast stations for a U.S. state or Canadian province.
+    RadioStateStations { country: String, region: String },
 }
 
 /// One album's worth of ratings to look up on MusicBrainz.

@@ -289,6 +289,13 @@ pub(crate) struct PlayerApp {
     pub(crate) radio_last_moved: f64,
     pub(crate) radio_last_start: Instant,
     pub(crate) show_add_radio: bool,
+    pub(crate) show_radio_states: bool,
+    pub(crate) radio_state_country: String,
+    pub(crate) radio_state_region: String,
+    pub(crate) radio_state_query: String,
+    pub(crate) radio_state_cache: std::collections::HashMap<(String, String), Vec<crate::types::RadioStationInfo>>,
+    pub(crate) radio_state_pending: bool,
+    pub(crate) radio_state_error: String,
     pub(crate) add_name: String,
     pub(crate) add_band: String,
     pub(crate) add_freq: String,
@@ -895,6 +902,13 @@ impl PlayerApp {
             radio_last_moved: 0.0,
             radio_last_start: Instant::now(),
             show_add_radio: false,
+            show_radio_states: false,
+            radio_state_country: "US".to_string(),
+            radio_state_region: "Missouri".to_string(),
+            radio_state_query: String::new(),
+            radio_state_cache: std::collections::HashMap::new(),
+            radio_state_pending: false,
+            radio_state_error: String::new(),
             add_name: String::new(),
             add_band: "FM".to_string(),
             add_freq: String::new(),
@@ -2989,6 +3003,15 @@ video_ended: false,
                 self.finish_disc_dump();
                 self.set_status("Disc dump cancelled");
             }
+            Msg::RadioStateStations { country, region, stations } => {
+                self.radio_state_pending = false;
+                if stations.is_empty() {
+                    self.radio_state_error = format!("No stations returned for {}", region);
+                } else {
+                    self.radio_state_error.clear();
+                }
+                self.radio_state_cache.insert((country, region), stations);
+            }
             Msg::BlurayProtection { source, info } => {
                 self.bluray_prot_pending = false;
                 if self.bluray_prot_source.as_deref() == Some(source.as_str()) {
@@ -3497,6 +3520,9 @@ impl eframe::App for PlayerApp {
         }
         if self.show_add_radio {
             self.show_add_radio_window(&ctx);
+        }
+        if self.show_radio_states {
+            self.show_radio_states_window(&ctx);
         }
         if self.show_radio {
             self.show_radio_window(&ctx);
