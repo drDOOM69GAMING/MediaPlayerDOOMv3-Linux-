@@ -1,5 +1,12 @@
 # Changelog
 
+## v3.2.50
+
+- Widened the sidebar so band and album names have more room.
+- Album rows show more characters before truncating.
+- Hovering a band or album now shows the full name and track count. The right-click conversion hint lives in Help instead of on every row.
+- The band filter box uses the wider sidebar.
+
 ## v3.2.49
 
 - The band filter now matches album names as well as band names.

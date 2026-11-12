@@ -301,7 +301,7 @@ impl PlayerApp {
     pub(crate) fn draw_side_panel(&mut self, ui: &mut egui::Ui) {
         let th = self.theme_colors();
         egui::Panel::left("side_panel").show(ui, |ui| {
-            ui.set_max_width(250.0);
+            ui.set_max_width(280.0);
             // Keep the play-order switch pinned at the bottom and put
             // everything above it in a scrollable column. In a short windowed
             // layout the fixed art/visualizer/band stack was taller than the
@@ -541,7 +541,7 @@ impl PlayerApp {
                     ui.add(
                         egui::TextEdit::singleline(&mut self.band_query)
                             .hint_text("filter bands / albums")
-                            .desired_width(188.0)
+                            .desired_width(218.0)
                             .font(egui::TextStyle::Monospace),
                     );
                     if !self.band_query.is_empty()
@@ -584,7 +584,7 @@ impl PlayerApp {
                                         }
                                     }
                                     let hit = sel == *b && self.album_sel.is_none();
-                                    let text = format!("{}  ({})", truncate_mid(b, 22), n);
+                                    let text = format!("{}  ({})", truncate_mid(b, 26), n);
                                     let bresp = ui
                                         .selectable_label(
                                             hit,
@@ -593,7 +593,7 @@ impl PlayerApp {
                                                 .monospace()
                                                 .size(10.0),
                                         )
-                                        .on_hover_text(format!("{}\nRight-click to convert", b));
+                                        .on_hover_text(format!("{}\n{} track(s)", b, n));
                                     if bresp.secondary_clicked() {
                                         let files =
                                             self.band_map.get(b).cloned().unwrap_or_default();
@@ -622,7 +622,7 @@ impl PlayerApp {
                                             .as_ref()
                                             .map(|(ab, al)| ab == b && al == &album)
                                             .unwrap_or(false);
-                                        let text = format!("      {}  ({})", truncate_mid(&album, 22), count);
+                                        let text = format!("   {}  ({})", truncate_mid(&album, 28), count);
                                         let aresp = ui
                                             .selectable_label(
                                                 ahit,
@@ -636,8 +636,8 @@ impl PlayerApp {
                                                     .size(10.0),
                                             )
                                             .on_hover_text(format!(
-                                                "{}\nRight-click to convert",
-                                                album
+                                                "{}\n{} track(s)",
+                                                album, count
                                             ));
                                         if aresp.secondary_clicked() {
                                             let files = self.album_tracks(b, &album);
@@ -2565,6 +2565,7 @@ impl PlayerApp {
                 ui.label(RichText::new("Quality 1-10 ........ Lossy: bitrate; FLAC: compression level; WAV/AIFF/ALAC: bit depth").color(dim).monospace());
                 ui.label(RichText::new("Output .............. ~/Music/<picked folder> (<format>); tags and embedded art preserved where supported").color(dim).monospace());
                 ui.label(RichText::new("Progress / Cancel ... Per-file progress; HIDE keeps it running; CANCEL stops ffmpeg").color(dim).monospace());
+                ui.label(RichText::new("Right-click ......... Right-click a band or album in the browser to convert just that selection").color(dim).monospace());
                 ui.add_space(6.0);
 
                 ui.label(RichText::new("META ALL (TAGS, COVERS, RATINGS)").color(acc).monospace().strong());
