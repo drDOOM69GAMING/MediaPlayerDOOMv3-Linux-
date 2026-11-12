@@ -1,5 +1,11 @@
 # Changelog
 
+## v3.2.63
+
+- Fixed Blu-ray playback hanging on "PAUSED / LOADING": the app used `/dev/cdrom`, but MakeMKV's `libmmbd` only recognises the real kernel device node. The drive list now returns `/dev/sr0` and playback canonicalises `/dev/cdrom` and `/dev/dvd`.
+- Confirmed the app's full VAAPI + FFmpeg pipeline decodes video from `bluray:/dev/sr0` through libmmbd.
+- Local libaacs/libbdplus/BD+ tables remain the first choice; libmmbd is only used when the local stack cannot open the disc.
+
 ## v3.2.62
 
 - Play bus-encrypted discs directly through MakeMKV's `libmmbd.so`, which is a drop-in libaacs/libbdplus replacement and decrypts live. No rip is needed.

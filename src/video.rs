@@ -356,13 +356,16 @@ impl PlayerApp {
             self.set_error("No Blu-ray source");
             return;
         }
+        // /dev/cdrom and /dev/dvd are symlinks; libmmbd only accepts srN.
+        let canonical = crate::bluray::canonical_device(source);
+        let source = canonical.as_str();
         // MakeMKV may have left a drive-holding guiserver behind.
         crate::bluray::release_stale_makemkv();
-        let key = crate::bluray::source(source).to_string();
+        let key = crate::bluray::canonical_device(crate::bluray::source(source));
         let same = self
             .bluray_prot_source
             .as_deref()
-            .map(|s| crate::bluray::source(s) == key)
+            .map(|s| crate::bluray::canonical_device(crate::bluray::source(s)) == key)
             .unwrap_or(false);
         if same {
             if let Some(p) = self.bluray_prot.clone() {

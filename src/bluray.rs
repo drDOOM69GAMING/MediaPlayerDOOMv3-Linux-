@@ -200,17 +200,21 @@ pub fn drives() -> Vec<String> {
         for e in rd.flatten() {
             let name = e.file_name().to_string_lossy().to_string();
             if name.starts_with("sr") && name[2..].chars().all(|c| c.is_ascii_digit()) {
-                out.push(e.path().to_string_lossy().to_string());
+                // Prefer the real kernel node. MakeMKV's libmmbd rejects the
+                // /dev/cdrom and /dev/dvd symlinks.
+                out.push(canonical_device(&e.path().to_string_lossy()));
             }
         }
     }
-    for fixed in ["/dev/dvd", "/dev/cdrom"] {
-        if std::path::Path::new(fixed).exists() {
-            out.push(fixed.to_string());
+    if out.is_empty() {
+        for fixed in ["/dev/dvd", "/dev/cdrom"] {
+            if std::path::Path::new(fixed).exists() {
+                out.push(canonical_device(fixed));
+            }
         }
     }
     out.sort();
-    out.dedup_by(|a, b| std::fs::canonicalize(a).ok() == std::fs::canonicalize(b).ok());
+    out.dedup();
     out
 }
 
@@ -221,6 +225,17 @@ pub fn drives() -> Vec<String> {
 
 pub fn first_drive() -> Option<String> {
     drives().into_iter().next()
+}
+
+/// Resolve /dev/cdrom, /dev/dvd and similar symlinks to the real block device.
+/// MakeMKV's live-decrypt library only recognises the kernel device node.
+pub fn canonical_device(path: &str) -> String {
+    if path.starts_with("/dev/") {
+        if let Ok(p) = std::fs::canonicalize(path) {
+            return p.to_string_lossy().to_string();
+        }
+    }
+    path.to_string()
 }
 
 /// Search the usual locations for a user-supplied AACS KEYDB.cfg. Keys are
