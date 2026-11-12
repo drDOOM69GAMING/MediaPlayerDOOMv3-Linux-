@@ -964,14 +964,13 @@ impl PlayerApp {
                         p.add(egui::Shape::convex_polygon(tri.to_vec(), needle, egui::Stroke::NONE));
                         if dial_resp.dragged() {
                             let d = dial_resp.drag_delta().x / rect.width() * span;
-                            self.radio_freq = (self.radio_freq + d).clamp(lo, hi);
-                            self.radio_last_moved = ui.input(|i| i.time);
+                            let f = (self.radio_freq + d).clamp(lo, hi);
+                            self.dial_tune(f, ui.input(|i| i.time));
                         }
                         if dial_resp.clicked() {
                             if let Some(pos) = dial_resp.interact_pointer_pos() {
                                 let f = lo + span * ((pos.x - screen.min.x) / screen.width());
-                                self.radio_freq = f.clamp(lo, hi);
-                                self.radio_last_moved = ui.input(|i| i.time);
+                                self.dial_tune(f.clamp(lo, hi), ui.input(|i| i.time));
                             }
                         }
                         ui.add_space(12.0);
@@ -2269,14 +2268,13 @@ impl PlayerApp {
                 ui.add_space(2.0);
                 if dial_resp.dragged() {
                     let d = dial_resp.drag_delta().x / rect.width() * span;
-                    self.radio_freq = (self.radio_freq + d).clamp(lo, hi);
-                    self.radio_last_moved = ui.input(|i| i.time);
+                    let f = (self.radio_freq + d).clamp(lo, hi);
+                    self.dial_tune(f, ui.input(|i| i.time));
                 }
                 if dial_resp.clicked() {
                     if let Some(pos) = dial_resp.interact_pointer_pos() {
                         let f = lo + span * ((pos.x - screen.min.x) / screen.width());
-                        self.radio_freq = f.clamp(lo, hi);
-                        self.radio_last_moved = ui.input(|i| i.time);
+                        self.dial_tune(f.clamp(lo, hi), ui.input(|i| i.time));
                     }
                 }
                 let stname = self.radio_tuned.or(self.radio_playing_idx).and_then(|i| self.radio_presets.get(i)).map(|s| s.name.clone());

@@ -321,6 +321,28 @@ impl PlayerApp {
         self.state.is_paused = false;
     }
 
+    /// Manual dial movement while SCAN ALL is on leaves the scan mode and
+    /// tunes normally. Without this the dial appeared dead because SCAN ALL
+    /// deliberately suppresses the automatic tuner.
+    pub(crate) fn dial_tune(&mut self, freq: f32, now: f64) {
+        let was_scan = self.radio_scan_all_active || self.radio_scan_all_loading;
+        if was_scan {
+            self.stop_scan_all();
+            self.set_status("SCAN ALL off - manual dial tuning");
+        }
+        let web_playing = self
+            .radio_playing_idx
+            .and_then(|i| self.radio_presets.get(i))
+            .map(|s| s.band.eq_ignore_ascii_case("WEB"))
+            .unwrap_or(false);
+        // A playing WEB station suppresses the normal tuner; stop it so the
+        // dial can actually move to an FM/AM station.
+        if was_scan || web_playing {
+            self.stop_radio();
+        }
+        self.tune_radio_to(freq, now);
+    }
+
     pub(crate) fn tune_radio_to(&mut self, freq: f32, now: f64) {
         if self.radio_scan_all_active || self.radio_scan_all_loading {
             self.stop_scan_all();

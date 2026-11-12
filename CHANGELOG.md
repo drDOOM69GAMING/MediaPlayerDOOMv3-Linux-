@@ -36,6 +36,7 @@ Single consolidated release since v3.2.50. This includes all of the local
 - SCAN ALL is a mode: it loads stations from every state/province (about 250, fetched in parallel), then SCAN steps through them manually.
 - The SCAN ALL queue is shuffled, and each full pass reshuffles for a new random order.
 - The radio dial follows every scan step: real FM/AM frequencies where known, and a position across the FM scale for web-only stations. The status line shows the station number (`x/y`).
+- Moving or clicking the dial manually leaves SCAN ALL mode and tunes normally after the short dial debounce; a playing web-only station is stopped so the dial can reach FM/AM stations.
 - SCAN ALL stays enabled until toggled off; STOP does not disable it. Manual tuning or the dial exits the mode.
 - Browser and scan stations are hidden WEB presets, deduplicated by URL, so the FM/AM dial stays clean.
 - Radio ffmpeg children are reaped off the UI thread so a stuck stream cannot freeze the window.
