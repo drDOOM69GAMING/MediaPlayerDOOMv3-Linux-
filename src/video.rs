@@ -353,6 +353,8 @@ impl PlayerApp {
             self.set_error("No Blu-ray source");
             return;
         }
+        // MakeMKV may have left a drive-holding guiserver behind.
+        crate::bluray::release_stale_makemkv();
         let source_owned = source.to_string();
         self.request_bluray_protection(&source_owned, true);
         let info = crate::bluray::main_title_info(source);

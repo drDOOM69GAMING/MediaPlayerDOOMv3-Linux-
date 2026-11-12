@@ -319,13 +319,36 @@ fn parse_hms(v: &str) -> Option<u64> {
 /// Ask MakeMKV for its title list and return the longest title (usually the
 /// main feature). Robot mode prints `TINFO:<id>,9,0,"H:MM:SS"` for duration.
 pub fn makemkv_main_title(source_spec: &str) -> Option<u32> {
-    let out = Command::new("makemkvcon")
+    let mut child = Command::new("makemkvcon")
         .args(["-r", "info", source_spec])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .output()
+        .spawn()
         .ok()?;
-    parse_makemkv_title_list(&String::from_utf8_lossy(&out.stdout))
+    let mut stdout = child.stdout.take()?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut s = String::new();
+        let _ = stdout.read_to_string(&mut s);
+        let _ = tx.send(s);
+    });
+    let start = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                let text = rx.recv_timeout(Duration::from_secs(2)).ok()?;
+                return parse_makemkv_title_list(&text);
+            }
+            Ok(None) => {}
+            Err(_) => return None,
+        }
+        if start.elapsed() > Duration::from_secs(120) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }
 
 fn parse_makemkv_title_list(text: &str) -> Option<u32> {
@@ -561,6 +584,16 @@ pub fn dump_main_title_mkv(
     }
 }
 
+#[cfg(not(windows))]
+struct MkGuiserverGuard;
+
+#[cfg(not(windows))]
+impl Drop for MkGuiserverGuard {
+    fn drop(&mut self) {
+        crate::bluray::release_stale_makemkv();
+    }
+}
+
 fn makemkv_dump(
     source_spec: &str,
     out_dir: &Path,
@@ -576,6 +609,7 @@ fn makemkv_dump(
     }
     #[cfg(not(windows))]
     {
+    let _guiserver_guard = MkGuiserverGuard;
     std::fs::create_dir_all(out_dir)
         .map_err(|e| format!("cannot create {}: {}", out_dir.display(), e))?;
     let _ = tx.send(Msg::DiscDumpProgress {

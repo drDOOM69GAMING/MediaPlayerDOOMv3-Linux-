@@ -1,5 +1,12 @@
 # Changelog
 
+## v3.2.58
+
+- Fixed the Blu-ray deck showing "NO BLU-RAY DISC DETECTED" on bus-encrypted discs: `bd_info` can take 15-30 seconds on those drives, so the probe timeout is now 60 seconds instead of 15.
+- MakeMKV leaves `makemkvcon guiserver` processes behind that keep `/dev/sr0` open; these now block libbluray/libaacs. The app terminates stale guiservers when no MakeMKV job or GUI is active.
+- RIP + PLAY gets a 120-second guard while looking up the main title, so a stalled drive cannot leave the app spinning forever.
+- Added cleanup after every MakeMKV dump and before Blu-ray playback.
+
 ## v3.2.57
 
 - Detect AACS bus-encryption failures (revoked host key, `Unable to initialize bus encryption`) from `bd_info` stderr.

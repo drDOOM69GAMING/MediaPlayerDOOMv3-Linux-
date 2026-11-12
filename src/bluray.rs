@@ -549,7 +549,9 @@ fn run_bd_info(source: &str) -> Option<String> {
             Ok(None) => {}
             Err(_) => return None,
         }
-        if start.elapsed() > Duration::from_secs(15) {
+        // Bus-encrypted discs can take 20-30 s while libaacs retries the host
+        // key, so allow plenty of time; this runs on a worker thread.
+        if start.elapsed() > Duration::from_secs(60) {
             let _ = child.kill();
             let _ = child.wait();
             return None;
@@ -558,10 +560,72 @@ fn run_bd_info(source: &str) -> Option<String> {
     }
 }
 
+/// MakeMKV leaves a `makemkvcon guiserver` process running after every
+/// command, and that process keeps the optical drive open. While it is alive,
+/// libbluray/libaacs cannot initialize the drive. Terminate stale guiservers
+/// only when no real MakeMKV job or MakeMKV GUI is active.
+#[cfg(target_os = "linux")]
+pub fn release_stale_makemkv() {
+    let mut guiservers: Vec<u32> = Vec::new();
+    let mut active = false;
+    let Ok(rd) = std::fs::read_dir("/proc") else { return };
+    for e in rd.flatten() {
+        let name = e.file_name();
+        let Some(pid) = name.to_str().and_then(|s| s.parse::<u32>().ok()) else {
+            continue;
+        };
+        let Ok(raw) = std::fs::read(format!("/proc/{}/cmdline", pid)) else {
+            continue;
+        };
+        if raw.is_empty() {
+            continue;
+        }
+        let args: Vec<String> = raw
+            .split(|b| *b == 0)
+            .filter(|s| !s.is_empty())
+            .map(|s| String::from_utf8_lossy(s).to_string())
+            .collect();
+        let exe = args
+            .first()
+            .map(|s| s.rsplit('/').next().unwrap_or(s).to_string())
+            .unwrap_or_default();
+        if exe != "makemkvcon" && exe != "makemkv" {
+            continue;
+        }
+        if exe == "makemkvcon" && args.iter().any(|a| a == "guiserver") {
+            guiservers.push(pid);
+        } else {
+            active = true;
+        }
+    }
+    if active || guiservers.is_empty() {
+        return;
+    }
+    for pid in &guiservers {
+        unsafe {
+            libc::kill(*pid as i32, libc::SIGTERM);
+        }
+    }
+    let start = std::time::Instant::now();
+    while start.elapsed() < std::time::Duration::from_millis(700) {
+        if guiservers
+            .iter()
+            .all(|p| !std::path::Path::new(&format!("/proc/{}", p)).exists())
+        {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn release_stale_makemkv() {}
+
 /// Probe the current disc with `bd_info` and check the user's KEYDB for the
 /// disc's AACS ID. This can take a moment on a large KEYDB, so callers should
 /// run it on a worker thread.
 pub fn protection_info(source: &str) -> Option<DiscProtection> {
+    release_stale_makemkv();
     let text = run_bd_info(source)?;
     let mut info = parse_bd_info(&text);
     if !info.bluray && info.disc_id.is_none() && !info.aacs && !info.bd_plus {
