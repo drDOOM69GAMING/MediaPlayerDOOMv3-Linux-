@@ -494,12 +494,35 @@ impl PlayerApp {
             // the CD deck shows only the disc, not the whole music folder.
             if !(self.deck_mode == DeckMode::Disc && self.disc_in) {
                 let q = self.band_query.trim().to_lowercase();
+                if !q.is_empty() {
+                    self.ensure_band_search();
+                }
                 let mut bands: Vec<String> = self
                     .band_map
                     .keys()
                     .cloned()
-                    .filter(|b| q.is_empty() || b.to_lowercase().contains(&q))
+                    .filter(|b| {
+                        q.is_empty()
+                            || self
+                                .band_search_index
+                                .get(b)
+                                .map_or(false, |s| s.contains(&q))
+                    })
                     .collect();
+                if !q.is_empty() {
+                    // A band matched through an album: open it so the matching
+                    // album row is visible without another click.
+                    for b in &bands {
+                        if !b.to_lowercase().contains(&q)
+                            && self
+                                .band_search_index
+                                .get(b)
+                                .map_or(false, |s| s.contains(&q))
+                        {
+                            self.expanded_bands.insert(b.clone());
+                        }
+                    }
+                }
                 bands.sort_by_key(|b| b.to_lowercase());
                 let mut sel = self.band_sel.clone();
                 let mut all_clicked = false;
@@ -517,7 +540,7 @@ impl PlayerApp {
                 ui.horizontal(|ui| {
                     ui.add(
                         egui::TextEdit::singleline(&mut self.band_query)
-                            .hint_text("filter bands")
+                            .hint_text("filter bands / albums")
                             .desired_width(188.0)
                             .font(egui::TextStyle::Monospace),
                     );
@@ -588,6 +611,12 @@ impl PlayerApp {
                                 });
                                 if open {
                                     for (album, count) in self.band_albums(b) {
+                                        if !q.is_empty()
+                                            && !b.to_lowercase().contains(&q)
+                                            && !album.to_lowercase().contains(&q)
+                                        {
+                                            continue;
+                                        }
                                         let ahit = self
                                             .album_sel
                                             .as_ref()
@@ -2524,7 +2553,7 @@ impl PlayerApp {
                 ui.label(RichText::new("Switch .............. Red = random shuffle; green = in order").color(dim).monospace());
                 ui.label(RichText::new("Scope ............... The loaded list: All songs, one band, or one album").color(dim).monospace());
                 ui.label(RichText::new("Band / album ........ + expands a band; click an album to load and play it").color(dim).monospace());
-                ui.label(RichText::new("Band filter ......... Type above the band list to filter A-Z names; X clears it").color(dim).monospace());
+                ui.label(RichText::new("Band filter ......... Type above the band list to filter band and album names; X clears it").color(dim).monospace());
                 ui.label(RichText::new("Smart ............... Weighted shuffle that favors songs you play more").color(dim).monospace());
                 ui.label(RichText::new("Repeat .............. Repeat the loaded list").color(dim).monospace());
                 ui.label(RichText::new("Star filter ......... Limit playback to songs rated this many stars or more").color(dim).monospace());

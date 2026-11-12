@@ -428,6 +428,28 @@ impl PlayerApp {
                 self.album_sel = None;
             }
         }
+        self.band_gen = self.band_gen.wrapping_add(1);
+    }
+
+    /// Build the lowercase band + album search text once per band-map change.
+    pub(crate) fn ensure_band_search(&mut self) {
+        if self.band_search_gen == self.band_gen {
+            return;
+        }
+        let mut out: HashMap<String, String> = HashMap::new();
+        for (band, files) in &self.band_map {
+            let mut text = band.to_lowercase();
+            for p in files {
+                let album = self.album_label(p).to_lowercase();
+                if !album.is_empty() && !text.contains(&album) {
+                    text.push(' ');
+                    text.push_str(&album);
+                }
+            }
+            out.insert(band.clone(), text);
+        }
+        self.band_search_index = out;
+        self.band_search_gen = self.band_gen;
     }
 
     pub(crate) fn sort_bands_library(&mut self) {
@@ -740,6 +762,7 @@ impl PlayerApp {
         self.band_sel = String::new();
         self.expanded_bands.clear();
         self.album_sel = None;
+        self.band_gen = self.band_gen.wrapping_add(1);
         self.save_bands();
         self.set_status("Band library cleared");
     }

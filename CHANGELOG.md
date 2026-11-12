@@ -1,5 +1,12 @@
 # Changelog
 
+## v3.2.49
+
+- The band filter now matches album names as well as band names.
+- A band matched through an album opens automatically so the album row is visible.
+- Album rows are filtered to the matching albums when the band name itself does not match.
+- The band + album search text is cached and rebuilt only after the band map changes.
+
 ## v3.2.48
 
 - Added a live filter above the A to Z band list.
