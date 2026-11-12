@@ -393,6 +393,19 @@ pub fn bounds_from_chapters(chapters: &[(f32, f32, String)]) -> (f32, f32) {
 /// Same as `fit_video_dims`, but also scales small sources up to the target.
 /// Used for the DVD Lanczos path, where the whole point is a real upscale
 /// instead of letting the UI stretch a 720x480 texture.
+/// Whether the ffmpeg build has the Contrast Adaptive Sharpen filter. CAS
+/// gives a cleaner DVD upscale than a plain unsharp kernel.
+pub fn cas_supported() -> bool {
+    static CACHE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CACHE.get_or_init(|| {
+        std::process::Command::new(ffmpeg_path())
+            .args(["-hide_banner", "-h", "filter=cas"])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    })
+}
+
 pub fn fit_video_dims_upscale(w: u32, h: u32, max_w: u32, max_h: u32) -> (u32, u32) {
     if w == 0 || h == 0 || max_w == 0 || max_h == 0 {
         return (640, 360);

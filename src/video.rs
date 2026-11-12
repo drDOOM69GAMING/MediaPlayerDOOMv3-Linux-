@@ -50,7 +50,171 @@ fn spawn_video_clock(
     });
 }
 
+/// Find a local poster/cover image for a disc folder, ISO or mounted drive.
+fn find_disc_image(source: &str) -> Option<Vec<u8>> {
+    let p = Path::new(source);
+    let mut roots: Vec<PathBuf> = Vec::new();
+    if p.is_dir() {
+        roots.push(p.to_path_buf());
+    } else if p.is_file() {
+        if let Some(parent) = p.parent() {
+            roots.push(parent.to_path_buf());
+        }
+    }
+    if source.starts_with("/dev/") {
+        if let Ok(mounts) = std::fs::read_to_string("/proc/mounts") {
+            for line in mounts.lines() {
+                let mut it = line.split_whitespace();
+                if let (Some(dev), Some(mnt)) = (it.next(), it.next()) {
+                    if dev == source {
+                        roots.push(PathBuf::from(mnt.replace("\\040", " ")));
+                    }
+                }
+            }
+        }
+    }
+    let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+    let exts = ["jpg", "jpeg", "png", "webp"];
+    for root in roots {
+        let mut candidates: Vec<PathBuf> = Vec::new();
+        for name in ["cover", "folder", "poster", "front", "dvd", "bluray"] {
+            for ext in exts {
+                candidates.push(root.join(format!("{}.{}", name, ext)));
+            }
+        }
+        if !stem.is_empty() {
+            for ext in exts {
+                candidates.push(root.join(format!("{}.{}", stem, ext)));
+            }
+        }
+        // Blu-ray metadata folders often carry a thumbnail/cover.
+        if let Ok(rd) = std::fs::read_dir(root.join("BDMV/META/DL")) {
+            let mut extra: Vec<PathBuf> = rd
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| {
+                    let ext = p
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .unwrap_or("")
+                        .to_ascii_lowercase();
+                    matches!(ext.as_str(), "jpg" | "jpeg" | "png" | "webp")
+                })
+                .collect();
+            extra.sort();
+            candidates.extend(extra);
+        }
+        for c in candidates {
+            if !c.is_file() {
+                continue;
+            }
+            if std::fs::metadata(&c).map(|m| m.len() > 25 * 1024 * 1024).unwrap_or(true) {
+                continue;
+            }
+            if let Ok(bytes) = std::fs::read(&c) {
+                if image::load_from_memory(&bytes).is_ok() {
+                    return Some(bytes);
+                }
+            }
+        }
+    }
+    None
+}
+
 impl PlayerApp {
+    /// Load a local disc poster, or leave the generic disc badge in place.
+    pub(crate) fn load_disc_poster(&mut self, source: &str, kind: &str, title: &str) {
+        self.video_poster = None;
+        self.video_poster_kind = kind.to_string();
+        self.video_poster_title = title.to_string();
+        if let Some(bytes) = find_disc_image(source) {
+            if let Ok(img) = image::load_from_memory(&bytes) {
+                let rgba = img.to_rgba8();
+                let thumb = image::imageops::thumbnail(&rgba, 360, 540);
+                let size = [thumb.width() as usize, thumb.height() as usize];
+                let ci = ColorImage::from_rgba_unmultiplied(size, thumb.as_raw());
+                self.video_poster = Some(
+                    self.ctx
+                        .load_texture("disc_poster", ci, TextureOptions::LINEAR),
+                );
+            }
+        }
+    }
+
+    /// Draw the disc cover on pause/loading. Falls back to a generic disc
+    /// badge when no local image exists.
+    fn draw_disc_poster(&self, ui: &egui::Ui, area: egui::Rect) {
+        if !(self.video_tex.is_none() || self.video_paused) {
+            return;
+        }
+        if self.video_poster.is_none() && self.video_poster_title.is_empty() {
+            return;
+        }
+        let p = ui.painter().with_clip_rect(area);
+        let max_h = if self.video_fs { 430.0 } else { 220.0 };
+        let panel_h = area.height().min(max_h);
+        let panel_w = (panel_h * 0.70).min(area.width());
+        let panel = egui::Rect::from_center_size(area.center(), egui::vec2(panel_w, panel_h));
+        p.rect_filled(panel, 10.0, Color32::from_rgba_unmultiplied(0, 0, 0, 210));
+        p.rect_stroke(
+            panel,
+            10.0,
+            egui::Stroke::new(1.0, Color32::from_gray(90)),
+            egui::StrokeKind::Inside,
+        );
+        let art = egui::Rect::from_min_size(
+            panel.min + egui::vec2(14.0, 14.0),
+            egui::vec2(panel.width() - 28.0, panel.height() - 62.0),
+        );
+        if let Some(tex) = &self.video_poster {
+            let ts = tex.size();
+            let (tw, th) = (ts[0].max(1) as f32, ts[1].max(1) as f32);
+            let scale = (art.width() / tw).min(art.height() / th);
+            let dst = egui::Rect::from_center_size(
+                art.center(),
+                egui::vec2(tw * scale, th * scale),
+            );
+            p.image(
+                tex.id(),
+                dst,
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                Color32::WHITE,
+            );
+        } else {
+            let c = art.center();
+            let r = (art.width().min(art.height()) * 0.36).max(24.0);
+            p.circle_filled(c, r, Color32::from_gray(32));
+            p.circle_stroke(c, r, egui::Stroke::new(2.0, Color32::from_gray(130)));
+            p.circle_stroke(c, r * 0.62, egui::Stroke::new(1.0, Color32::from_gray(80)));
+            p.circle_filled(c, r * 0.12, Color32::from_gray(15));
+            p.text(
+                c,
+                egui::Align2::CENTER_CENTER,
+                if self.video_poster_kind.is_empty() {
+                    "DISC"
+                } else {
+                    &self.video_poster_kind
+                },
+                egui::FontId::monospace((r * 0.25).max(11.0)),
+                Color32::from_gray(220),
+            );
+        }
+        p.text(
+            egui::pos2(panel.center().x, panel.max.y - 46.0),
+            egui::Align2::CENTER_TOP,
+            &self.video_poster_title,
+            egui::FontId::monospace(if self.video_fs { 15.0 } else { 11.0 }),
+            Color32::WHITE,
+        );
+        p.text(
+            egui::pos2(panel.center().x, panel.max.y - 24.0),
+            egui::Align2::CENTER_TOP,
+            "PAUSED / LOADING",
+            egui::FontId::monospace(9.0),
+            Color32::from_gray(140),
+        );
+    }
+
     pub(crate) fn play_dvd_source(&mut self, source: &str) {
         let source = source.trim();
         if source.is_empty() {
@@ -67,6 +231,11 @@ impl PlayerApp {
         crate::ffmpeg::clear_audio_map_cache();
         self.video_queue = vec![wrapped.clone()];
         self.video_queue_idx = 0;
+        self.load_disc_poster(
+            source,
+            "DVD",
+            &crate::dvd::display_name(&crate::dvd::wrap(source)),
+        );
         self.play_video_item(wrapped);
         self.set_status(format!("DVD: {}", crate::dvd::display_name(&crate::dvd::wrap(source))));
     }
@@ -88,6 +257,11 @@ impl PlayerApp {
         self.video_positions.remove(&wrapped);
         self.video_queue = vec![wrapped.clone()];
         self.video_queue_idx = 0;
+        self.load_disc_poster(
+            source,
+            "BLU-RAY",
+            &crate::bluray::display_name(&crate::bluray::wrap_playlist(source, playlist)),
+        );
         self.play_video_item(wrapped);
         if let Some(i) = &info {
             self.video_dur_secs = i.secs;
@@ -641,6 +815,11 @@ impl PlayerApp {
         let gen = self.video_gen;
         let saved_pos = self.video_positions.get(&path).copied().unwrap_or(0.0);
         av_log(&format!("play_video_item path={} saved_pos={:.3}", path, saved_pos));
+        if !crate::dvd::is_dvd(&path) && !crate::bluray::is_bluray(&path) {
+            self.video_poster = None;
+            self.video_poster_kind.clear();
+            self.video_poster_title.clear();
+        }
         self.video_audio_tracks.clear();
         self.video_audio_sel = 0;
         self.video_subs.clear();
@@ -874,6 +1053,9 @@ impl PlayerApp {
         self.video_queue.clear();
         self.video_queue_idx = 0;
         self.video_tex = None;
+        self.video_poster = None;
+        self.video_poster_kind.clear();
+        self.video_poster_title.clear();
         self.video_loading_since = None;
         self.video_load_timed_out = false;
         self.video_decode_error.clear();
@@ -991,6 +1173,7 @@ impl PlayerApp {
                     if self.video_paused {
                         ui.painter().rect_stroke(img, 0.0, egui::Stroke::new(3.0, Color32::from_rgb(255, 220, 80)), egui::StrokeKind::Inside);
                     }
+                    self.draw_disc_poster(ui, img);
                     if self.video_bar_visible {
                         let bar = egui::Rect::from_min_size(scr.min, egui::vec2(sw, 30.0));
                         ui.painter().rect_filled(bar, 0.0, Color32::from_rgba_unmultiplied(0, 0, 0, 170));
@@ -1157,9 +1340,16 @@ impl PlayerApp {
                             .unwrap_or(false)
                         {
                             let lbl = if self.dvd_upscale {
-                                "DVD SCALE: ON"
+                                if self.video_dims.0 > 0 {
+                                    format!(
+                                        "DVD SCALE: ON {}x{}",
+                                        self.video_dims.0, self.video_dims.1
+                                    )
+                                } else {
+                                    "DVD SCALE: ON".to_string()
+                                }
                             } else {
-                                "DVD SCALE: OFF"
+                                "DVD SCALE: OFF".to_string()
                             };
                             let col = if self.dvd_upscale {
                                 Color32::from_rgb(120, 255, 120)
@@ -1373,6 +1563,7 @@ impl PlayerApp {
                         if self.video_paused {
                             ui.painter().rect_stroke(rect, 0.0, egui::Stroke::new(3.0, Color32::from_rgb(255, 220, 80)), egui::StrokeKind::Inside);
                         }
+                        self.draw_disc_poster(ui, rect);
                         if resp.dragged() {
                             self.video_pos += resp.drag_delta();
                         }
@@ -1645,5 +1836,34 @@ mod video_tests {
         assert_eq!(next_queue_idx(1, 2), Some(0));
         assert_eq!(next_queue_idx(0, 3), Some(1));
         assert_eq!(next_queue_idx(2, 3), Some(0));
+    }
+}
+
+#[cfg(test)]
+mod poster_tests {
+    use super::*;
+
+    #[test]
+    fn finds_folder_cover_and_bluray_metadata_thumbnail() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("mpdoom-poster-{}", stamp));
+        let meta = dir.join("BDMV/META/DL");
+        std::fs::create_dir_all(&meta).unwrap();
+        let img = image::RgbaImage::from_pixel(32, 48, image::Rgba([200, 40, 40, 255]));
+        let cover = dir.join("cover.jpg");
+        image::DynamicImage::ImageRgba8(img.clone())
+            .save(&cover)
+            .unwrap();
+        assert!(find_disc_image(&dir.to_string_lossy()).is_some());
+
+        let thumb = meta.join("bdmt_eng.jpg");
+        image::DynamicImage::ImageRgba8(img)
+            .save(&thumb)
+            .unwrap();
+        assert!(find_disc_image(&dir.to_string_lossy()).is_some());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

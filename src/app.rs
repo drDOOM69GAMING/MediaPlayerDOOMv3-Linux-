@@ -368,6 +368,9 @@ pub(crate) struct PlayerApp {
     pub(crate) video_paused: bool,
     pub(crate) video_dims: (u32, u32),
     pub(crate) video_tex: Option<egui::TextureHandle>,
+    pub(crate) video_poster: Option<egui::TextureHandle>,
+    pub(crate) video_poster_kind: String,
+    pub(crate) video_poster_title: String,
     /// Audio and subtitle tracks reported by ffprobe for the current video.
     pub(crate) video_audio_tracks: Vec<AudioStreamInfo>,
     pub(crate) video_audio_sel: usize,
@@ -953,6 +956,9 @@ impl PlayerApp {
             video_paused: false,
             video_dims: (640, 360),
             video_tex: None,
+            video_poster: None,
+            video_poster_kind: String::new(),
+            video_poster_title: String::new(),
             video_audio_tracks: Vec::new(),
             video_audio_sel: 0,
             video_subs: Vec::new(),
@@ -2626,6 +2632,18 @@ video_ended: false,
             }
             Msg::VideoFrame { w, h, rgba, gen } => {
                 if gen == self.video_gen {
+                    if (w, h) != self.video_dims {
+                        if let Some(path) = self.video_current.as_deref() {
+                            if crate::dvd::is_dvd(path) {
+                                self.set_status(format!(
+                                    "DVD {}x{} ({})",
+                                    w,
+                                    h,
+                                    if self.dvd_upscale { "Lanczos" } else { "standard" }
+                                ));
+                            }
+                        }
+                    }
                     self.video_dims = (w, h);
                     let size = [w as usize, h as usize];
                     let img = egui::ColorImage::from_rgba_unmultiplied(size, &rgba);

@@ -481,8 +481,13 @@ LibCmd::Scan(dir) => {
                     // frames are passed through by deint=interlaced. Lanczos
                     // and a mild unsharp pass make the 480/576 upscale cleaner.
                     if dvd_upscale {
+                        let sharpen = if crate::ffmpeg::cas_supported() {
+                            "cas=0.6"
+                        } else {
+                            "unsharp=5:5:1.0:3:3:0.0"
+                        };
                         format!(
-                            "yadif=deint=interlaced,scale={tw}:{th}:force_original_aspect_ratio=decrease:flags=lanczos,pad={tw}:{th}:(ow-iw)/2:(oh-ih)/2,unsharp=3:3:0.8:3:3:0.0"
+                            "yadif=deint=interlaced,scale={tw}:{th}:force_original_aspect_ratio=decrease:flags=lanczos,pad={tw}:{th}:(ow-iw)/2:(oh-ih)/2,{sharpen}"
                         )
                     } else {
                         format!(

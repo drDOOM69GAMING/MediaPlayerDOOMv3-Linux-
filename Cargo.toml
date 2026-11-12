@@ -1,6 +1,6 @@
 [package]
 name = "mediaplayerofdoom"
-version = "3.2.51"
+version = "3.2.52"
 edition = "2021"
 
 [dependencies]

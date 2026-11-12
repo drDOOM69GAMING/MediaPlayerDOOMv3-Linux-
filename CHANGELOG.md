@@ -1,5 +1,15 @@
 # Changelog
 
+## v3.2.52
+
+- DVD SCALE now really upscales 480/576 video to 1620x1080; the previous target stayed at source size.
+- Upscaling uses Lanczos plus CAS (Contrast Adaptive Sharpen) when available, falling back to a stronger unsharp kernel.
+- The DVD button shows the actual output resolution after the first frame.
+- Audio waits for the first new frame after an audio-track or scale change, fixing the A/V drift.
+- Restarts resume from the audio clock position instead of the last one-second UI tick.
+- Added disc poster art: local cover/folder/poster images, ISO sidecars, mounted drives and Blu-ray META/DL thumbnails.
+- When no disc image exists, a generic DVD or Blu-ray badge is shown while loading or paused.
+
 ## v3.2.51
 
 - The AUDIO button now lists and cycles the audio tracks of a DVD or Blu-ray title.
