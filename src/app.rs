@@ -318,6 +318,9 @@ pub(crate) struct PlayerApp {
     pub(crate) bluray_prot: Option<crate::bluray::DiscProtection>,
     pub(crate) bluray_prot_source: Option<String>,
     pub(crate) bluray_prot_pending: bool,
+    /// PLAY was pressed before the protection probe finished; decide once the
+    /// result arrives (direct playback vs RIP + PLAY).
+    pub(crate) bluray_autoplay: Option<String>,
     pub(crate) convert_open: bool,
     pub(crate) convert_src: Option<String>,
     /// Album or band picked from the right-click menu.
@@ -918,6 +921,7 @@ impl PlayerApp {
             bluray_prot: None,
             bluray_prot_source: None,
             bluray_prot_pending: false,
+            bluray_autoplay: None,
             convert_open: false,
             convert_src: None,
             convert_pick: None,
@@ -2985,6 +2989,26 @@ video_ended: false,
                 self.bluray_prot_pending = false;
                 if self.bluray_prot_source.as_deref() == Some(source.as_str()) {
                     self.bluray_prot = Some(info.unwrap_or_default());
+                    if self.bluray_autoplay.as_deref() == Some(source.as_str()) {
+                        self.bluray_autoplay = None;
+                        let needs_mk = self
+                            .bluray_prot
+                            .as_ref()
+                            .map(|p| p.bluray && p.needs_makemkv())
+                            .unwrap_or(false);
+                        let is_bluray = self
+                            .bluray_prot
+                            .as_ref()
+                            .map(|p| p.bluray)
+                            .unwrap_or(false);
+                        if needs_mk {
+                            self.start_rip_and_play(Some(&source));
+                        } else if is_bluray {
+                            self.begin_bluray_playback(&source);
+                        } else {
+                            self.set_error("PLAY: no readable Blu-ray disc detected");
+                        }
+                    }
                 }
             }
             Msg::ConvertProgress { done, total, text } => {

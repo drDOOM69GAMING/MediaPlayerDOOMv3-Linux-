@@ -1215,18 +1215,19 @@ impl PlayerApp {
     /// RIP + PLAY for Blu-rays that plain libaacs cannot open (AACS bus
     /// encryption, revoked host key, unhandled BD+). MakeMKV decrypts the
     /// longest title, then the app starts it automatically.
-    pub(crate) fn start_rip_and_play(&mut self) {
+    pub(crate) fn start_rip_and_play(&mut self, source: Option<&str>) {
         if self.disc_dumping {
             return;
         }
-        let current = self
-            .video_current
-            .clone()
-            .filter(|p| crate::bluray::is_bluray(p));
-        let current_src = current
-            .as_deref()
-            .map(crate::bluray::source)
-            .map(|s| s.to_string());
+        let current_src = source
+            .map(|s| crate::bluray::source(s).to_string())
+            .or_else(|| {
+                self.video_current
+                    .as_deref()
+                    .filter(|p| crate::bluray::is_bluray(p))
+                    .map(crate::bluray::source)
+                    .map(|s| s.to_string())
+            });
         let (source_spec, label, total, physical) = match current_src {
             Some(src) if !src.starts_with("/dev/") => {
                 let path = PathBuf::from(&src);

@@ -347,6 +347,9 @@ impl PlayerApp {
         self.set_status(format!("DVD: {}", crate::dvd::display_name(&crate::dvd::wrap(source))));
     }
 
+    /// PLAY entry point. If the disc is known to need MakeMKV (AACS bus
+    /// encryption or unhandled BD+), rip the main title first instead of
+    /// trying libbluray, which would only pause and fail.
     pub(crate) fn play_bluray_source(&mut self, source: &str) {
         let source = source.trim();
         if source.is_empty() {
@@ -355,8 +358,42 @@ impl PlayerApp {
         }
         // MakeMKV may have left a drive-holding guiserver behind.
         crate::bluray::release_stale_makemkv();
+        let key = crate::bluray::source(source).to_string();
+        let same = self
+            .bluray_prot_source
+            .as_deref()
+            .map(|s| crate::bluray::source(s) == key)
+            .unwrap_or(false);
+        if same {
+            if let Some(p) = self.bluray_prot.clone() {
+                if p.bluray && p.needs_makemkv() {
+                    self.set_status("AACS bus encryption: RIP + PLAY needed, decrypting the main title first...");
+                    self.start_rip_and_play(Some(source));
+                    return;
+                }
+                if p.bluray {
+                    self.begin_bluray_playback(source);
+                    return;
+                }
+                self.set_error("PLAY: no readable Blu-ray disc detected");
+                return;
+            }
+        }
+        // No fresh protection result yet: probe first, then decide.
+        self.bluray_autoplay = Some(source.to_string());
+        self.request_bluray_protection(source, false);
+        self.set_status("Checking AACS / BD+ before playback...");
+    }
+
+    /// Start the actual libbluray playback once AES/BD+ has been cleared.
+    pub(crate) fn begin_bluray_playback(&mut self, source: &str) {
+        let source = source.trim();
+        if source.is_empty() {
+            self.set_error("No Blu-ray source");
+            return;
+        }
         let source_owned = source.to_string();
-        self.request_bluray_protection(&source_owned, true);
+        self.request_bluray_protection(&source_owned, false);
         let info = crate::bluray::main_title_info(source);
         let playlist = info.as_ref().map(|i| i.playlist);
         let wrapped = crate::bluray::wrap_playlist(source, playlist);

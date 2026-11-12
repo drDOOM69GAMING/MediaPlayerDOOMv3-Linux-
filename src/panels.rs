@@ -1326,7 +1326,7 @@ impl PlayerApp {
                         });
                     }
                     if rip_play {
-                        self.start_rip_and_play();
+                        self.start_rip_and_play(None);
                     }
                 }
                 DeckMode::Tape => {
@@ -2753,7 +2753,7 @@ impl PlayerApp {
                 ui.label(RichText::new("TROUBLESHOOTING").color(acc).monospace().strong());
                 ui.label(RichText::new("DVD blocks .......... Encrypted image? Use DUMP TO MKV from the image or DUMP TO ISO; raw encrypted images are unsupported").color(dim).monospace());
                 ui.label(RichText::new("Blu-ray BD+ ......... libbdplus and the user's BD+ tables are tried first; MakeMKV is the fallback for unhandled discs").color(dim).monospace());
-                ui.label(RichText::new("AACS bus encryption  .. libaacs cannot open the drive; RIP + PLAY decrypts the main title with MakeMKV, then plays it").color(dim).monospace());
+                ui.label(RichText::new("AACS bus encryption  .. PLAY automatically decrypts the main title with MakeMKV, then starts it").color(dim).monospace());
                 ui.label(RichText::new("Check DVD tools ..... Run `mediaplayerofdoom --check-dvd` to list dvdbackup, genisoimage and the DVD libraries").color(dim).monospace());
                 ui.label(RichText::new("Ratings missing ..... MusicBrainz, Discogs and TheAudioDB have no rating for that track/album; no public star feed covers everything").color(dim).monospace());
                 ui.label(RichText::new("Covers missing ...... No local/web match; Meta All retries every run and reports the count without art").color(dim).monospace());

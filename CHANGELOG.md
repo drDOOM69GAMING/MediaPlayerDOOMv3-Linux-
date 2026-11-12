@@ -1,5 +1,11 @@
 # Changelog
 
+## v3.2.61
+
+- Pressing PLAY on a disc with AACS bus encryption or unhandled BD+ now starts RIP + PLAY automatically instead of attempting libbluray playback and pausing.
+- PLAY waits for the protection probe when the result is not ready yet, then chooses direct playback or RIP + PLAY.
+- If the probe cannot read the disc, PLAY now shows an error instead of hanging in a paused state.
+
 ## v3.2.60
 
 - MKV rips now check free space before starting and refuse with a clear message instead of filling the destination drive.
