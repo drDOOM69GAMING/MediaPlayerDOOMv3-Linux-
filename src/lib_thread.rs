@@ -541,7 +541,8 @@ LibCmd::Scan(dir) => {
                 }
                 cmd.stdout(std::process::Stdio::piped())
                     .stderr(std::process::Stdio::piped())
-                    .no_window();
+                    .no_window()
+                    .die_with_parent();
                 let mut child = match cmd.spawn() {
                     Ok(c) => c,
                     Err(e) => {

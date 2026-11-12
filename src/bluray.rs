@@ -695,6 +695,7 @@ pub fn mmbd_env_dir() -> Option<std::path::PathBuf> {
 #[cfg(target_os = "linux")]
 pub fn release_stale_makemkv() {
     let mut guiservers: Vec<u32> = Vec::new();
+    let mut orphans: Vec<u32> = Vec::new();
     let mut active = false;
     let Ok(rd) = std::fs::read_dir("/proc") else { return };
     for e in rd.flatten() {
@@ -717,6 +718,23 @@ pub fn release_stale_makemkv() {
             .first()
             .map(|s| s.rsplit('/').next().unwrap_or(s).to_string())
             .unwrap_or_default();
+        // A player killed with SIGKILL used to leave ffmpeg or its --bd-stream
+        // helper holding the drive. Only touch processes reparented to PID 1.
+        let media_reader = (exe == "ffmpeg"
+            || exe.starts_with("mediaplayerofdoom"))
+            && args.iter().any(|a| a.contains("bluray:/dev/") || a == "--bd-stream");
+        if media_reader {
+            let ppid = std::fs::read_to_string(format!("/proc/{}/status", pid))
+                .ok()
+                .and_then(|st| {
+                    st.lines()
+                        .find_map(|l| l.strip_prefix("PPid:"))
+                        .and_then(|v| v.trim().parse::<u32>().ok())
+                });
+            if ppid == Some(1) {
+                orphans.push(pid);
+            }
+        }
         if exe != "makemkvcon" && exe != "makemkv" {
             continue;
         }
@@ -726,17 +744,21 @@ pub fn release_stale_makemkv() {
             active = true;
         }
     }
-    if active || guiservers.is_empty() {
+    let mut kill = orphans;
+    if !active {
+        kill.extend(guiservers);
+    }
+    if kill.is_empty() {
         return;
     }
-    for pid in &guiservers {
+    for pid in &kill {
         unsafe {
             libc::kill(*pid as i32, libc::SIGTERM);
         }
     }
     let start = std::time::Instant::now();
     while start.elapsed() < std::time::Duration::from_millis(700) {
-        if guiservers
+        if kill
             .iter()
             .all(|p| !std::path::Path::new(&format!("/proc/{}", p)).exists())
         {

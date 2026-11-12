@@ -1,5 +1,11 @@
 # Changelog
 
+## v3.2.65
+
+- Video and audio ffmpeg children now receive `PR_SET_PDEATHSIG`, so a killed or crashed player cannot leave a reader holding the optical drive.
+- At startup/disc probe the app also terminates orphaned `ffmpeg`/`--bd-stream` readers (reparented to PID 1) whose command line references a Blu-ray device.
+- This prevents the "frozen until reboot" state after force-quitting during protected-disc playback.
+
 ## v3.2.64
 
 - Fixed slow-motion playback and UI freezes on MakeMKV live-decrypt discs. MakeMKV's libmmbd can only serve one reader, but the player used two ffmpeg processes (video and audio), which deadlocked and stalled the drive.

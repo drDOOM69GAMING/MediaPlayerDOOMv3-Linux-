@@ -10,6 +10,9 @@ use crate::consts::AUDIO_FORMATS;
 /// call site identical on all platforms.
 pub trait CommandNoWindow {
     fn no_window(&mut self) -> &mut Self;
+    /// Kill this child when the player exits, even on SIGKILL, so a crash
+    /// cannot leave ffmpeg holding the optical drive.
+    fn die_with_parent(&mut self) -> &mut Self;
 }
 
 impl CommandNoWindow for std::process::Command {
@@ -23,6 +26,20 @@ impl CommandNoWindow for std::process::Command {
         {
             self
         }
+    }
+
+    fn die_with_parent(&mut self) -> &mut Self {
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::process::CommandExt;
+            unsafe {
+                self.pre_exec(|| {
+                    libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+                    Ok(())
+                });
+            }
+        }
+        self
     }
 }
 pub static BEAUTIFY_RE: [std::sync::OnceLock<regex::Regex>; 4] = [

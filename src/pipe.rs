@@ -109,6 +109,7 @@ pub fn spawn_radio_stream(url: &str, ffmpeg: &Path) -> Result<(Child, PipeSource
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .no_window()
+        .die_with_parent()
         .spawn()
         .map_err(|e| format!("ffmpeg failed to start: {}", e))?;
     let stdout = child.stdout.take().ok_or("ffmpeg gave no output")?;

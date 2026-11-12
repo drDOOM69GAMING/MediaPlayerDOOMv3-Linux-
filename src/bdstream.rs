@@ -179,6 +179,16 @@ mod imp {
             } else {
                 Stdio::null()
             });
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::process::CommandExt;
+            unsafe {
+                cmd.pre_exec(|| {
+                    libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+                    Ok(())
+                });
+            }
+        }
         // Keep the same AACS/XDG configuration ffmpeg would have used.
         crate::bluray::configure_command(&mut cmd);
         let mut child = cmd.spawn().ok()?;
