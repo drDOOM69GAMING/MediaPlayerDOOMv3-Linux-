@@ -13,6 +13,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
+use rand::seq::SliceRandom;
 use rand::Rng;
 use rodio::{Decoder, OutputStreamHandle, Sink, Source};
 use crate::app::{PlayerApp, PlayerState};
@@ -284,6 +285,7 @@ impl PlayerApp {
                 .filter(|(_, s)| !s.band.eq_ignore_ascii_case("WEB"))
                 .map(|(i, _)| i),
         );
+        queue.shuffle(&mut rand::rng());
         self.radio_scan_all_queue = queue;
         self.radio_scan_all_pos = 0;
         self.radio_scan_all_active = true;
@@ -388,16 +390,35 @@ impl PlayerApp {
                 self.radio_scan_all_active = false;
                 return;
             }
-            let idx = self.radio_scan_all_queue[self.radio_scan_all_pos % len];
-            if let Some(st) = self.radio_presets.get(idx).cloned() {
-                if st.band.eq_ignore_ascii_case("FM") || st.band.eq_ignore_ascii_case("AM") {
-                    self.radio_band = st.band;
-                    self.radio_freq = st.freq;
-                }
-            }
+            let cur = self.radio_scan_all_pos % len;
+            let idx = self.radio_scan_all_queue[cur];
+            let station = self.radio_presets.get(idx).cloned();
             self.start_radio(idx);
             if self.radio_playing_idx == Some(idx) {
+                // Only move the dial when the station actually changed.
+                if let Some(st) = station {
+                    if st.band.eq_ignore_ascii_case("FM") || st.band.eq_ignore_ascii_case("AM") {
+                        self.radio_band = st.band;
+                        self.radio_freq = st.freq;
+                    } else {
+                        // Web-only stations have no frequency. Move the dial
+                        // across the FM scale with the scan position so the
+                        // needle always tracks the station being previewed.
+                        self.radio_band = "FM".to_string();
+                        let (lo, hi) = self.radio_band_range();
+                        let frac = if len > 1 {
+                            cur as f32 / (len - 1) as f32
+                        } else {
+                            0.0
+                        };
+                        self.radio_freq = lo + (hi - lo) * frac;
+                    }
+                }
                 self.radio_scan_all_pos = (self.radio_scan_all_pos + 1) % len;
+                if self.radio_scan_all_pos == 0 {
+                    // New random pass through the whole station list.
+                    self.radio_scan_all_queue.shuffle(&mut rand::rng());
+                }
             }
             self.radio_tuned = self.radio_playing_idx;
             let shown = self

@@ -33,7 +33,9 @@ Single consolidated release since v3.2.50. This includes all of the local
 - BROWSE STATES covers all 50 U.S. states, Washington DC and all 13 Canadian provinces/territories.
 - Stations come from Radio Browser, ranked by popularity; broadcast call signs and frequencies are shown first and internet-only networks are filtered out.
 - Each region shows up to 12 stations with codec, bitrate and votes; PLAY starts immediately.
-- SCAN ALL is a mode: it loads stations from every state/province (about 250, fetched in parallel), then SCAN steps through them manually. State stations are first, then the FM/AM presets.
+- SCAN ALL is a mode: it loads stations from every state/province (about 250, fetched in parallel), then SCAN steps through them manually.
+- The SCAN ALL queue is shuffled, and each full pass reshuffles for a new random order.
+- The radio dial follows every scan step: real FM/AM frequencies where known, and a position across the FM scale for web-only stations. The status line shows the station number (`x/y`).
 - SCAN ALL stays enabled until toggled off; STOP does not disable it. Manual tuning or the dial exits the mode.
 - Browser and scan stations are hidden WEB presets, deduplicated by URL, so the FM/AM dial stays clean.
 - Radio ffmpeg children are reaped off the UI thread so a stuck stream cannot freeze the window.
