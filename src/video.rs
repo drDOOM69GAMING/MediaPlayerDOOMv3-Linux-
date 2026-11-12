@@ -80,7 +80,7 @@ impl PlayerApp {
         let source_owned = source.to_string();
         self.request_bluray_protection(&source_owned, true);
         let info = crate::bluray::main_title_info(source);
-        let playlist = info.map(|i| i.playlist);
+        let playlist = info.as_ref().map(|i| i.playlist);
         let wrapped = crate::bluray::wrap_playlist(source, playlist);
         // Never resume a Blu-ray from a saved timestamp: the engine restarts
         // at the playlist start, and old bad timestamps used to make launch
@@ -89,7 +89,7 @@ impl PlayerApp {
         self.video_queue = vec![wrapped.clone()];
         self.video_queue_idx = 0;
         self.play_video_item(wrapped);
-        if let Some(i) = info {
+        if let Some(i) = &info {
             self.video_dur_secs = i.secs;
         }
         self.set_status(format!("BLU-RAY: {}", crate::bluray::display_name(&crate::bluray::wrap_playlist(source, playlist))));
@@ -198,6 +198,25 @@ impl PlayerApp {
         self.video_clock.store(0, std::sync::atomic::Ordering::Relaxed);
         self.video_seek_base = seek.max(0.0);
         av_log(&format!("attach_audio path={} seek={:.3} paused={} tex={}", path, seek, self.video_paused, self.video_tex.is_some()));
+        if (crate::dvd::is_dvd(path) || crate::bluray::is_bluray(path))
+            && self.video_audio_tracks.is_empty()
+        {
+            self.video_audio_tracks = crate::ffmpeg::disc_audio_tracks(path);
+            self.video_audio_sel = self
+                .video_audio_tracks
+                .iter()
+                .position(|t| crate::ffmpeg::is_english(&t.lang))
+                .unwrap_or(0);
+            if let Some(ord) = self.video_audio_choice.get(path).copied() {
+                if let Some(i) = self
+                    .video_audio_tracks
+                    .iter()
+                    .position(|t| t.ordinal == ord)
+                {
+                    self.video_audio_sel = i;
+                }
+            }
+        }
         let audio_map = self.video_audio_map();
         match spawn_video_audio_mapped(path, &ffmpeg_path(), seek, audio_map.as_deref()) {
             Ok((mut child, pipe)) => {
@@ -206,13 +225,12 @@ impl PlayerApp {
                     sink.pause();
                     sink.append(EqSource::new(pipe, self.eq_shared.clone()));
                     if !self.video_paused {
-                        if self.video_tex.is_some() {
-                            sink.play();
-                            av_log("audio started immediately (tex present)");
-                        } else {
-                            self.video_audio_pending = true;
-                            av_log("audio pending first frame");
-                        }
+                        // Always wait for the first frame of this new open,
+                        // including seeks and audio-track changes. Starting
+                        // audio against the old texture made the new audio run
+                        // ahead while the video reader was still opening.
+                        self.video_audio_pending = true;
+                        av_log("audio pending first frame");
                     }
                     let sink = std::sync::Arc::new(sink);
                     // Poll the audio clock off the UI thread. egui only paints
@@ -312,11 +330,20 @@ impl PlayerApp {
 
     /// ffmpeg map for the selected local audio track. Discs keep their own
     /// English/preferred mapping because their stream indexes are different.
-    pub(crate) fn video_audio_map(&self) -> Option<String> {
-        let path = self.video_current.as_deref()?;
-        if crate::dvd::is_dvd(path) || crate::bluray::is_bluray(path) {
-            return None;
+    /// Current position from the audio clock, which is more precise than the
+    /// once-per-second VideoPos message. Used when restarting for an audio or
+    /// upscale change so the picture does not jump back.
+    pub(crate) fn video_position_now(&self) -> f32 {
+        if let Some(s) = &self.video_sink {
+            if !self.video_ended {
+                return self.video_seek_base + s.get_pos().as_secs_f32();
+            }
         }
+        self.video_cur_secs
+    }
+
+    pub(crate) fn video_audio_map(&self) -> Option<String> {
+        let _path = self.video_current.as_deref()?;
         if self.video_audio_tracks.is_empty() {
             return None;
         }
@@ -375,7 +402,7 @@ impl PlayerApp {
             }
         }
         let label = self.video_audio_label();
-        let pos = self.video_cur_secs;
+        let pos = self.video_position_now();
         self.seek_video(pos);
         self.set_status(label);
     }
@@ -418,7 +445,7 @@ impl PlayerApp {
             self.save_settings();
         }
         let label = self.video_sub_label();
-        let pos = self.video_cur_secs;
+        let pos = self.video_position_now();
         self.seek_video(pos);
         self.set_status(label);
     }
@@ -455,7 +482,7 @@ impl PlayerApp {
             self.video_sub_choice.insert(p, format!("external:{}", ext));
             self.save_settings();
         }
-        let pos = self.video_cur_secs;
+        let pos = self.video_position_now();
         self.seek_video(pos);
         self.set_status("External subtitles enabled");
     }
@@ -538,7 +565,7 @@ impl PlayerApp {
         if apply {
             self.save_settings();
             if self.video_sub_sel.is_some() {
-                let pos = self.video_cur_secs;
+                let pos = self.video_position_now();
                 self.seek_video(pos);
             }
             self.set_status("Subtitle style updated");
@@ -564,7 +591,7 @@ impl PlayerApp {
         }
         self.video_gen += 1;
         let gen = self.video_gen;
-        let _ = self.lib_tx.send(LibCmd::VideoOpen { path: path.clone(), gen, seek: tsecs, subtitle: self.video_subtitle.clone(), sub_style: self.video_sub_style(), probe: false });
+        let _ = self.lib_tx.send(LibCmd::VideoOpen { path: path.clone(), gen, seek: tsecs, subtitle: self.video_subtitle.clone(), sub_style: self.video_sub_style(), dvd_upscale: self.dvd_upscale, probe: false });
         self.video_closing = false;
         self.video_paused = false;
         self.video_ended = false;
@@ -619,7 +646,7 @@ impl PlayerApp {
         self.video_subs.clear();
         self.video_sub_sel = None;
         self.video_subtitle = None;
-        let _ = self.lib_tx.send(LibCmd::VideoOpen { path: path.clone(), gen, seek: saved_pos, subtitle: None, sub_style: self.video_sub_style(), probe: true });
+        let _ = self.lib_tx.send(LibCmd::VideoOpen { path: path.clone(), gen, seek: saved_pos, subtitle: None, sub_style: self.video_sub_style(), dvd_upscale: self.dvd_upscale, probe: true });
         self.video_aspect = self.video_aspects.get(&path).copied().unwrap_or(self.video_aspect_default);
         self.video_on = true;
         self.video_paused = false;
@@ -944,6 +971,7 @@ impl PlayerApp {
             let mut subs_cycle = false;
             let mut open_subs = false;
             let mut open_sub_style = false;
+            let mut dvd_scale_toggle = false;
             // Shift-clicking INTRO / CREDS clears that marker instead of
             // setting it (egui 0.36 has no secondary-click sense).
             let shift = ctx.input(|i| i.modifiers.shift);
@@ -1063,7 +1091,7 @@ impl PlayerApp {
                         }
                         let bar2 = egui::Rect::from_min_size(
                             scr.min + egui::vec2(0.0, 30.0),
-                            egui::vec2(sw.min(660.0), 26.0),
+                            egui::vec2(sw.min(800.0), 26.0),
                         );
                         ui.painter().rect_filled(
                             bar2,
@@ -1121,6 +1149,36 @@ impl PlayerApp {
                             .clicked()
                         {
                             open_sub_style = true;
+                        }
+                        if self
+                            .video_current
+                            .as_deref()
+                            .map(crate::dvd::is_dvd)
+                            .unwrap_or(false)
+                        {
+                            let lbl = if self.dvd_upscale {
+                                "DVD SCALE: ON"
+                            } else {
+                                "DVD SCALE: OFF"
+                            };
+                            let col = if self.dvd_upscale {
+                                Color32::from_rgb(120, 255, 120)
+                            } else {
+                                Color32::from_gray(170)
+                            };
+                            if ui
+                                .put(
+                                    egui::Rect::from_min_size(
+                                        scr.min + egui::vec2(638.0, 33.0),
+                                        egui::vec2(150.0, 20.0),
+                                    ),
+                                    egui::Button::new(egui::RichText::new(lbl).color(col)),
+                                )
+                                .on_hover_text("Lanczos upscale and mild sharpening for DVD")
+                                .clicked()
+                            {
+                                dvd_scale_toggle = true;
+                            }
                         }
                     }
                     if self.video_bar_visible && !self.video_queue.is_empty() {
@@ -1253,6 +1311,17 @@ impl PlayerApp {
             if subs_cycle { self.cycle_video_subs(); }
             if open_subs { self.open_external_subs(); }
             if open_sub_style { self.video_sub_style_open = true; }
+            if dvd_scale_toggle {
+                self.dvd_upscale = !self.dvd_upscale;
+                self.save_settings();
+                let pos = self.video_position_now();
+                self.seek_video(pos);
+                self.set_status(if self.dvd_upscale {
+                    "DVD scale: Lanczos + sharpening"
+                } else {
+                    "DVD scale: standard"
+                });
+            }
             if prev { self.queue_prev(); }
             if next { self.queue_next(); }
             if togg {
@@ -1276,6 +1345,7 @@ impl PlayerApp {
         let mut subs_cycle = false;
         let mut open_subs = false;
         let mut open_sub_style = false;
+        let mut dvd_scale_toggle = false;
         egui::Area::new(egui::Id::new("movie_win"))
             .fixed_pos(self.video_pos)
             .order(egui::Order::Foreground)
@@ -1337,6 +1407,13 @@ impl PlayerApp {
                             if ui.button("Sub style").on_hover_text("Subtitle size, position and outline").clicked() {
                                 open_sub_style = true;
                             }
+                            if self.video_current.as_deref().map(crate::dvd::is_dvd).unwrap_or(false)
+                                && ui.button(if self.dvd_upscale { "DVD scale: on" } else { "DVD scale: off" })
+                                    .on_hover_text("Lanczos upscale and mild sharpening")
+                                    .clicked()
+                            {
+                                dvd_scale_toggle = true;
+                            }
                         });
                     });
             });
@@ -1349,6 +1426,17 @@ impl PlayerApp {
         if audio_cycle { self.cycle_video_audio(); }
         if subs_cycle { self.cycle_video_subs(); }
         if open_subs { self.open_external_subs(); }
+        if dvd_scale_toggle {
+            self.dvd_upscale = !self.dvd_upscale;
+            self.save_settings();
+            let pos = self.video_position_now();
+            self.seek_video(pos);
+            self.set_status(if self.dvd_upscale {
+                "DVD scale: Lanczos + sharpening"
+            } else {
+                "DVD scale: standard"
+            });
+        }
         if aspect_cycle {
             self.video_aspect = self.video_aspect.next();
             self.video_aspect_default = self.video_aspect;

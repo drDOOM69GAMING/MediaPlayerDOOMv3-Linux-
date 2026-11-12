@@ -1,6 +1,6 @@
 # MediaPlayerDOOM v3 for Linux
 
-![Version](https://img.shields.io/badge/version-3.2.50-blue)
+![Version](https://img.shields.io/badge/version-3.2.51-blue)
 ![Platform](https://img.shields.io/badge/platform-Linux%20x86__64-informational)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -71,6 +71,9 @@ This repository is the Linux port. It is tested on CachyOS and Arch with KDE Pla
 
 - DVD playback from the optical drive or an ISO image using ffmpeg dvdvideo and libdvdcss
 - Blu-ray playback from the optical drive, an ISO image or a folder using libbluray and libaacs
+- Audio track selection on DVDs and Blu-rays with the AUDIO button
+- DVD Lanczos upscaling with optional mild sharpening
+- Embedded DVD/Blu-ray bitmap subtitles are not rendered; use OPEN SUBS with an external SRT/ASS file
 - English audio is preferred and subtitles are off by default
 - Real time seeking for both formats
 - Smooth frame pacing with a 60 Hz movie present loop, a reused video texture, wall-clock presentation and slow audio drift correction

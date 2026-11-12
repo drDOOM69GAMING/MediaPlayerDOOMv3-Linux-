@@ -197,7 +197,7 @@ pub enum LibCmd {
     Record { display: String, audio: String, dest: String },
     RecordRadio { display: String, url: String, dest: String },
     FindMusicFolder,
-    VideoOpen { path: String, gen: u64, seek: f32, subtitle: Option<VideoSubtitle>, sub_style: SubtitleStyle, probe: bool },
+    VideoOpen { path: String, gen: u64, seek: f32, subtitle: Option<VideoSubtitle>, sub_style: SubtitleStyle, dvd_upscale: bool, probe: bool },
     VideoClose,
     VideoPause(bool),
     VideoAnalyze { path: String, gen: u64 },

@@ -390,6 +390,21 @@ pub fn bounds_from_chapters(chapters: &[(f32, f32, String)]) -> (f32, f32) {
     (intro_end, credits_start)
 }
 
+/// Same as `fit_video_dims`, but also scales small sources up to the target.
+/// Used for the DVD Lanczos path, where the whole point is a real upscale
+/// instead of letting the UI stretch a 720x480 texture.
+pub fn fit_video_dims_upscale(w: u32, h: u32, max_w: u32, max_h: u32) -> (u32, u32) {
+    if w == 0 || h == 0 || max_w == 0 || max_h == 0 {
+        return (640, 360);
+    }
+    let s = (max_w as f32 / w as f32).min(max_h as f32 / h as f32);
+    let mut tw = (w as f32 * s) as u32;
+    let mut th = (h as f32 * s) as u32;
+    if tw % 2 != 0 { tw = tw.saturating_sub(1); }
+    if th % 2 != 0 { th = th.saturating_sub(1); }
+    (tw.max(2), th.max(2))
+}
+
 pub fn fit_video_dims(w: u32, h: u32, max_w: u32, max_h: u32) -> (u32, u32) {
     if w == 0 || h == 0 || max_w == 0 || max_h == 0 {
         return (640, 360);
@@ -693,6 +708,75 @@ pub fn clear_audio_map_cache() {
     if let Ok(mut m) = audio_map_cache().lock() {
         m.clear();
     }
+    if let Ok(mut m) = disc_lang_cache().lock() {
+        m.clear();
+    }
+}
+
+fn disc_lang_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String, Vec<String>>> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, Vec<String>>>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Audio languages of the current DVD or Blu-ray title, in stream order.
+pub fn disc_audio_languages(path: &str) -> Vec<String> {
+    if let Ok(m) = disc_lang_cache().lock() {
+        if let Some(v) = m.get(path) {
+            return v.clone();
+        }
+    }
+    let dvd = crate::dvd::is_dvd(path);
+    let bd = crate::bluray::is_bluray(path);
+    if !dvd && !bd {
+        return Vec::new();
+    }
+    let langs = if bd {
+        crate::bluray::audio_languages(crate::bluray::source(path))
+    } else {
+        let fp = ffprobe_path();
+        if !fp.is_file() {
+            Vec::new()
+        } else {
+            let mut cmd = std::process::Command::new(fp);
+            cmd.args([
+                "-v",
+                "error",
+                "-select_streams",
+                "a",
+                "-show_entries",
+                "stream_tags=language",
+                "-of",
+                "json",
+                "-f",
+                "dvdvideo",
+            ]);
+            let input = crate::dvd::source(path).to_string();
+            match cmd.arg(input).no_window().output() {
+                Ok(out) if out.status.success() => {
+                    parse_audio_languages(&String::from_utf8_lossy(&out.stdout)).unwrap_or_default()
+                }
+                _ => Vec::new(),
+            }
+        }
+    };
+    if let Ok(mut m) = disc_lang_cache().lock() {
+        m.insert(path.to_string(), langs.clone());
+    }
+    langs
+}
+
+pub fn disc_audio_tracks(path: &str) -> Vec<crate::types::AudioStreamInfo> {
+    disc_audio_languages(path)
+        .into_iter()
+        .enumerate()
+        .map(|(i, lang)| crate::types::AudioStreamInfo {
+            ordinal: i,
+            lang,
+            title: String::new(),
+            channels: 0,
+        })
+        .collect()
 }
 
 pub fn preferred_audio_map(path: &str) -> Option<String> {
@@ -702,32 +786,7 @@ pub fn preferred_audio_map(path: &str) -> Option<String> {
             return Some(v.clone());
         }
     }
-    let dvd = crate::dvd::is_dvd(path);
-    let bd = crate::bluray::is_bluray(path);
-    if !dvd && !bd {
-        return None;
-    }
-    let fp = ffprobe_path();
-    if !fp.is_file() {
-        return None;
-    }
-    let mut cmd = std::process::Command::new(fp);
-    cmd.args(["-v", "error", "-select_streams", "a", "-show_entries", "stream_tags=language", "-of", "json"]);
-    if dvd {
-        cmd.args(["-f", "dvdvideo"]);
-    }
-    if bd {
-        if let Some(pl) = crate::bluray::playlist(path) {
-            cmd.args(["-playlist"]).arg(pl.to_string());
-        }
-        crate::bluray::configure_command(&mut cmd);
-    }
-    let input = if dvd { crate::dvd::source(path).to_string() } else if bd { format!("bluray:{}", crate::bluray::source(path)) } else { path.to_string() };
-    let out = cmd.arg(input).no_window().output().ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let langs = parse_audio_languages(&String::from_utf8_lossy(&out.stdout))?;
+    let langs = disc_audio_languages(path);
     if langs.is_empty() {
         return None;
     }
@@ -789,6 +848,12 @@ mod media_pipeline_tests {
             .expect("ffmpeg should start");
         assert!(st.success(), "ffmpeg failed to generate test media");
         out
+    }
+
+    #[test]
+    fn dvd_upscale_target_really_upscales() {
+        assert_eq!(fit_video_dims(720, 480, 1920, 1080), (720, 480));
+        assert_eq!(fit_video_dims_upscale(720, 480, 1920, 1080), (1620, 1080));
     }
 
     #[test]

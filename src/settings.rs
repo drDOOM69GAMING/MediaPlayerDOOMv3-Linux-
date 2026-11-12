@@ -99,6 +99,9 @@ pub struct Settings {
     /// Remembered subtitle choice per video path ("off", "embedded:N", "external:/path").
     #[serde(default)]
     pub video_sub_choice: HashMap<String, String>,
+    /// Lanczos upscale plus mild sharpening for DVDs.
+    #[serde(default = "default_dvd_upscale")]
+    pub dvd_upscale: bool,
 }
 
 pub fn default_video_volume() -> u32 {
@@ -123,6 +126,10 @@ pub fn default_subtitle_margin() -> u32 {
 
 pub fn default_subtitle_outline() -> u32 {
     2
+}
+
+pub fn default_dvd_upscale() -> bool {
+    true
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]

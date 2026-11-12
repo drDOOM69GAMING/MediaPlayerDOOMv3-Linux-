@@ -2595,7 +2595,9 @@ impl PlayerApp {
                 ui.label(RichText::new("Sub style ........... SUB STYLE sets size, bottom margin and outline; the values are saved").color(dim).monospace());
                 ui.label(RichText::new("Remember ............ The audio and subtitle choice is remembered for each video file").color(dim).monospace());
                 ui.label(RichText::new("Auto English ........ Enable it in SUBTITLE STYLE to turn on the first English subtitle").color(dim).monospace());
-                ui.label(RichText::new("Discs ............... DVD and Blu-ray keep their preferred English audio; external subtitles still work").color(dim).monospace());
+                ui.label(RichText::new("Disc audio .......... AUDIO cycles the audio tracks of a DVD or Blu-ray title").color(dim).monospace());
+                ui.label(RichText::new("DVD upscale ......... DVD SCALE toggles Lanczos upscaling with mild sharpening").color(dim).monospace());
+                ui.label(RichText::new("Disc subtitles ...... Embedded VobSub/PGS subtitles are not rendered; use OPEN SUBS for a text file").color(dim).monospace());
                 ui.add_space(6.0);
 
                 ui.label(RichText::new("DVD / BLU-RAY").color(acc).monospace().strong());

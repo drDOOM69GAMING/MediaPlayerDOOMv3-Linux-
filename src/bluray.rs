@@ -67,11 +67,13 @@ pub fn chapter(path: &str) -> Option<u32> {
     ch.parse::<u32>().ok()
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct TitleInfo {
     pub playlist: u32,
     pub secs: f32,
     pub chapters: u32,
+    /// Audio languages in stream order, as reported by bd_list_titles.
+    pub audio_langs: Vec<String>,
     /// 0-based audio stream index whose language is English, when known.
     pub english_audio: Option<usize>,
 }
@@ -85,7 +87,7 @@ pub fn main_title_info(source: &str) -> Option<TitleInfo> {
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     if let Ok(m) = cache.lock() {
         if let Some(v) = m.get(source) {
-            return *v;
+            return v.clone();
         }
     }
     let info = (|| {
@@ -147,16 +149,28 @@ pub fn main_title_info(source: &str) -> Option<TitleInfo> {
         let chosen = main_idx
             .and_then(|mi| titles.iter().find(|(i, _, _, _)| *i == mi).copied())
             .or_else(|| titles.iter().max_by_key(|(_, d, _, _)| *d).copied())?;
-        Some(TitleInfo { playlist: chosen.2, secs: chosen.1 as f32, chapters: chosen.3, english_audio: main_audio })
+        Some(TitleInfo {
+            playlist: chosen.2,
+            secs: chosen.1 as f32,
+            chapters: chosen.3,
+            audio_langs: audio_langs.clone(),
+            english_audio: main_audio,
+        })
     })();
     if let Ok(mut m) = cache.lock() {
-        m.insert(source.to_string(), info);
+        m.insert(source.to_string(), info.clone());
     }
     info
 }
 
 pub fn main_playlist(source: &str) -> Option<u32> {
     main_title_info(source).map(|i| i.playlist)
+}
+
+pub fn audio_languages(source: &str) -> Vec<String> {
+    main_title_info(source)
+        .map(|i| i.audio_langs)
+        .unwrap_or_default()
 }
 
 pub fn english_audio_map(source: &str) -> Option<String> {

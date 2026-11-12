@@ -379,6 +379,7 @@ pub(crate) struct PlayerApp {
     pub(crate) video_sub_outline: u32,
     pub(crate) video_sub_style_open: bool,
     pub(crate) video_auto_subs: bool,
+    pub(crate) dvd_upscale: bool,
     pub(crate) video_audio_choice: HashMap<String, usize>,
     pub(crate) video_sub_choice: HashMap<String, String>,
     pub(crate) video_pos: egui::Pos2,
@@ -488,6 +489,7 @@ impl PlayerApp {
         let mut subtitle_margin = 40u32;
         let mut subtitle_outline = 2u32;
         let mut video_auto_subs = false;
+        let mut dvd_upscale = true;
         let mut video_audio_choice: HashMap<String, usize> = HashMap::new();
         let mut video_sub_choice: HashMap<String, String> = HashMap::new();
         let mut last_cd_dir: Option<String> = None;
@@ -547,6 +549,7 @@ impl PlayerApp {
                 subtitle_margin = s.subtitle_margin.min(240);
                 subtitle_outline = s.subtitle_outline.min(6);
                 video_auto_subs = s.video_auto_subs;
+                dvd_upscale = s.dvd_upscale;
                 video_audio_choice = s.video_audio_choice;
                 video_sub_choice = s.video_sub_choice;
             }
@@ -613,6 +616,7 @@ impl PlayerApp {
                 subtitle_margin,
                 subtitle_outline,
                 video_auto_subs,
+                dvd_upscale,
                 video_audio_choice: video_audio_choice.clone(),
                 video_sub_choice: video_sub_choice.clone(),
             };
@@ -959,6 +963,7 @@ impl PlayerApp {
             video_sub_outline: subtitle_outline,
             video_sub_style_open: false,
             video_auto_subs,
+            dvd_upscale,
             video_audio_choice,
             video_sub_choice,
             video_pos: egui::pos2(60.0, 60.0),
@@ -1349,6 +1354,7 @@ video_ended: false,
             subtitle_margin: self.video_sub_margin,
             subtitle_outline: self.video_sub_outline,
             video_auto_subs: self.video_auto_subs,
+            dvd_upscale: self.dvd_upscale,
             video_audio_choice: self.video_audio_choice.clone(),
             video_sub_choice: self.video_sub_choice.clone(),
         };

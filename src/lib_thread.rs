@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use lofty::prelude::*;
 use crate::consts::NO_WINDOW;
-use crate::ffmpeg::{bounds_from_chapters, cut_video_file, detect_credit_start, detect_intro_end, fit_video_dims, probe_chapters, probe_dvd_meta, probe_video_duration, probe_video_info, probe_video_streams, video_audio_levels};
+use crate::ffmpeg::{bounds_from_chapters, cut_video_file, detect_credit_start, detect_intro_end, fit_video_dims, fit_video_dims_upscale, probe_chapters, probe_dvd_meta, probe_video_duration, probe_video_info, probe_video_streams, video_audio_levels};
 use crate::files::*;
 use crate::library::{art_cache_ok, art_cache_path, write_art_cache};
 use crate::log::av_log;
@@ -345,7 +345,7 @@ LibCmd::Scan(dir) => {
                     let _ = tx2.send(Msg::FolderFound { folder });
                 });
             }
-            LibCmd::VideoOpen { path, gen, seek, subtitle, sub_style, probe } => {
+            LibCmd::VideoOpen { path, gen, seek, subtitle, sub_style, dvd_upscale, probe } => {
                 av_log(&format!("open: RECEIVED gen={} (queue behind previous cmd?)", gen));
                 // A paused reader never reads its pipe, so it can't notice the
                 // old ffmpeg child being killed below and would never exit -
@@ -384,7 +384,11 @@ LibCmd::Scan(dir) => {
                     }
                 };
                 av_log(&format!("open: probe_info {}x{} fps={} took {}ms", sw, sh, sfps, t_open.elapsed().as_millis()));
-                let (tw, th) = fit_video_dims(sw, sh, 1920, 1080);
+                let (tw, th) = if dvd && dvd_upscale {
+                    fit_video_dims_upscale(sw, sh, 1920, 1080)
+                } else {
+                    fit_video_dims(sw, sh, 1920, 1080)
+                };
                 let fps = if sfps > 0.0 { sfps } else { 24.0 };
                 // libbluray's own time seek works even though ffmpeg's
                 // bluray: protocol cannot seek this disc. Stream the title
@@ -474,10 +478,17 @@ LibCmd::Scan(dir) => {
                     // DVDs are usually 480i/576i (or soft-telecined). Scaling
                     // interlaced fields directly produces combing/tearing that
                     // looks like corruption, so deinterlace first. Progressive
-                    // frames are passed through by deint=interlaced.
-                    format!(
-                        "yadif=deint=interlaced,scale={tw}:{th}:force_original_aspect_ratio=decrease,pad={tw}:{th}:(ow-iw)/2:(oh-ih)/2"
-                    )
+                    // frames are passed through by deint=interlaced. Lanczos
+                    // and a mild unsharp pass make the 480/576 upscale cleaner.
+                    if dvd_upscale {
+                        format!(
+                            "yadif=deint=interlaced,scale={tw}:{th}:force_original_aspect_ratio=decrease:flags=lanczos,pad={tw}:{th}:(ow-iw)/2:(oh-ih)/2,unsharp=3:3:0.8:3:3:0.0"
+                        )
+                    } else {
+                        format!(
+                            "yadif=deint=interlaced,scale={tw}:{th}:force_original_aspect_ratio=decrease,pad={tw}:{th}:(ow-iw)/2:(oh-ih)/2"
+                        )
+                    }
                 } else {
                     format!(
                         "scale={tw}:{th}:force_original_aspect_ratio=decrease,pad={tw}:{th}:(ow-iw)/2:(oh-ih)/2"

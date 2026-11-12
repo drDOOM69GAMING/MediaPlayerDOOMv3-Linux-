@@ -1,5 +1,18 @@
 # Changelog
 
+## v3.2.51
+
+- The AUDIO button now lists and cycles the audio tracks of a DVD or Blu-ray title.
+- Disc audio languages are read from the DVD/Blu-ray title; the English track is still the default.
+- The chosen disc audio track is remembered per title.
+- Added a DVD SCALE toggle with Lanczos upscaling and a mild 3x3 unsharp pass, enabled by default.
+- Fixed DVD upscaling being a no-op: the frame target now really upscales 480/576 video to 1620x1080.
+- Audio now waits for the first frame after a seek, audio-track change or scale change, fixing the A/V drift.
+- Track and scale changes resume from the audio clock position instead of the last one-second UI tick.
+- Reduced the DVD sharpening cost by using a 3x3 kernel.
+- The DVD scale setting is saved and can be switched while a movie is playing.
+- Embedded DVD/Blu-ray bitmap subtitles (VobSub/PGS) are still not rendered; use OPEN SUBS for a text subtitle file.
+
 ## v3.2.50
 
 - Widened the sidebar so band and album names have more room.
