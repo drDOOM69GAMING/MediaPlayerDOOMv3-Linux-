@@ -1,6 +1,6 @@
 # MediaPlayerDOOM v3 for Linux
 
-![Version](https://img.shields.io/badge/version-3.2.55-blue)
+![Version](https://img.shields.io/badge/version-3.2.56-blue)
 ![Platform](https://img.shields.io/badge/platform-Linux%20x86__64-informational)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -90,6 +90,7 @@ This repository is the Linux port. It is tested on CachyOS and Arch with KDE Pla
 - AACS and BD+ status with Disc ID, KEYDB match, MKB version and BD+ table count
 - BD+ tables in `~/.config/bdplus` are used automatically when libbdplus is available; otherwise the app falls back to MakeMKV
 - A user-supplied `libbdplus.so` can be placed in the app tools folder or `~/.local/lib` and is loaded through LIBBDPLUS_PATH
+- If MakeMKV is missing, DUMP TO MKV falls back to `bd_splice` + ffmpeg for the main Blu-ray movie using the local AACS/BD+ data
 - CHECK AACS re-reads the disc and updates the status
 - AACS keys are read from the user KEYDB and are never bundled with the app
 

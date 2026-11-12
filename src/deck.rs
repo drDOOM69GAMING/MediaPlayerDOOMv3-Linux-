@@ -1184,7 +1184,7 @@ impl PlayerApp {
         let tx = self.msg_tx.clone();
         let cancel = self.disc_dump_cancel.clone();
         self.disc_dump_thread = Some(std::thread::spawn(move || {
-            match crate::disc::dump_to_mkv(&source_spec, &out, total, &tx, &cancel) {
+            match crate::disc::dump_to_mkv(&source_spec, &out, total, &tx, &cancel, !is_dvd) {
                 Ok(path) => {
                     let _ = tx.send(Msg::DiscDumpDone(path.to_string_lossy().to_string()));
                 }

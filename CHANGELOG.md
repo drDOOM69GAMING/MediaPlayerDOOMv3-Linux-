@@ -1,5 +1,13 @@
 # Changelog
 
+## v3.2.56
+
+- Added a local libbdplus path: a `libbdplus.so` in the app tools folder or `~/.local/lib` is loaded through `LIBBDPLUS_PATH`.
+- `bd_list_titles` and `bd_info` now use the same AACS/BD+ config environment, so the BD+ tables are visible to every Blu-ray probe.
+- When MakeMKV is missing, DUMP TO MKV falls back to `bd_splice` + ffmpeg for the main Blu-ray movie.
+- The local fallback uses the user's AACS KEYDB and BD+ tables. It is main-title only; menus and extras still require MakeMKV.
+- The local BD+ tables are detected and counted in the deck.
+
 ## v3.2.55
 
 - The Blu-ray deck now detects BD+ tables in `~/.config/bdplus` and counts the convtab files.

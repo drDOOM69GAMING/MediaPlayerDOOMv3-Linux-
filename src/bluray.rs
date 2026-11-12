@@ -91,11 +91,10 @@ pub fn main_title_info(source: &str) -> Option<TitleInfo> {
         }
     }
     let info = (|| {
-        let out = std::process::Command::new("bd_list_titles")
-            .args(["-l", "-a"])
-            .arg(source)
-            .output()
-            .ok()?;
+        let mut cmd = std::process::Command::new("bd_list_titles");
+        cmd.args(["-l", "-a"]).arg(source);
+        configure_command(&mut cmd);
+        let out = cmd.output().ok()?;
         if !out.status.success() {
             return None;
         }

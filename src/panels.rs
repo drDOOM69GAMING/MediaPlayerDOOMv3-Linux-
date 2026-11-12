@@ -2691,7 +2691,7 @@ impl PlayerApp {
                 ui.label(RichText::new("DVD tools ........... libdvdread + libdvdnav + libdvdcss; CachyOS/Arch: sudo pacman -S libdvdread libdvdnav libdvdcss").color(dim).monospace());
                 ui.label(RichText::new("DVD tools (Debian) .. libdvdread4 + libdvdnav4 + libdvdcss2; sudo apt install libdvdread4 libdvdnav4 libdvdcss2").color(dim).monospace());
                 ui.label(RichText::new("Dump tools .......... dvdbackup (bundled CachyOS build) + genisoimage; MakeMKV is used for MKV and as ISO fallback").color(dim).monospace());
-                ui.label(RichText::new("DUMP TO MKV ........ Decrypt and remux every title to clean MKV files (MakeMKV); works from the open image or the physical disc").color(dim).monospace());
+                ui.label(RichText::new("DUMP TO MKV ........ Every title via MakeMKV; if MakeMKV is missing, the main Blu-ray movie is dumped locally with bd_splice + ffmpeg").color(dim).monospace());
                 ui.label(RichText::new("DUMP TO ISO (DVD) ... dvdbackup + genisoimage (or MakeMKV backup --decrypt) to a clean, playable ISO").color(dim).monospace());
                 ui.label(RichText::new("DUMP TO ISO (BD) .... Full disc with menus/extras: MakeMKV backup --decrypt removes AACS/BD+, then a UDF ISO is built").color(dim).monospace());
                 ui.label(RichText::new("UDF 2.50 ............ Built in. Blu-ray ISO uses a UDF 2.50 metadata partition so standalone players accept the disc").color(dim).monospace());

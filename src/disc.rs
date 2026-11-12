@@ -312,14 +312,154 @@ pub fn mkv_output_dir(dir: &Path, label: &str) -> PathBuf {
     dir.join(format!("{} (MKV)", label))
 }
 
-/// Decrypt/remux a disc or ISO to clean MKV files with MakeMKV. MakeMKV's
-/// `mkv` mode always decrypts, so the output never carries CSS/AACS.
+/// Local Blu-ray main-title dump without MakeMKV. bd_splice uses libbluray's
+/// decryption paths, including libaacs and libbdplus with the user's own
+/// tables. It produces the main movie, not menus or extras.
+fn dump_bluray_mkv_local(
+    source_spec: &str,
+    out_dir: &Path,
+    total: u64,
+    tx: &Sender<Msg>,
+    cancel: &AtomicBool,
+) -> Result<PathBuf, String> {
+    let source = if let Some(p) = source_spec.strip_prefix("file:") {
+        p.to_string()
+    } else if let Some(p) = source_spec.strip_prefix("iso:") {
+        p.to_string()
+    } else if source_spec == "disc:0" {
+        crate::bluray::first_drive().ok_or("Local BD+ dump: no optical drive found")?
+    } else {
+        source_spec.to_string()
+    };
+    let playlist = crate::bluray::main_playlist(&source)
+        .ok_or("Local BD+ dump: could not determine the main playlist")?;
+    let splice = crate::tools::which("bd_splice")
+        .ok_or("Local BD+ dump needs bd_splice, and it is not installed")?;
+    std::fs::create_dir_all(out_dir)
+        .map_err(|e| format!("cannot create {}: {}", out_dir.display(), e))?;
+    let temp = out_dir.join(format!(".mpdoom-bd-splice-{}.ts", std::process::id()));
+    let _ = std::fs::remove_file(&temp);
+    let _ = tx.send(Msg::DiscDumpProgress {
+        done: 0,
+        total,
+        text: format!(
+            "Local BD+ dump with libbluray/bd_splice (playlist {})...",
+            playlist
+        ),
+    });
+
+    let mut cmd = Command::new(splice);
+    cmd.args(["-p", &playlist.to_string()])
+        .arg(&source)
+        .arg(&temp)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    crate::bluray::configure_command(&mut cmd);
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+                Ok(())
+            });
+        }
+    }
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("Local BD+ dump: bd_splice failed to start: {}", e))?;
+    let err_handle = child.stderr.take().map(|mut e| {
+        std::thread::spawn(move || {
+            let mut s = String::new();
+            let _ = e.read_to_string(&mut s);
+            s
+        })
+    });
+    let mut last_sent = Instant::now() - Duration::from_secs(5);
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = std::fs::remove_file(&temp);
+            return Err("cancelled".into());
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if !status.success() {
+                    let err = err_handle.and_then(|h| h.join().ok()).unwrap_or_default();
+                    let _ = std::fs::remove_file(&temp);
+                    let tail = err.lines().rev().take(3).collect::<Vec<_>>().join(" | ");
+                    return Err(format!(
+                        "Local BD+ dump failed{}",
+                        if tail.is_empty() { String::new() } else { format!(": {}", tail) }
+                    ));
+                }
+                break;
+            }
+            Ok(None) => {}
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = std::fs::remove_file(&temp);
+                return Err(format!("Local BD+ dump error: {}", e));
+            }
+        }
+        if last_sent.elapsed() >= Duration::from_millis(500) {
+            last_sent = Instant::now();
+            let done = std::fs::metadata(&temp).map(|m| m.len()).unwrap_or(0);
+            let _ = tx.send(Msg::DiscDumpProgress {
+                done,
+                total,
+                text: format!(
+                    "Local BD+ dump... {:.1} GB",
+                    done as f64 / 1e9
+                ),
+            });
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    let out = out_dir.join("Main Movie.mkv");
+    let _ = std::fs::remove_file(&out);
+    let mut ff = Command::new(crate::tools::ffmpeg_path());
+    ff.args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
+        .arg(&temp)
+        .args(["-map", "0", "-c", "copy"])
+        .arg(&out)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    let st = ff
+        .output()
+        .map_err(|e| format!("Local BD+ remux failed: ffmpeg: {}", e))?;
+    let _ = std::fs::remove_file(&temp);
+    if !st.status.success() || std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0) == 0 {
+        let _ = std::fs::remove_file(&out);
+        let tail = String::from_utf8_lossy(&st.stderr)
+            .lines()
+            .rev()
+            .take(3)
+            .collect::<Vec<_>>()
+            .join(" | ");
+        return Err(format!("Local BD+ remux failed: {}", tail));
+    }
+    let _ = tx.send(Msg::DiscDumpProgress {
+        done: total,
+        total,
+        text: format!("Local BD+ dump complete: {}", out.display()),
+    });
+    Ok(out_dir.to_path_buf())
+}
+
+/// Decrypt/remux a disc or ISO to clean MKV files with MakeMKV. When MakeMKV
+/// is missing and the source is a Blu-ray, fall back to the local bd_splice
+/// main-title path, which uses the user's AACS/BD+ data.
 pub fn dump_to_mkv(
     source_spec: &str,
     out_dir: &Path,
     total: u64,
     tx: &Sender<Msg>,
     cancel: &AtomicBool,
+    bluray: bool,
 ) -> Result<PathBuf, String> {
     #[cfg(windows)]
     {
@@ -328,6 +468,9 @@ pub fn dump_to_mkv(
     }
     #[cfg(not(windows))]
     {
+    if bluray && crate::tools::which("makemkvcon").is_none() {
+        return dump_bluray_mkv_local(source_spec, out_dir, total, tx, cancel);
+    }
     std::fs::create_dir_all(out_dir)
         .map_err(|e| format!("cannot create {}: {}", out_dir.display(), e))?;
     let _ = tx.send(Msg::DiscDumpProgress {
