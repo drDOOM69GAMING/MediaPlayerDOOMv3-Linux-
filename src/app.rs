@@ -312,6 +312,8 @@ pub(crate) struct PlayerApp {
     pub(crate) disc_dump_speed: f32,
     pub(crate) disc_dump_last_done: u64,
     pub(crate) disc_dump_last_at: Instant,
+    /// RIP + PLAY: auto-play the MKV as soon as the MakeMKV dump completes.
+    pub(crate) rip_play_pending: bool,
     /// Latest AACS/BD+ probe for the Blu-ray deck.
     pub(crate) bluray_prot: Option<crate::bluray::DiscProtection>,
     pub(crate) bluray_prot_source: Option<String>,
@@ -912,6 +914,7 @@ impl PlayerApp {
             disc_dump_speed: 0.0,
             disc_dump_last_done: 0,
             disc_dump_last_at: Instant::now(),
+            rip_play_pending: false,
             bluray_prot: None,
             bluray_prot_source: None,
             bluray_prot_pending: false,
@@ -2953,14 +2956,28 @@ video_ended: false,
                 self.set_status(text);
             }
             Msg::DiscDumpDone(path) => {
+                let maybe_play = if self.rip_play_pending {
+                    crate::disc::first_mkv_in(std::path::Path::new(&path))
+                } else {
+                    None
+                };
+                self.rip_play_pending = false;
                 self.finish_disc_dump();
-                self.set_status(format!("Dump finished: {}", path));
+                match maybe_play {
+                    Some(mkv) => {
+                        self.set_status(format!("RIP + PLAY: {}", mkv.display()));
+                        self.start_video(mkv.to_string_lossy().to_string());
+                    }
+                    None => self.set_status(format!("Dump finished: {}", path)),
+                }
             }
             Msg::DiscDumpFail(e) => {
+                self.rip_play_pending = false;
                 self.finish_disc_dump();
                 self.set_error(format!("Disc dump failed: {}", e));
             }
             Msg::DiscDumpCancelled => {
+                self.rip_play_pending = false;
                 self.finish_disc_dump();
                 self.set_status("Disc dump cancelled");
             }

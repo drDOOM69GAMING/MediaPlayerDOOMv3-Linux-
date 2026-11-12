@@ -289,6 +289,64 @@ fn contains_mkv(path: &Path) -> bool {
     false
 }
 
+/// First MKV found under a dump folder, used to auto-play a RIP + PLAY result.
+pub fn first_mkv_in(path: &Path) -> Option<PathBuf> {
+    let rd = std::fs::read_dir(path).ok()?;
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            if let Some(found) = first_mkv_in(&p) {
+                return Some(found);
+            }
+        } else if p.extension().and_then(|x| x.to_str()).map(|x| x.eq_ignore_ascii_case("mkv")).unwrap_or(false) {
+            return Some(p);
+        }
+    }
+    None
+}
+
+fn parse_hms(v: &str) -> Option<u64> {
+    let mut secs = 0u64;
+    let mut parts = 0;
+    for (i, p) in v.split(':').rev().enumerate() {
+        let n: u64 = p.trim().parse().ok()?;
+        secs += n.checked_mul(60u64.pow(i as u32))?;
+        parts += 1;
+    }
+    if parts == 0 { None } else { Some(secs) }
+}
+
+/// Ask MakeMKV for its title list and return the longest title (usually the
+/// main feature). Robot mode prints `TINFO:<id>,9,0,"H:MM:SS"` for duration.
+pub fn makemkv_main_title(source_spec: &str) -> Option<u32> {
+    let out = Command::new("makemkvcon")
+        .args(["-r", "info", source_spec])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    parse_makemkv_title_list(&String::from_utf8_lossy(&out.stdout))
+}
+
+fn parse_makemkv_title_list(text: &str) -> Option<u32> {
+    let mut best: Option<(u32, u64)> = None;
+    for line in text.lines() {
+        let Some(rest) = line.strip_prefix("TINFO:") else { continue };
+        let mut parts = rest.splitn(3, ',');
+        let Some(id) = parts.next().and_then(|v| v.trim().parse::<u32>().ok()) else { continue };
+        let Some(code) = parts.next().map(|v| v.trim()) else { continue };
+        if code != "9" {
+            continue;
+        }
+        let value = line.rsplit(',').next().unwrap_or("").trim().trim_matches('"');
+        let Some(secs) = parse_hms(value) else { continue };
+        if best.map(|(_, b)| secs > b).unwrap_or(true) {
+            best = Some((id, secs));
+        }
+    }
+    best.map(|(id, _)| id)
+}
+
 /// Unique output folder for a clean MKV dump, named `<label> (MKV)`.
 pub fn mkv_output_dir(dir: &Path, label: &str) -> PathBuf {
     let trimmed = label.trim();
@@ -461,6 +519,24 @@ pub fn dump_to_mkv(
     cancel: &AtomicBool,
     bluray: bool,
 ) -> Result<PathBuf, String> {
+    #[cfg(not(windows))]
+    if bluray && crate::tools::which("makemkvcon").is_none() {
+        return dump_bluray_mkv_local(source_spec, out_dir, total, tx, cancel);
+    }
+    #[cfg(windows)]
+    let _ = bluray;
+    makemkv_dump(source_spec, out_dir, total, tx, cancel, "all")
+}
+
+/// RIP + PLAY: MakeMKV decrypts the disc (including AACS bus encryption) and
+/// writes only the longest title, which the app plays as soon as it is ready.
+pub fn dump_main_title_mkv(
+    source_spec: &str,
+    out_dir: &Path,
+    total: u64,
+    tx: &Sender<Msg>,
+    cancel: &AtomicBool,
+) -> Result<PathBuf, String> {
     #[cfg(windows)]
     {
         let _ = (source_spec, out_dir, total, tx, cancel);
@@ -468,9 +544,38 @@ pub fn dump_to_mkv(
     }
     #[cfg(not(windows))]
     {
-    if bluray && crate::tools::which("makemkvcon").is_none() {
-        return dump_bluray_mkv_local(source_spec, out_dir, total, tx, cancel);
+        if crate::tools::which("makemkvcon").is_none() {
+            return Err(
+                "RIP + PLAY needs MakeMKV (makemkvcon) for bus-encrypted discs; \
+                 install MakeMKV or use DUMP TO ISO"
+                    .into(),
+            );
+        }
+        let _ = tx.send(Msg::DiscDumpProgress {
+            done: 0,
+            total,
+            text: "RIP + PLAY: finding the main title with MakeMKV...".to_string(),
+        });
+        let title = makemkv_main_title(source_spec).unwrap_or(0);
+        makemkv_dump(source_spec, out_dir, total, tx, cancel, &title.to_string())
     }
+}
+
+fn makemkv_dump(
+    source_spec: &str,
+    out_dir: &Path,
+    total: u64,
+    tx: &Sender<Msg>,
+    cancel: &AtomicBool,
+    titles: &str,
+) -> Result<PathBuf, String> {
+    #[cfg(windows)]
+    {
+        let _ = (source_spec, out_dir, total, tx, cancel, titles);
+        return Err("MKV dumping is only supported on Linux".into());
+    }
+    #[cfg(not(windows))]
+    {
     std::fs::create_dir_all(out_dir)
         .map_err(|e| format!("cannot create {}: {}", out_dir.display(), e))?;
     let _ = tx.send(Msg::DiscDumpProgress {
@@ -479,7 +584,7 @@ pub fn dump_to_mkv(
         text: format!("Dumping to MKV in {}...", out_dir.display()),
     });
     let mut cmd = Command::new("makemkvcon");
-    cmd.args(["-r", "mkv", "--minlength=0", source_spec, "all"])
+    cmd.args(["-r", "mkv", "--minlength=0", source_spec, titles])
         .arg(out_dir)
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
@@ -1305,6 +1410,16 @@ fn find_bdmv_root(root: &Path) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn makemkv_title_list_picks_longest_title() {
+        let text = "TCOUNT:3\nTINFO:0,9,0,\"0:02:11\"\nTINFO:1,9,0,\"2:13:45\"\nTINFO:2,9,0,\"0:31:00\"\nTINFO:1,16,0,\"Main Feature\"\n";
+        assert_eq!(parse_makemkv_title_list(text), Some(1));
+        assert_eq!(parse_hms("2:13:45"), Some(8025));
+        assert_eq!(parse_hms("0:07"), Some(7));
+    }
+
     use super::*;
 
     #[test]

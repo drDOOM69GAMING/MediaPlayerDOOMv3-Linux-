@@ -374,6 +374,8 @@ pub struct DiscProtection {
     pub bd_j: bool,
     pub aacs: bool,
     pub aacs_handled: bool,
+    /// libaacs could not initialize AACS bus encryption for this drive/disc.
+    pub bus_encryption: bool,
     pub bd_plus: bool,
     pub bd_plus_handled: bool,
     pub libbdplus: bool,
@@ -399,6 +401,9 @@ impl DiscProtection {
         } else {
             "NO AACS"
         };
+        if self.bus_encryption {
+            return format!("AACS BUS ENCRYPTION  •  {}  •  {}", if self.keydb_match { "KEYDB MATCH" } else { "KEYDB NO MATCH" }, if self.bd_plus { "BD+ YES" } else { "BD+ NO" });
+        }
         let bd = if !self.bd_plus {
             "BD+ NO"
         } else if self.bd_plus_handled {
@@ -421,7 +426,9 @@ impl DiscProtection {
     }
 
     pub fn needs_makemkv(&self) -> bool {
-        (self.bd_plus && !self.bd_plus_handled) || (self.aacs && !self.aacs_handled)
+        self.bus_encryption
+            || (self.bd_plus && !self.bd_plus_handled)
+            || (self.aacs && !self.aacs_handled)
     }
 }
 
@@ -457,6 +464,11 @@ pub fn parse_bd_info(text: &str) -> DiscProtection {
             "libbdplus detected" => d.libbdplus = parse_yes(val),
             _ => {}
         }
+    }
+    if text.to_ascii_lowercase().contains("bus encryption")
+        || text.to_ascii_lowercase().contains("host key / certificate")
+    {
+        d.bus_encryption = true;
     }
     d
 }
@@ -504,11 +516,19 @@ fn run_bd_info(source: &str) -> Option<String> {
     let mut cmd = Command::new("bd_info");
     cmd.arg(source)
         .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+        .stderr(Stdio::piped());
     configure_command(&mut cmd);
     let mut child = cmd.spawn().ok()?;
     let mut stdout = child.stdout.take()?;
+    let mut stderr = child.stderr.take();
     let (tx, rx) = std::sync::mpsc::channel();
+    let err_handle = std::thread::spawn(move || {
+        let mut s = String::new();
+        if let Some(mut e) = stderr.take() {
+            let _ = e.read_to_string(&mut s);
+        }
+        s
+    });
     std::thread::spawn(move || {
         let mut s = String::new();
         let _ = stdout.read_to_string(&mut s);
@@ -518,7 +538,13 @@ fn run_bd_info(source: &str) -> Option<String> {
     loop {
         match child.try_wait() {
             Ok(Some(_)) => {
-                return rx.recv_timeout(Duration::from_secs(2)).ok();
+                let mut text = rx.recv_timeout(Duration::from_secs(2)).ok()?;
+                let err = err_handle.join().unwrap_or_default();
+                if !err.is_empty() {
+                    text.push('\n');
+                    text.push_str(&err);
+                }
+                return Some(text);
             }
             Ok(None) => {}
             Err(_) => return None,
@@ -598,6 +624,15 @@ mod tests {
         let bdplus = parse_bd_info("BluRay detected: yes\nAACS detected: yes\nAACS handled: no\nBD+ detected: yes\n");
         assert!(bdplus.needs_makemkv());
         assert!(bdplus.bd_plus);
+    }
+
+    #[test]
+    fn protection_flags_aacs_bus_encryption() {
+        let text = "BluRay detected     : yes\nAACS detected       : yes\nAACS handled        : yes\nBD+ detected        : no\n\nmmc.c:472: Host key / Certificate (id 0xffff800001c1) has been revoked by your drive ?\naacs.c:1368: Unable to initialize bus encryption required by drive and disc\n";
+        let p = parse_bd_info(text);
+        assert!(p.bus_encryption, "stderr must mark bus encryption");
+        assert!(p.needs_makemkv(), "bus encryption needs MakeMKV");
+        assert!(p.summary().contains("BUS ENCRYPTION"));
     }
 
     #[test]

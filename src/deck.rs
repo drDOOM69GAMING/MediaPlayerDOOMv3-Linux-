@@ -1212,6 +1212,92 @@ impl PlayerApp {
     }
 
     /// Clear dump state after the worker reports success/failure/cancel.
+    /// RIP + PLAY for Blu-rays that plain libaacs cannot open (AACS bus
+    /// encryption, revoked host key, unhandled BD+). MakeMKV decrypts the
+    /// longest title, then the app starts it automatically.
+    pub(crate) fn start_rip_and_play(&mut self) {
+        if self.disc_dumping {
+            return;
+        }
+        let current = self
+            .video_current
+            .clone()
+            .filter(|p| crate::bluray::is_bluray(p));
+        let current_src = current
+            .as_deref()
+            .map(crate::bluray::source)
+            .map(|s| s.to_string());
+        let (source_spec, label, total, physical) = match current_src {
+            Some(src) if !src.starts_with("/dev/") => {
+                let path = PathBuf::from(&src);
+                let is_dir = path.is_dir();
+                let label = if is_dir {
+                    path.file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "BLU-RAY".to_string())
+                } else {
+                    path.file_stem()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "BLU-RAY".to_string())
+                };
+                let total = if is_dir {
+                    crate::disc::dir_size(&path)
+                } else {
+                    std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0)
+                };
+                let spec = if is_dir {
+                    format!("file:{}", src)
+                } else {
+                    format!("iso:{}", src)
+                };
+                (spec, label, total, false)
+            }
+            _ => {
+                let Some(device) = crate::bluray::first_drive() else {
+                    self.set_error("No optical drive found");
+                    return;
+                };
+                let label = crate::disc::disc_label(&device).unwrap_or_else(|| "BLU-RAY".to_string());
+                let total = crate::disc::device_size(&device).unwrap_or(0);
+                (String::from("disc:0"), label, total, true)
+            }
+        };
+        if physical {
+            // MakeMKV needs exclusive access to the drive.
+            self.close_video();
+        }
+        let out = crate::disc::mkv_output_dir(&crate::disc::videos_dir(), &label);
+        if let Some(h) = self.disc_dump_thread.take() {
+            let _ = h.join();
+        }
+        self.disc_dump_cancel.store(false, Ordering::Relaxed);
+        self.disc_dumping = true;
+        self.disc_dump_done = 0;
+        self.disc_dump_total = 0;
+        self.disc_dump_speed = 0.0;
+        self.disc_dump_last_done = 0;
+        self.disc_dump_last_at = Instant::now();
+        self.rip_play_pending = true;
+        let text = format!("RIP + PLAY: decrypting the main title into {}", out.display());
+        self.disc_dump_text = text.clone();
+        self.set_status(text);
+        let tx = self.msg_tx.clone();
+        let cancel = self.disc_dump_cancel.clone();
+        self.disc_dump_thread = Some(std::thread::spawn(move || {
+            match crate::disc::dump_main_title_mkv(&source_spec, &out, total, &tx, &cancel) {
+                Ok(path) => {
+                    let _ = tx.send(Msg::DiscDumpDone(path.to_string_lossy().to_string()));
+                }
+                Err(_) if cancel.load(Ordering::Relaxed) => {
+                    let _ = tx.send(Msg::DiscDumpCancelled);
+                }
+                Err(e) => {
+                    let _ = tx.send(Msg::DiscDumpFail(e));
+                }
+            }
+        }));
+    }
+
     pub(crate) fn finish_disc_dump(&mut self) {
         self.disc_dumping = false;
         self.disc_dump_done = 0;

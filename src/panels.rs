@@ -1127,6 +1127,11 @@ impl PlayerApp {
                     let prot = self.bluray_prot.clone();
                     let prot_pending = self.bluray_prot_pending;
                     let mut check_aacs = false;
+                    let mut rip_play = false;
+                    let needs_rip_play = prot
+                        .as_ref()
+                        .map(|p| p.bluray && p.needs_makemkv())
+                        .unwrap_or(false);
                     ui.horizontal(|ui| {
                         ui.vertical(|ui| {
                             ui.label(RichText::new("BLU-RAY VIDEO").color(th.accent).monospace().strong().size(16.0));
@@ -1184,6 +1189,16 @@ impl PlayerApp {
                                             .size(8.0),
                                     );
                                 }
+                                if p.bus_encryption {
+                                    ui.label(
+                                        RichText::new(
+                                            "AACS BUS ENCRYPTION: libaacs cannot open this drive/disc (revoked host key or drive bus-encryption mismatch). Use RIP + PLAY.",
+                                        )
+                                        .color(Color32::from_rgb(255, 160, 120))
+                                        .monospace()
+                                        .size(8.0),
+                                    );
+                                }
                                 if p.bd_plus {
                                     let (msg, color) = if p.bd_plus_handled {
                                         (
@@ -1219,10 +1234,10 @@ impl PlayerApp {
                                         .size(8.0),
                                     );
                                 }
-                                if p.needs_makemkv() {
+                                if p.needs_makemkv() && !p.bus_encryption {
                                     ui.label(
                                         RichText::new(
-                                            "Missing key or unhandled BD+: full-disc ISO dump uses MakeMKV backup --decrypt",
+                                            "Missing key or unhandled BD+: RIP + PLAY or full-disc ISO dump uses MakeMKV",
                                         )
                                         .color(Color32::from_rgb(255, 190, 120))
                                         .monospace()
@@ -1273,6 +1288,15 @@ impl PlayerApp {
                                     self.eject_bluray();
                                 }
                             }
+                            if needs_rip_play
+                                && retro_btn(ui, "▶ RIP + PLAY", Color32::from_rgb(150, 255, 170), th.btn_bg)
+                                    .on_hover_text(
+                                        "MakeMKV decrypts the main title (handles AACS bus encryption and BD+), then the app plays it automatically.",
+                                    )
+                                    .clicked()
+                            {
+                                rip_play = true;
+                            }
                             self.draw_bluray_dump_buttons(ui, &th);
                         });
                     } else {
@@ -1289,8 +1313,20 @@ impl PlayerApp {
                             if retro_btn(ui, "OPEN BLU-RAY ISO...", th.fg, th.btn_bg).clicked() {
                                 self.open_bluray_iso();
                             }
+                            if needs_rip_play
+                                && retro_btn(ui, "▶ RIP + PLAY", Color32::from_rgb(150, 255, 170), th.btn_bg)
+                                    .on_hover_text(
+                                        "MakeMKV decrypts the main title (handles AACS bus encryption and BD+), then the app plays it automatically.",
+                                    )
+                                    .clicked()
+                            {
+                                rip_play = true;
+                            }
                             self.draw_bluray_dump_buttons(ui, &th);
                         });
+                    }
+                    if rip_play {
+                        self.start_rip_and_play();
                     }
                 }
                 DeckMode::Tape => {
@@ -2716,8 +2752,8 @@ impl PlayerApp {
 
                 ui.label(RichText::new("TROUBLESHOOTING").color(acc).monospace().strong());
                 ui.label(RichText::new("DVD blocks .......... Encrypted image? Use DUMP TO MKV from the image or DUMP TO ISO; raw encrypted images are unsupported").color(dim).monospace());
-                ui.label(RichText::new("Blu-ray BD+ ......... MakeMKV handles BD+ and AACS; DUMP TO ISO is the fallback when libaacs has no matching key").color(dim).monospace());
-                ui.label(RichText::new("Blu-ray BD+ ......... MakeMKV handles BD+ and AACS; DUMP TO ISO is the fallback for discs where libaacs has no key").color(dim).monospace());
+                ui.label(RichText::new("Blu-ray BD+ ......... libbdplus and the user's BD+ tables are tried first; MakeMKV is the fallback for unhandled discs").color(dim).monospace());
+                ui.label(RichText::new("AACS bus encryption  .. libaacs cannot open the drive; RIP + PLAY decrypts the main title with MakeMKV, then plays it").color(dim).monospace());
                 ui.label(RichText::new("Check DVD tools ..... Run `mediaplayerofdoom --check-dvd` to list dvdbackup, genisoimage and the DVD libraries").color(dim).monospace());
                 ui.label(RichText::new("Ratings missing ..... MusicBrainz, Discogs and TheAudioDB have no rating for that track/album; no public star feed covers everything").color(dim).monospace());
                 ui.label(RichText::new("Covers missing ...... No local/web match; Meta All retries every run and reports the count without art").color(dim).monospace());

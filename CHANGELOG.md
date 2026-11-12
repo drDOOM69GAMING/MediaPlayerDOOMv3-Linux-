@@ -1,5 +1,13 @@
 # Changelog
 
+## v3.2.57
+
+- Detect AACS bus-encryption failures (revoked host key, `Unable to initialize bus encryption`) from `bd_info` stderr.
+- The Blu-ray deck now explains that libaacs cannot open the drive/disc and points to RIP + PLAY.
+- Added RIP + PLAY: MakeMKV finds the longest title, decrypts it to the Videos folder, and the app starts it automatically when the rip finishes.
+- AACS bus encryption is treated as needing MakeMKV, so the deck no longer implies a missing KEYDB entry is the whole problem.
+- Added tests for bus-encryption detection and longest-title selection.
+
 ## v3.2.56
 
 - Added a local libbdplus path: a `libbdplus.so` in the app tools folder or `~/.local/lib` is loaded through `LIBBDPLUS_PATH`.
