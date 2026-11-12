@@ -8,6 +8,14 @@ use crate::consts::AUDIO_FORMATS;
 /// Hide the console window for spawned helper processes on Windows.
 /// On Unix this is a no-op (there is no console to hide), which keeps every
 /// call site identical on all platforms.
+/// Reap a killed child off the UI thread. `wait()` can block if the process is
+/// stuck in network or optical I/O; never let that freeze the window.
+pub fn reap_child_async(mut child: std::process::Child) {
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+}
+
 pub trait CommandNoWindow {
     fn no_window(&mut self) -> &mut Self;
     /// Kill this child when the player exits, even on SIGKILL, so a crash

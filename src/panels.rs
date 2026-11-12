@@ -1007,9 +1007,9 @@ impl PlayerApp {
                                     self.scan_radio(ui.input(|i| i.time));
                                 }
                                 let sa_label = if self.radio_scan_all_loading {
-                                    "SCAN ALL..."
+                                    "LOADING ALL..."
                                 } else if self.radio_scan_all_active {
-                                    "STOP SCAN"
+                                    "SCAN ALL: ON"
                                 } else {
                                     "SCAN ALL"
                                 };
@@ -1024,7 +1024,7 @@ impl PlayerApp {
                                     th.btn_bg,
                                 )
                                 .on_hover_text(
-                                    "Load the most popular stations from every U.S. state and Canadian province, then preview each one for 10 seconds",
+                                    "Enable SCAN ALL mode: load stations from every U.S. state and Canadian province, then press SCAN to step through them manually",
                                 )
                                 .clicked()
                                 {
@@ -1067,14 +1067,16 @@ impl PlayerApp {
                                     .and_then(|i| self.radio_presets.get(i))
                                     .map(|s| s.name.clone())
                                     .unwrap_or_default();
+                                let text = if pos == 0 {
+                                    format!("SCAN ALL MODE  •  {} stations  •  press SCAN", len)
+                                } else {
+                                    format!("SCAN ALL  {}/{}  {}", pos, len, name)
+                                };
                                 ui.label(
-                                    RichText::new(format!(
-                                        "SCAN ALL  {}/{}  {}",
-                                        pos, len, name
-                                    ))
-                                    .color(th.playing_fg)
-                                    .monospace()
-                                    .size(9.0),
+                                    RichText::new(text)
+                                        .color(th.playing_fg)
+                                        .monospace()
+                                        .size(9.0),
                                 );
                             }
                             ui.add_space(4.0);
@@ -2298,9 +2300,9 @@ impl PlayerApp {
                         self.scan_radio(ui.input(|i| i.time));
                     }
                     let sa_label = if self.radio_scan_all_loading {
-                        "SCAN ALL..."
+                        "LOADING ALL..."
                     } else if self.radio_scan_all_active {
-                        "STOP SCAN"
+                        "SCAN ALL: ON"
                     } else {
                         "SCAN ALL"
                     };
@@ -2315,7 +2317,7 @@ impl PlayerApp {
                         th.btn_bg,
                     )
                     .on_hover_text(
-                        "Scan every U.S. state and Canadian province; each station previews for 10 seconds",
+                        "Enable SCAN ALL mode, then press SCAN to step through every station manually",
                     )
                     .clicked()
                     {
@@ -2359,8 +2361,13 @@ impl PlayerApp {
                         .and_then(|i| self.radio_presets.get(i))
                         .map(|s| s.name.clone())
                         .unwrap_or_default();
+                    let text = if pos == 0 {
+                        format!("SCAN ALL MODE  •  {} stations  •  press SCAN", len)
+                    } else {
+                        format!("SCAN ALL  {}/{}  {}", pos, len, name)
+                    };
                     ui.label(
-                        RichText::new(format!("SCAN ALL  {}/{}  {}", pos, len, name))
+                        RichText::new(text)
                             .color(th.playing_fg)
                             .monospace()
                             .size(9.0),
@@ -2929,7 +2936,7 @@ impl PlayerApp {
                 ui.label(RichText::new("FM / AM ............. Switch band").color(dim).monospace());
                 ui.label(RichText::new("TUNE- / TUNE+ ........ Step frequency").color(dim).monospace());
                 ui.label(RichText::new("SCAN ................ Auto-scan for stations").color(dim).monospace());
-                ui.label(RichText::new("SCAN ALL ............ Load popular stations from every U.S. state and Canadian province, then preview each for 10 seconds").color(dim).monospace());
+                ui.label(RichText::new("SCAN ALL ............ Enable a mode that loads stations from every U.S. state and Canadian province; press SCAN to step through them manually").color(dim).monospace());
                 ui.label(RichText::new("+ ADD ............... Add a station (name / band / freq / URL)").color(dim).monospace());
                 ui.label(RichText::new("BROWSE STATES ....... Popular stations for every U.S. state and Canadian province/territory").color(dim).monospace());
                 ui.label(RichText::new("Click dial .......... Tune to frequency").color(dim).monospace());

@@ -170,7 +170,7 @@ impl PlayerApp {
         self.kill_audio_pipe();
         if let Some(mut c) = self.radio_proc.take() {
             let _ = c.kill();
-            let _ = c.wait();
+            crate::util::reap_child_async(c);
         }
         self.sink.stop();
         self.sink.set_volume(self.state.volume as f32 / 100.0);
@@ -219,7 +219,6 @@ impl PlayerApp {
             freq: 0.0,
             url: url.to_string(),
         });
-        save_radio(&self.radio_presets);
         self.radio_presets.len() - 1
     }
 
@@ -230,18 +229,22 @@ impl PlayerApp {
         if url.trim().is_empty() {
             return;
         }
-        self.stop_scan_all();
         let idx = self.add_web_preset(name, url);
+        save_radio(&self.radio_presets);
         self.start_radio(idx);
         self.set_status(format!("♪ {}", name.trim()));
     }
 
-    /// Load the top stations from every U.S. state and Canadian province, then
-    /// preview them one by one. Pressing the button again stops the scan.
+    /// Enable or disable SCAN ALL mode. The first enable loads the state pool;
+    /// later enables reuse it and are instant.
     pub(crate) fn start_scan_all(&mut self) {
         if self.radio_scan_all_loading || self.radio_scan_all_active {
             self.stop_scan_all();
-            self.set_status("SCAN ALL stopped");
+            self.set_status("SCAN ALL mode off");
+            return;
+        }
+        if self.radio_scan_all_loaded {
+            self.activate_scan_all();
             return;
         }
         let total = crate::settings::US_STATES.len() + crate::settings::CA_REGIONS.len();
@@ -252,12 +255,43 @@ impl PlayerApp {
         self.radio_scan_all_total = total;
         self.radio_scan_all_queue.clear();
         self.radio_scan_all_pos = 0;
-        self.radio_scan_next_at = None;
         self.set_status(format!(
             "SCAN ALL: loading stations from {} states and provinces...",
             total
         ));
         let _ = self.net_tx.send(NetCmd::RadioScanAll { gen });
+    }
+
+    /// Build the manual SCAN ALL queue from every station currently in the app.
+    pub(crate) fn activate_scan_all(&mut self) {
+        if self.radio_presets.is_empty() {
+            self.radio_scan_all_active = false;
+            self.set_error("SCAN ALL: no stations available");
+            return;
+        }
+        // State/browser stations first, then the FM/AM presets.
+        let mut queue: Vec<usize> = self
+            .radio_presets
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.band.eq_ignore_ascii_case("WEB"))
+            .map(|(i, _)| i)
+            .collect();
+        queue.extend(
+            self.radio_presets
+                .iter()
+                .enumerate()
+                .filter(|(_, s)| !s.band.eq_ignore_ascii_case("WEB"))
+                .map(|(i, _)| i),
+        );
+        self.radio_scan_all_queue = queue;
+        self.radio_scan_all_pos = 0;
+        self.radio_scan_all_active = true;
+        self.radio_scan_all_loading = false;
+        self.set_status(format!(
+            "SCAN ALL mode on: {} stations. Press SCAN to step through them.",
+            self.radio_scan_all_queue.len()
+        ));
     }
 
     pub(crate) fn stop_scan_all(&mut self) {
@@ -266,14 +300,12 @@ impl PlayerApp {
         self.radio_scan_all_active = false;
         self.radio_scan_all_queue.clear();
         self.radio_scan_all_pos = 0;
-        self.radio_scan_next_at = None;
     }
 
     pub(crate) fn stop_radio(&mut self) {
-        self.stop_scan_all();
         if let Some(mut c) = self.radio_proc.take() {
             let _ = c.kill();
-            let _ = c.wait();
+            crate::util::reap_child_async(c);
         }
         self.radio_proc = None;
         self.radio_on = false;
@@ -298,22 +330,7 @@ impl PlayerApp {
 
     pub(crate) fn tick_radio(&mut self, now: f64) {
         if self.radio_scan_all_active {
-            let due = self
-                .radio_scan_next_at
-                .map(|t| std::time::Instant::now() >= t)
-                .unwrap_or(true);
-            if due {
-                if self.radio_scan_all_queue.is_empty() {
-                    self.radio_scan_all_active = false;
-                } else {
-                    let len = self.radio_scan_all_queue.len();
-                    let idx = self.radio_scan_all_queue[self.radio_scan_all_pos % len];
-                    self.start_radio(idx);
-                    self.radio_scan_all_pos = (self.radio_scan_all_pos + 1) % len;
-                    self.radio_scan_next_at =
-                        Some(std::time::Instant::now() + Duration::from_secs(10));
-                }
-            }
+            // SCAN ALL is a mode; SCAN advances it manually. Never auto-tune.
             self.radio_tuned = self.radio_playing_idx;
         } else {
             let ever_tuned = self.radio_last_moved > 0.0;
@@ -361,6 +378,41 @@ impl PlayerApp {
     }
 
     pub(crate) fn scan_radio(&mut self, now: f64) {
+        if self.radio_scan_all_loading {
+            self.set_status("SCAN ALL: still loading stations...");
+            return;
+        }
+        if self.radio_scan_all_active {
+            let len = self.radio_scan_all_queue.len();
+            if len == 0 {
+                self.radio_scan_all_active = false;
+                return;
+            }
+            let idx = self.radio_scan_all_queue[self.radio_scan_all_pos % len];
+            if let Some(st) = self.radio_presets.get(idx).cloned() {
+                if st.band.eq_ignore_ascii_case("FM") || st.band.eq_ignore_ascii_case("AM") {
+                    self.radio_band = st.band;
+                    self.radio_freq = st.freq;
+                }
+            }
+            self.start_radio(idx);
+            if self.radio_playing_idx == Some(idx) {
+                self.radio_scan_all_pos = (self.radio_scan_all_pos + 1) % len;
+            }
+            self.radio_tuned = self.radio_playing_idx;
+            let shown = self
+                .radio_playing_idx
+                .and_then(|i| self.radio_scan_all_queue.iter().position(|x| *x == i))
+                .map(|p| p + 1)
+                .unwrap_or(0);
+            let name = self
+                .radio_playing_idx
+                .and_then(|i| self.radio_presets.get(i))
+                .map(|s| s.name.clone())
+                .unwrap_or_default();
+            self.set_status(format!("SCAN ALL {}/{}  {}", shown, len, name));
+            return;
+        }
         let (lo, hi) = self.radio_band_range();
         let mut cands: Vec<usize> = self
             .radio_presets

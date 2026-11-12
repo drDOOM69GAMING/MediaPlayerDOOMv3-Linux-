@@ -303,7 +303,7 @@ pub(crate) struct PlayerApp {
     pub(crate) radio_scan_all_total: usize,
     pub(crate) radio_scan_all_queue: Vec<usize>,
     pub(crate) radio_scan_all_pos: usize,
-    pub(crate) radio_scan_next_at: Option<Instant>,
+    pub(crate) radio_scan_all_loaded: bool,
     pub(crate) add_name: String,
     pub(crate) add_band: String,
     pub(crate) add_freq: String,
@@ -924,7 +924,7 @@ impl PlayerApp {
             radio_scan_all_total: 0,
             radio_scan_all_queue: Vec::new(),
             radio_scan_all_pos: 0,
-            radio_scan_next_at: None,
+            radio_scan_all_loaded: false,
             add_name: String::new(),
             add_band: "FM".to_string(),
             add_freq: String::new(),
@@ -3045,25 +3045,18 @@ video_ended: false,
                     return;
                 }
                 self.radio_scan_all_loading = false;
-                let mut queue = Vec::new();
-                for st in stations {
-                    let idx = self.add_web_preset(&st.name, &st.url);
-                    if !queue.contains(&idx) {
-                        queue.push(idx);
-                    }
-                }
-                if queue.is_empty() {
+                if stations.is_empty() {
                     self.radio_scan_all_active = false;
+                    self.radio_scan_all_loaded = false;
                     self.radio_scan_all_queue.clear();
-                    self.set_error("SCAN ALL: no stations returned");
+                    self.set_error("SCAN ALL: no stations returned (check the network)");
                 } else {
-                    let n = queue.len();
-                    self.radio_scan_all_queue = queue;
-                    self.radio_scan_all_pos = 0;
-                    self.radio_scan_all_active = true;
-                    self.radio_scan_next_at = Some(Instant::now());
-                    self.radio_last_start = Instant::now() - Duration::from_secs(2);
-                    self.set_status(format!("SCAN ALL: previewing {} stations", n));
+                    for st in stations {
+                        self.add_web_preset(&st.name, &st.url);
+                    }
+                    save_radio(&self.radio_presets);
+                    self.radio_scan_all_loaded = true;
+                    self.activate_scan_all();
                 }
             }
             Msg::BlurayProtection { source, info } => {

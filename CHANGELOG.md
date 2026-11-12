@@ -1,143 +1,42 @@
 # Changelog
 
-## v3.2.67
-
-- Added **SCAN ALL** to radio mode. It loads the top stations from every U.S. state and Canadian province/territory, then previews each station for 10 seconds and loops.
-- The full scan pool is about 250 stations, built with six parallel region lookups (~10 seconds).
-- SCAN ALL shows live progress while loading, the current station position/count while scanning, and turns into **STOP SCAN**.
-- Manual tuning, SCAN, STOP, and picking a station from the state browser cancel SCAN ALL.
-- Scan results use hidden WEB presets, deduplicated by URL, so the FM/AM dial stays clean.
-- Added a generation counter so an interrupted scan cannot start later in the background.
-
-## v3.2.66
-
-- Radio mode now has a **BROWSE STATES** browser covering all 50 U.S. states, Washington DC, and all 13 Canadian provinces and territories.
-- Stations come from the Radio Browser API, ranked by votes. Recognisable broadcast call signs and frequencies are shown first; internet-only networks are filtered out.
-- Each region loads up to 12 stations with codec, bitrate and vote count. PLAY starts the stream immediately.
-- Browser stations are stored as hidden WEB presets, deduplicated by URL, so the FM/AM dial and preset list stay clean.
-- Added a live filter for the state/province list and a search box.
-- Added a unit test for the broadcast/internet-only filtering.
-
-## v3.2.65
-
-- Video and audio ffmpeg children now receive `PR_SET_PDEATHSIG`, so a killed or crashed player cannot leave a reader holding the optical drive.
-- At startup/disc probe the app also terminates orphaned `ffmpeg`/`--bd-stream` readers (reparented to PID 1) whose command line references a Blu-ray device.
-- This prevents the "frozen until reboot" state after force-quitting during protected-disc playback.
-
-## v3.2.64
-
-- Fixed slow-motion playback and UI freezes on MakeMKV live-decrypt discs. MakeMKV's libmmbd can only serve one reader, but the player used two ffmpeg processes (video and audio), which deadlocked and stalled the drive.
-- Bus-encrypted discs now use one ffmpeg process: video on stdout, PCM audio on a private FIFO, so the disc is read once.
-- Audio-track probing no longer opens a second reader while live decrypt is active; the UI thread never runs `bd_list_titles`.
-- Added FIFO cleanup on open, seek, close and end of playback.
-- Verified the exact one-process command: 10.0 s of video and audio decoded with exact frame/sample counts.
-
-## v3.2.63
-
-- Fixed Blu-ray playback hanging on "PAUSED / LOADING": the app used `/dev/cdrom`, but MakeMKV's `libmmbd` only recognises the real kernel device node. The drive list now returns `/dev/sr0` and playback canonicalises `/dev/cdrom` and `/dev/dvd`.
-- Confirmed the app's full VAAPI + FFmpeg pipeline decodes video from `bluray:/dev/sr0` through libmmbd.
-- Local libaacs/libbdplus/BD+ tables remain the first choice; libmmbd is only used when the local stack cannot open the disc.
-
-## v3.2.62
-
-- Play bus-encrypted discs directly through MakeMKV's `libmmbd.so`, which is a drop-in libaacs/libbdplus replacement and decrypts live. No rip is needed.
-- `configure_command` builds a private `libaacs.so.0` / `libbdplus.so.0` symlink directory and exposes it through `LD_LIBRARY_PATH` only when the local stack cannot handle the disc.
-- The protection probe always uses the local stack, so libmmbd cannot mask the original bus-encryption failure and flip itself back off.
-- PLAY now uses live decrypt when libmmbd is available; RIP + PLAY remains only as a fallback when it is missing.
-- Skip the synchronous title probe when libmmbd is active so the UI does not freeze while MakeMKV initializes.
-- Added a test for the libmmbd symlink directory.
-
-## v3.2.61
-
-- Pressing PLAY on a disc with AACS bus encryption or unhandled BD+ now starts RIP + PLAY automatically instead of attempting libbluray playback and pausing.
-- PLAY waits for the protection probe when the result is not ready yet, then chooses direct playback or RIP + PLAY.
-- If the probe cannot read the disc, PLAY now shows an error instead of hanging in a paused state.
-
-## v3.2.60
-
-- MKV rips now check free space before starting and refuse with a clear message instead of filling the destination drive.
-- RIP + PLAY uses the disc size as a safe upper bound; the Deadpool 2 main title is about 36.5 GB.
-
-## v3.2.59
-
-- Fixed RIP + PLAY selecting the wrong title: MakeMKV renumbers titles when short clips are filtered out, so the title lookup now uses the same `--minlength=0` flag as the rip.
-- On Deadpool 2 the main feature is title 3 (2:13:59) with `--minlength=0`; RIP + PLAY now rips that instead of an 8-second clip.
-
-## v3.2.58
-
-- Fixed the Blu-ray deck showing "NO BLU-RAY DISC DETECTED" on bus-encrypted discs: `bd_info` can take 15-30 seconds on those drives, so the probe timeout is now 60 seconds instead of 15.
-- MakeMKV leaves `makemkvcon guiserver` processes behind that keep `/dev/sr0` open; these now block libbluray/libaacs. The app terminates stale guiservers when no MakeMKV job or GUI is active.
-- RIP + PLAY gets a 120-second guard while looking up the main title, so a stalled drive cannot leave the app spinning forever.
-- Added cleanup after every MakeMKV dump and before Blu-ray playback.
-
-## v3.2.57
-
-- Detect AACS bus-encryption failures (revoked host key, `Unable to initialize bus encryption`) from `bd_info` stderr.
-- The Blu-ray deck now explains that libaacs cannot open the drive/disc and points to RIP + PLAY.
-- Added RIP + PLAY: MakeMKV finds the longest title, decrypts it to the Videos folder, and the app starts it automatically when the rip finishes.
-- AACS bus encryption is treated as needing MakeMKV, so the deck no longer implies a missing KEYDB entry is the whole problem.
-- Added tests for bus-encryption detection and longest-title selection.
-
-## v3.2.56
-
-- Added a local libbdplus path: a `libbdplus.so` in the app tools folder or `~/.local/lib` is loaded through `LIBBDPLUS_PATH`.
-- `bd_list_titles` and `bd_info` now use the same AACS/BD+ config environment, so the BD+ tables are visible to every Blu-ray probe.
-- When MakeMKV is missing, DUMP TO MKV falls back to `bd_splice` + ffmpeg for the main Blu-ray movie.
-- The local fallback uses the user's AACS KEYDB and BD+ tables. It is main-title only; menus and extras still require MakeMKV.
-- The local BD+ tables are detected and counted in the deck.
-
-## v3.2.55
-
-- The Blu-ray deck now detects BD+ tables in `~/.config/bdplus` and counts the convtab files.
-- `bd_info` now parses `libbdplus detected` and `BD+ handled` instead of treating every BD+ disc as unhandled.
-- The app uses a combined XDG config directory with symlinks to AACS and BD+ data, so both libraries see the user's files.
-- A user-supplied `libbdplus.so` in the app tools folder or `~/.local/lib` is exposed through `LIBBDPLUS_PATH`.
-- MakeMKV is only marked as required when AACS is missing or BD+ is not handled; the deck explains whether libbdplus or the tables are missing.
-- BD+ tables alone are not enough without libbdplus; the UI now says so.
-
-## v3.2.54
-
-- Added a MOVIE TRACKS window that lists every detected audio track and lets you pick one directly.
-- The same window lists subtitle tracks with Off, embedded and external options.
-- Added a RESCAN button for audio tracks; a local file re-probes, a disc re-reads its title languages.
-- The DVD scale toggle is also available inside the tracks window.
-- The pause/loading poster shows the DVD output resolution and whether Lanczos is active.
-- IMDb is the primary poster source; Wikipedia remains the fallback.
-
-## v3.2.53
-
-- DVD and Blu-ray cover art now appears in the same sidebar cover area as music art.
-- Local covers are used first: cover/folder/poster/front images, ISO sidecars, mounted drive folders and Blu-ray META/DL thumbnails.
-- If no local image exists, the disc title is looked up on IMDb first and the 600px movie poster is cached.
-- Wikipedia remains a fallback for titles IMDb does not resolve.
-- Disc poster cache keys were versioned so old bad images are re-fetched once.
-- The disc title comes from the volume label for a tray disc, the folder name or the ISO file name.
-- Closing the movie restores the normal music cover and metadata.
-- A generic DVD or Blu-ray badge is shown when no poster can be found.
-- The poster also appears over the movie while loading or paused.
-
-## v3.2.52
-
-- DVD SCALE now really upscales 480/576 video to 1620x1080; the previous target stayed at source size.
-- Upscaling uses Lanczos plus CAS (Contrast Adaptive Sharpen) when available, falling back to a stronger unsharp kernel.
-- The DVD button shows the actual output resolution after the first frame.
-- Audio waits for the first new frame after an audio-track or scale change, fixing the A/V drift.
-- Restarts resume from the audio clock position instead of the last one-second UI tick.
-- Added disc poster art: local cover/folder/poster images, ISO sidecars, mounted drives and Blu-ray META/DL thumbnails.
-- When no disc image exists, a generic DVD or Blu-ray badge is shown while loading or paused.
-
 ## v3.2.51
 
-- The AUDIO button now lists and cycles the audio tracks of a DVD or Blu-ray title.
-- Disc audio languages are read from the DVD/Blu-ray title; the English track is still the default.
-- The chosen disc audio track is remembered per title.
-- Added a DVD SCALE toggle with Lanczos upscaling and a mild 3x3 unsharp pass, enabled by default.
-- Fixed DVD upscaling being a no-op: the frame target now really upscales 480/576 video to 1620x1080.
-- Audio now waits for the first frame after a seek, audio-track change or scale change, fixing the A/V drift.
-- Track and scale changes resume from the audio clock position instead of the last one-second UI tick.
-- Reduced the DVD sharpening cost by using a 3x3 kernel.
-- The DVD scale setting is saved and can be switched while a movie is playing.
-- Embedded DVD/Blu-ray bitmap subtitles (VobSub/PGS) are still not rendered; use OPEN SUBS for a text subtitle file.
+Single consolidated release since v3.2.50. This includes all of the local
+3.2.51-3.2.68 development work, published as one version.
+
+### Disc playback
+- AUDIO lists and cycles DVD/Blu-ray audio tracks; English is the default and the choice is remembered per title.
+- DVD SCALE really upscales 480/576 video to 1620x1080 with Lanczos plus CAS (or a 3x3 unsharp fallback); the setting is saved.
+- A/V sync: audio waits for the first new frame after a seek, track change or scale change; restarts resume from the audio clock.
+- MOVIE TRACKS window with explicit audio/subtitle lists, RESCAN and the DVD scale toggle.
+- Embedded DVD/Blu-ray bitmap subtitles are still not rendered; external text subtitles work.
+
+### Disc art
+- Disc covers in the sidebar: local cover/folder/poster/front images, ISO sidecars, mounted folders and Blu-ray META/DL thumbnails first.
+- IMDb is the primary poster lookup; Wikipedia is the fallback. Posters are cached and a generic badge is shown when nothing is found.
+- The poster also appears while a movie is loading or paused.
+
+### Blu-ray, BD+ and AACS
+- Detects BD+ tables in `~/.config/bdplus`, counts convtab files and parses `libbdplus detected` / `BD+ handled`.
+- Combined XDG config with links to the user's AACS KEYDB and BD+ tables; a user-supplied `libbdplus.so` is loaded through `LIBBDPLUS_PATH`.
+- Local libaacs, libbdplus and the user's BD+ tables are always tried first; MakeMKV is only the fallback.
+- `bd_splice` + ffmpeg main-title fallback when MakeMKV is missing.
+- Detects AACS bus-encryption failures from `bd_info`; the probe timeout is 60 seconds and stale `makemkvcon guiserver` processes are cleaned up.
+- RIP + PLAY: MakeMKV finds the longest title with `--minlength=0`, checks free space, rips and starts the result automatically.
+- Direct live decrypt through MakeMKV `libmmbd` for bus-encrypted or unhandled discs, with no rip.
+- Uses real `/dev/srN` nodes and canonicalises `/dev/cdrom` and `/dev/dvd`, which libmmbd rejects.
+- Bus-encrypted playback uses one ffmpeg process (video on stdout, PCM audio on a FIFO) so libmmbd never deadlocks with a second reader.
+- Parent-death signals and orphan-reader cleanup prevent a crashed player from holding the optical drive.
+
+### Radio
+- BROWSE STATES covers all 50 U.S. states, Washington DC and all 13 Canadian provinces/territories.
+- Stations come from Radio Browser, ranked by popularity; broadcast call signs and frequencies are shown first and internet-only networks are filtered out.
+- Each region shows up to 12 stations with codec, bitrate and votes; PLAY starts immediately.
+- SCAN ALL is a mode: it loads stations from every state/province (about 250, fetched in parallel), then SCAN steps through them manually. State stations are first, then the FM/AM presets.
+- SCAN ALL stays enabled until toggled off; STOP does not disable it. Manual tuning or the dial exits the mode.
+- Browser and scan stations are hidden WEB presets, deduplicated by URL, so the FM/AM dial stays clean.
+- Radio ffmpeg children are reaped off the UI thread so a stuck stream cannot freeze the window.
 
 ## v3.2.50
 

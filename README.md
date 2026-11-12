@@ -1,6 +1,6 @@
 # MediaPlayerDOOM v3 for Linux
 
-![Version](https://img.shields.io/badge/version-3.2.67-blue)
+![Version](https://img.shields.io/badge/version-3.2.51-blue)
 ![Platform](https://img.shields.io/badge/platform-Linux%20x86__64-informational)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -92,7 +92,7 @@ This repository is the Linux port. It is tested on CachyOS and Arch with KDE Pla
 - A user-supplied `libbdplus.so` can be placed in the app tools folder or `~/.local/lib` and is loaded through LIBBDPLUS_PATH
 - If MakeMKV is missing, DUMP TO MKV falls back to `bd_splice` + ffmpeg for the main Blu-ray movie using the local AACS/BD+ data
 - Radio mode includes a by-state/province browser with the most popular stations for all 50 U.S. states, Washington DC, and 13 Canadian provinces/territories
-- SCAN ALL loads a preview pool from every state and province (parallel fetch) and cycles through the stations every 10 seconds
+- SCAN ALL is a mode: it loads stations from every state and province, then pressing SCAN steps through them manually
 - AACS bus encryption (revoked host key) is detected; RIP + PLAY decrypts the main title with MakeMKV and starts it automatically
 - MakeMKV's `libmmbd` live-decrypt library is used automatically for AACS bus encryption and unhandled BD+; PLAY works without ripping
 - Local libaacs, libbdplus and the user's BD+ tables are still tried first; libmmbd is only selected when the local stack cannot open the disc

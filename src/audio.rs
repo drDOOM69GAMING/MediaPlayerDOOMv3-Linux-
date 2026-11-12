@@ -1275,7 +1275,7 @@ impl PlayerApp {
     pub(crate) fn kill_audio_pipe(&mut self) {
         if let Some(mut c) = self.audio_pipe_proc.take() {
             let _ = c.kill();
-            let _ = c.wait();
+            crate::util::reap_child_async(c);
         }
     }
 
