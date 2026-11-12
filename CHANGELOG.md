@@ -1,5 +1,13 @@
 # Changelog
 
+## v3.2.64
+
+- Fixed slow-motion playback and UI freezes on MakeMKV live-decrypt discs. MakeMKV's libmmbd can only serve one reader, but the player used two ffmpeg processes (video and audio), which deadlocked and stalled the drive.
+- Bus-encrypted discs now use one ffmpeg process: video on stdout, PCM audio on a private FIFO, so the disc is read once.
+- Audio-track probing no longer opens a second reader while live decrypt is active; the UI thread never runs `bd_list_titles`.
+- Added FIFO cleanup on open, seek, close and end of playback.
+- Verified the exact one-process command: 10.0 s of video and audio decoded with exact frame/sample counts.
+
 ## v3.2.63
 
 - Fixed Blu-ray playback hanging on "PAUSED / LOADING": the app used `/dev/cdrom`, but MakeMKV's `libmmbd` only recognises the real kernel device node. The drive list now returns `/dev/sr0` and playback canonicalises `/dev/cdrom` and `/dev/dvd`.

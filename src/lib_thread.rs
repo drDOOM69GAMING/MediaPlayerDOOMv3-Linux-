@@ -393,7 +393,11 @@ LibCmd::Scan(dir) => {
                 // libbluray's own time seek works even though ffmpeg's
                 // bluray: protocol cannot seek this disc. Stream the title
                 // from the requested timestamp into ffmpeg's stdin.
-                let bd_stream = if bd {
+                // A bus-encrypted disc can only be opened once at a time by
+                // libmmbd. Use one ffmpeg for both outputs and skip the
+                // separate libbluray streamer.
+                let mmbd_audio = bd && crate::bluray::mmbd_active();
+                let bd_stream = if bd && !mmbd_audio {
                     crate::bluray::playlist(&path).and_then(|pl| {
                         crate::bdstream::spawn_stream(
                             crate::bluray::source(&path),
@@ -421,8 +425,18 @@ LibCmd::Scan(dir) => {
                 } else {
                     path.clone()
                 };
+                let mmbd_audio_fifo = if mmbd_audio {
+                    let p = crate::pipe::mmbd_audio_path(gen);
+                    if crate::pipe::ensure_fifo(&p).is_ok() {
+                        Some(p)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
                 let mut cmd = std::process::Command::new(ffmpeg_path());
-                cmd.args(["-hide_banner", "-loglevel", "error"]);
+                cmd.args(["-hide_banner", "-loglevel", "error", "-y"]);
                 // Pick the GPU backend explicitly instead of letting ffmpeg
                 // probe CUDA first on an AMD machine. Users can disable it with
                 // MPDOOM_NO_HWACCEL=1 if a driver misbehaves.
@@ -502,8 +516,12 @@ LibCmd::Scan(dir) => {
                 if let Some(sub) = subtitle.as_ref() {
                     vf = format!("{},{}", vf, crate::ffmpeg::subtitle_filter(sub, &sub_style));
                 }
-                cmd.arg("-i").arg(&input)
-                    .args(["-an", "-sn", "-vf", &vf]);
+                cmd.arg("-i").arg(&input);
+                if mmbd_audio {
+                    cmd.args(["-map", "0:v:0", "-sn", "-vf", &vf]);
+                } else {
+                    cmd.args(["-an", "-sn", "-vf", &vf]);
+                }
                 // DVD streams often report 29.97 fps while the decoded film
                 // runs at 23.976 with soft-telecine repeat flags. Letting the
                 // raw pipe keep that variable cadence made the reader send
@@ -512,8 +530,16 @@ LibCmd::Scan(dir) => {
                 if dvd {
                     cmd.args(["-r", &format!("{:.6}", fps)]);
                 }
-                cmd.args(["-pix_fmt", "rgba", "-f", "rawvideo", "-"])
-                    .stdout(std::process::Stdio::piped())
+                cmd.args(["-pix_fmt", "rgba", "-f", "rawvideo", "-"]);
+                if let Some(fifo) = &mmbd_audio_fifo {
+                    // Same ffmpeg process, same single disc read: video on
+                    // stdout, PCM audio on the FIFO.
+                    cmd.args([
+                        "-map", "0:a:0", "-vn", "-ac", "2", "-ar", "44100", "-f", "s16le",
+                    ])
+                    .arg(fifo);
+                }
+                cmd.stdout(std::process::Stdio::piped())
                     .stderr(std::process::Stdio::piped())
                     .no_window();
                 let mut child = match cmd.spawn() {

@@ -744,6 +744,11 @@ pub fn disc_audio_languages(path: &str) -> Vec<String> {
     if !dvd && !bd {
         return Vec::new();
     }
+    if bd && crate::bluray::mmbd_active() {
+        // A live-decrypt ffmpeg owns the drive; bd_list_titles here would
+        // create a second reader and deadlock.
+        return Vec::new();
+    }
     let langs = if bd {
         crate::bluray::audio_languages(crate::bluray::source(path))
     } else {

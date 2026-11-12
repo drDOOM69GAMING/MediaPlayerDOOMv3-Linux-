@@ -2713,6 +2713,10 @@ video_ended: false,
                     if !self.queue_next() {
                         self.video_ended = true;
                         self.video_paused = true;
+                        if let Some(s) = self.video_sink.take() {
+                            s.stop();
+                        }
+                        let _ = std::fs::remove_file(crate::pipe::mmbd_audio_path(self.video_gen));
                         self.set_status("MOVIE: end - PLAY to replay");
                     }
                 }

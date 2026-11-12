@@ -91,14 +91,44 @@ pub fn main_title_info(source: &str) -> Option<TitleInfo> {
         }
     }
     let info = (|| {
+        use std::io::Read;
+        use std::process::Stdio;
+        use std::time::{Duration, Instant};
         let mut cmd = std::process::Command::new("bd_list_titles");
         cmd.args(["-l", "-a"]).arg(source);
         configure_command(&mut cmd);
-        let out = cmd.output().ok()?;
-        if !out.status.success() {
-            return None;
-        }
-        let text = String::from_utf8_lossy(&out.stdout);
+        let mut child = cmd
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .ok()?;
+        let mut stdout = child.stdout.take()?;
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut text = String::new();
+            let _ = stdout.read_to_string(&mut text);
+            let _ = tx.send(text);
+        });
+        let start = Instant::now();
+        let text = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    let text = rx.recv_timeout(Duration::from_secs(2)).ok()?;
+                    if !status.success() {
+                        return None;
+                    }
+                    break text;
+                }
+                Ok(None) => {}
+                Err(_) => return None,
+            }
+            if start.elapsed() > Duration::from_secs(60) {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        };
         let mut main_idx: Option<usize> = None;
         let mut current_idx: Option<usize> = None;
         let mut audio_langs: Vec<String> = Vec::new();

@@ -12,11 +12,15 @@ use crate::eq::EqShared;
 use crate::tools::ffmpeg_path;
 use crate::util::CommandNoWindow;
 pub struct PipeSource {
-    reader: BufReader<ChildStdout>,
+    reader: BufReader<Box<dyn std::io::Read + Send>>,
     pending: VecDeque<i16>,
 }
 
 impl PipeSource {
+    pub fn from_reader(reader: Box<dyn std::io::Read + Send>) -> Self {
+        Self { reader: BufReader::new(reader), pending: VecDeque::new() }
+    }
+
     pub fn fill(&mut self) -> Option<()> {
         let mut chunk = [0u8; 4096];
         let n = self.reader.read(&mut chunk).ok()?;
@@ -58,6 +62,47 @@ impl rodio::Source for PipeSource {
     }
 }
 
+/// FIFO used by the single-reader libmmbd path: one ffmpeg decrypts the disc
+/// once and writes video to stdout and PCM audio to this FIFO.
+pub fn mmbd_audio_path(gen: u64) -> std::path::PathBuf {
+    crate::util::data_dir().join(format!("mmbd-audio-{}.pcm", gen))
+}
+
+#[cfg(unix)]
+pub fn ensure_fifo(path: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(path.as_os_str().as_bytes())?;
+    let rc = unsafe { libc::mkfifo(c.as_ptr(), 0o600) };
+    if rc == 0 {
+        return Ok(());
+    }
+    let err = std::io::Error::last_os_error();
+    if err.raw_os_error() == Some(libc::EEXIST) {
+        Ok(())
+    } else {
+        Err(err)
+    }
+}
+
+#[cfg(not(unix))]
+pub fn ensure_fifo(_path: &std::path::Path) -> std::io::Result<()> {
+    Err(std::io::Error::other("FIFOs are not supported on this platform"))
+}
+
+/// Remove leftover FIFOs from previous sessions. Open FIFOs stay valid for any
+/// process still using them; only the name is unlinked.
+pub fn cleanup_mmbd_audio() {
+    let dir = crate::util::data_dir();
+    if let Ok(rd) = std::fs::read_dir(&dir) {
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            if name.starts_with("mmbd-audio-") && name.ends_with(".pcm") {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
+}
+
 pub fn spawn_radio_stream(url: &str, ffmpeg: &Path) -> Result<(Child, PipeSource), String> {
     let mut child = Command::new(ffmpeg.to_string_lossy().to_string())
         .args(["-hide_banner", "-loglevel", "error", "-i", url, "-vn", "-ac", "2", "-ar", "44100", "-f", "s16le", "-"])
@@ -69,7 +114,7 @@ pub fn spawn_radio_stream(url: &str, ffmpeg: &Path) -> Result<(Child, PipeSource
     let stdout = child.stdout.take().ok_or("ffmpeg gave no output")?;
     Ok((
         child,
-        PipeSource { reader: BufReader::new(stdout), pending: VecDeque::new() },
+        PipeSource::from_reader(Box::new(stdout)),
     ))
 }
 
@@ -151,7 +196,7 @@ pub fn spawn_video_audio_mapped(
             args.push("-map".into());
             args.push(map);
         }
-    } else if bd {
+    } else if bd && !crate::bluray::mmbd_active() {
         if let Some(map) = crate::bluray::english_audio_map(crate::bluray::source(path)) {
             args.push("-map".into());
             args.push(map);
@@ -175,7 +220,7 @@ pub fn spawn_video_audio_mapped(
     let stdout = child.stdout.take().ok_or("ffmpeg gave no audio output")?;
     Ok((
         child,
-        PipeSource { reader: BufReader::new(stdout), pending: VecDeque::new() },
+        PipeSource::from_reader(Box::new(stdout)),
     ))
 }
 

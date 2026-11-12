@@ -531,21 +531,65 @@ impl PlayerApp {
         if (crate::dvd::is_dvd(path) || crate::bluray::is_bluray(path))
             && self.video_audio_tracks.is_empty()
         {
-            self.video_audio_tracks = crate::ffmpeg::disc_audio_tracks(path);
-            self.video_audio_sel = self
-                .video_audio_tracks
-                .iter()
-                .position(|t| crate::ffmpeg::is_english(&t.lang))
-                .unwrap_or(0);
-            if let Some(ord) = self.video_audio_choice.get(path).copied() {
-                if let Some(i) = self
+            if crate::bluray::is_bluray(path) && crate::bluray::mmbd_active() {
+                // libmmbd can only serve one reader. The merged ffmpeg owns
+                // the disc while playing, so do not probe audio tracks here;
+                // that would open a second reader and stall both.
+                self.video_audio_sel = 0;
+            } else {
+                self.video_audio_tracks = crate::ffmpeg::disc_audio_tracks(path);
+                self.video_audio_sel = self
                     .video_audio_tracks
                     .iter()
-                    .position(|t| t.ordinal == ord)
-                {
-                    self.video_audio_sel = i;
+                    .position(|t| crate::ffmpeg::is_english(&t.lang))
+                    .unwrap_or(0);
+                if let Some(ord) = self.video_audio_choice.get(path).copied() {
+                    if let Some(i) = self
+                        .video_audio_tracks
+                        .iter()
+                        .position(|t| t.ordinal == ord)
+                    {
+                        self.video_audio_sel = i;
+                    }
                 }
             }
+        }
+        // Bus-encrypted discs use one ffmpeg for video and audio (libmmbd
+        // cannot serve two readers). Its audio arrives on a FIFO.
+        if crate::bluray::is_bluray(path) && crate::bluray::mmbd_active() {
+            let fifo = crate::pipe::mmbd_audio_path(self.video_gen);
+            let _ = crate::pipe::ensure_fifo(&fifo);
+            match std::fs::OpenOptions::new().read(true).write(true).open(&fifo) {
+                Ok(file) => {
+                    if let Ok(sink) = Sink::try_new(&self._stream_handle) {
+                        sink.set_volume(self.video_volume as f32 / 100.0 * 0.9);
+                        sink.pause();
+                        sink.append(EqSource::new(
+                            PipeSource::from_reader(Box::new(file)),
+                            self.eq_shared.clone(),
+                        ));
+                        if !self.video_paused {
+                            self.video_audio_pending = true;
+                            av_log("mmbd audio pending first frame");
+                        }
+                        let sink = std::sync::Arc::new(sink);
+                        spawn_video_clock(
+                            sink.clone(),
+                            self.video_clock.clone(),
+                            self.video_gen,
+                        );
+                        self.video_open_at = self.ctx.input(|i| i.time);
+                        self.video_audio_proc = None;
+                        self.video_sink = Some(sink);
+                    }
+                }
+                Err(e) => {
+                    self.video_audio_pending = false;
+                    av_log(&format!("mmbd audio FIFO failed: {}", e));
+                    self.set_status(format!("MOVIE (video only): audio FIFO: {}", e));
+                }
+            }
+            return;
         }
         let audio_map = self.video_audio_map();
         match spawn_video_audio_mapped(path, &ffmpeg_path(), seek, audio_map.as_deref()) {
@@ -1116,7 +1160,9 @@ impl PlayerApp {
         if let Some(s) = self.video_sink.take() {
             s.stop();
         }
+        let old_gen = self.video_gen;
         self.video_gen += 1;
+        let _ = std::fs::remove_file(crate::pipe::mmbd_audio_path(old_gen));
         let gen = self.video_gen;
         let _ = self.lib_tx.send(LibCmd::VideoOpen { path: path.clone(), gen, seek: tsecs, subtitle: self.video_subtitle.clone(), sub_style: self.video_sub_style(), dvd_upscale: self.dvd_upscale, probe: false });
         self.video_closing = false;
@@ -1164,6 +1210,7 @@ impl PlayerApp {
         }
         self.stop_radio();
         self.stop_music();
+        crate::pipe::cleanup_mmbd_audio();
         self.video_gen += 1;
         let gen = self.video_gen;
         let saved_pos = self.video_positions.get(&path).copied().unwrap_or(0.0);
@@ -1426,6 +1473,7 @@ impl PlayerApp {
         if let Some(s) = self.video_sink.take() {
             s.stop();
         }
+        let _ = std::fs::remove_file(crate::pipe::mmbd_audio_path(self.video_gen));
     }
 
     pub(crate) fn toggle_video_play(&mut self) {
