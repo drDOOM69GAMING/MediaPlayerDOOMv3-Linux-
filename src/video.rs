@@ -367,8 +367,12 @@ impl PlayerApp {
         if same {
             if let Some(p) = self.bluray_prot.clone() {
                 if p.bluray && p.needs_makemkv() {
-                    self.set_status("AACS bus encryption: RIP + PLAY needed, decrypting the main title first...");
-                    self.start_rip_and_play(Some(source));
+                    if crate::bluray::mmbd_available() {
+                        self.begin_bluray_playback(source);
+                    } else {
+                        self.set_status("AACS bus encryption: RIP + PLAY needed, decrypting the main title first...");
+                        self.start_rip_and_play(Some(source));
+                    }
                     return;
                 }
                 if p.bluray {
@@ -394,7 +398,14 @@ impl PlayerApp {
         }
         let source_owned = source.to_string();
         self.request_bluray_protection(&source_owned, false);
-        let info = crate::bluray::main_title_info(source);
+        // With libmmbd the first libbluray open can take ~15 s to initialize
+        // MakeMKV's decryption. Skip the synchronous title probe and let
+        // ffmpeg pick the main playlist itself, so the UI does not freeze.
+        let info = if crate::bluray::mmbd_active() {
+            None
+        } else {
+            crate::bluray::main_title_info(source)
+        };
         let playlist = info.as_ref().map(|i| i.playlist);
         let wrapped = crate::bluray::wrap_playlist(source, playlist);
         // Never resume a Blu-ray from a saved timestamp: the engine restarts

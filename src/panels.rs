@@ -1130,7 +1130,7 @@ impl PlayerApp {
                     let mut rip_play = false;
                     let needs_rip_play = prot
                         .as_ref()
-                        .map(|p| p.bluray && p.needs_makemkv())
+                        .map(|p| p.bluray && p.needs_makemkv() && !crate::bluray::mmbd_available())
                         .unwrap_or(false);
                     ui.horizontal(|ui| {
                         ui.vertical(|ui| {
@@ -1190,13 +1190,20 @@ impl PlayerApp {
                                     );
                                 }
                                 if p.bus_encryption {
+                                    let msg = if crate::bluray::mmbd_available() {
+                                        "AACS BUS ENCRYPTION: PLAY uses MakeMKV's live decrypt (libmmbd); no rip is needed."
+                                    } else {
+                                        "AACS BUS ENCRYPTION: libaacs cannot open this drive/disc. Install MakeMKV for live decrypt, or use RIP + PLAY."
+                                    };
                                     ui.label(
-                                        RichText::new(
-                                            "AACS BUS ENCRYPTION: libaacs cannot open this drive/disc (revoked host key or drive bus-encryption mismatch). Use RIP + PLAY.",
-                                        )
-                                        .color(Color32::from_rgb(255, 160, 120))
-                                        .monospace()
-                                        .size(8.0),
+                                        RichText::new(msg)
+                                            .color(if crate::bluray::mmbd_available() {
+                                                Color32::from_rgb(120, 255, 150)
+                                            } else {
+                                                Color32::from_rgb(255, 160, 120)
+                                            })
+                                            .monospace()
+                                            .size(8.0),
                                     );
                                 }
                                 if p.bd_plus {
@@ -1236,9 +1243,11 @@ impl PlayerApp {
                                 }
                                 if p.needs_makemkv() && !p.bus_encryption {
                                     ui.label(
-                                        RichText::new(
-                                            "Missing key or unhandled BD+: RIP + PLAY or full-disc ISO dump uses MakeMKV",
-                                        )
+                                        RichText::new(if crate::bluray::mmbd_available() {
+                                            "Missing key or unhandled BD+: MakeMKV live decrypt is used for playback"
+                                        } else {
+                                            "Missing key or unhandled BD+: RIP + PLAY or full-disc ISO dump uses MakeMKV"
+                                        })
                                         .color(Color32::from_rgb(255, 190, 120))
                                         .monospace()
                                         .size(8.0),
@@ -2753,7 +2762,7 @@ impl PlayerApp {
                 ui.label(RichText::new("TROUBLESHOOTING").color(acc).monospace().strong());
                 ui.label(RichText::new("DVD blocks .......... Encrypted image? Use DUMP TO MKV from the image or DUMP TO ISO; raw encrypted images are unsupported").color(dim).monospace());
                 ui.label(RichText::new("Blu-ray BD+ ......... libbdplus and the user's BD+ tables are tried first; MakeMKV is the fallback for unhandled discs").color(dim).monospace());
-                ui.label(RichText::new("AACS bus encryption  .. PLAY automatically decrypts the main title with MakeMKV, then starts it").color(dim).monospace());
+                ui.label(RichText::new("AACS bus encryption  .. PLAY uses MakeMKV live decrypt (libmmbd); no rip, local BD+ tables still first").color(dim).monospace());
                 ui.label(RichText::new("Check DVD tools ..... Run `mediaplayerofdoom --check-dvd` to list dvdbackup, genisoimage and the DVD libraries").color(dim).monospace());
                 ui.label(RichText::new("Ratings missing ..... MusicBrainz, Discogs and TheAudioDB have no rating for that track/album; no public star feed covers everything").color(dim).monospace());
                 ui.label(RichText::new("Covers missing ...... No local/web match; Meta All retries every run and reports the count without art").color(dim).monospace());

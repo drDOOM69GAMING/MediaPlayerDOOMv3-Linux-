@@ -356,13 +356,32 @@ pub fn config_env() -> Option<std::path::PathBuf> {
     .clone()
 }
 
-pub fn configure_command(cmd: &mut std::process::Command) {
+fn configure_local(cmd: &mut std::process::Command) {
     if let Some(dir) = config_env() {
         cmd.env("XDG_CONFIG_HOME", dir);
     }
     if let Some(lib) = bdplus_lib_path() {
         cmd.env("LIBBDPLUS_PATH", lib);
     }
+}
+
+pub fn configure_command(cmd: &mut std::process::Command) {
+    if mmbd_active() {
+        if let Some(dir) = mmbd_env_dir() {
+            let mut paths = vec![dir];
+            if let Some(old) = std::env::var_os("LD_LIBRARY_PATH") {
+                paths.extend(std::env::split_paths(&old));
+            }
+            if let Ok(joined) = std::env::join_paths(paths) {
+                cmd.env("LD_LIBRARY_PATH", joined);
+            }
+            // libmmbd supplies both APIs; a local LIBBDPLUS_PATH would take
+            // precedence and bypass MakeMKV's BD+ handling.
+            cmd.env_remove("LIBBDPLUS_PATH");
+            return;
+        }
+    }
+    configure_local(cmd);
 }
 
 /// Protection facts read from libbluray's `bd_info`. This is what the Blu-ray
@@ -517,7 +536,10 @@ fn run_bd_info(source: &str) -> Option<String> {
     cmd.arg(source)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    configure_command(&mut cmd);
+    // Always assess the disc with the local stack, never through libmmbd,
+    // otherwise a successful MakeMKV decrypt would hide the fact that local
+    // libaacs cannot open the drive and disable live decrypt on the next try.
+    configure_local(&mut cmd);
     let mut child = cmd.spawn().ok()?;
     let mut stdout = child.stdout.take()?;
     let mut stderr = child.stderr.take();
@@ -558,6 +580,67 @@ fn run_bd_info(source: &str) -> Option<String> {
         }
         std::thread::sleep(Duration::from_millis(100));
     }
+}
+
+/// MakeMKV ships libmmbd.so, a drop-in libaacs/libbdplus that decrypts the
+/// disc live through MakeMKV's service. It handles AACS bus encryption and
+/// BD+ without ripping, so playback works even when the system libaacs cannot
+/// initialize the drive.
+pub fn mmbd_path() -> Option<std::path::PathBuf> {
+    let mut dirs: Vec<std::path::PathBuf> = vec![
+        std::path::PathBuf::from("/usr/lib"),
+        std::path::PathBuf::from("/usr/lib64"),
+        std::path::PathBuf::from("/usr/local/lib"),
+        std::path::PathBuf::from("/opt/makemkv/lib"),
+        crate::util::data_dir().join("tools"),
+        crate::util::data_dir(),
+    ];
+    if let Some(ld) = std::env::var_os("LD_LIBRARY_PATH") {
+        dirs.extend(std::env::split_paths(&ld));
+    }
+    for d in dirs {
+        for name in ["libmmbd.so.0", "libmmbd.so"] {
+            let p = d.join(name);
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
+pub fn mmbd_available() -> bool {
+    mmbd_path().is_some()
+}
+
+static MMBD_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Select MakeMKV's live-decrypt libraries for the next ffmpeg/libbluray
+/// processes. The probe turns this on only when local libaacs/libbdplus cannot
+/// handle the disc, so ordinary AACS discs and working BD+ tables stay local.
+pub fn set_mmbd(on: bool) {
+    MMBD_ACTIVE.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn mmbd_active() -> bool {
+    MMBD_ACTIVE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Private directory with libaacs.so.0 and libbdplus.so.0 symlinked to
+/// libmmbd.so.0, used through LD_LIBRARY_PATH.
+pub fn mmbd_env_dir() -> Option<std::path::PathBuf> {
+    let lib = mmbd_path()?;
+    let dir = crate::util::data_dir().join("mmbd");
+    std::fs::create_dir_all(&dir).ok()?;
+    for name in ["libaacs.so.0", "libbdplus.so.0"] {
+        let link = dir.join(name);
+        let _ = std::fs::remove_file(&link);
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&lib, &link).ok()?;
+        #[cfg(not(unix))]
+        return None;
+    }
+    Some(dir)
 }
 
 /// MakeMKV leaves a `makemkvcon guiserver` process running after every
@@ -625,7 +708,9 @@ pub fn release_stale_makemkv() {}
 /// disc's AACS ID. This can take a moment on a large KEYDB, so callers should
 /// run it on a worker thread.
 pub fn protection_info(source: &str) -> Option<DiscProtection> {
-    release_stale_makemkv();
+    if !mmbd_active() {
+        release_stale_makemkv();
+    }
     let text = run_bd_info(source)?;
     let mut info = parse_bd_info(&text);
     if !info.bluray && info.disc_id.is_none() && !info.aacs && !info.bd_plus {
@@ -633,6 +718,14 @@ pub fn protection_info(source: &str) -> Option<DiscProtection> {
     }
     info.keydb_present = keydb_path().is_some();
     info.bdplus_tables = bdplus_convtab_count();
+    // Local libaacs/libbdplus first. MakeMKV's live decrypt is only selected
+    // when the local stack cannot open the disc.
+    set_mmbd(
+        mmbd_available()
+            && (info.bus_encryption
+                || (info.aacs && !info.aacs_handled)
+                || (info.bd_plus && !info.bd_plus_handled)),
+    );
     if let (Some(id), Some(path)) = (info.disc_id.clone(), keydb_path()) {
         let (found, entries) = keydb_lookup_in(&path, &id);
         info.keydb_match = found;
@@ -688,6 +781,16 @@ mod tests {
         let bdplus = parse_bd_info("BluRay detected: yes\nAACS detected: yes\nAACS handled: no\nBD+ detected: yes\n");
         assert!(bdplus.needs_makemkv());
         assert!(bdplus.bd_plus);
+    }
+
+    #[test]
+    fn mmbd_env_dir_links_both_apis() {
+        if mmbd_path().is_none() {
+            return;
+        }
+        let dir = mmbd_env_dir().expect("mmbd env dir");
+        assert!(dir.join("libaacs.so.0").exists());
+        assert!(dir.join("libbdplus.so.0").exists());
     }
 
     #[test]

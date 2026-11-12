@@ -1,5 +1,14 @@
 # Changelog
 
+## v3.2.62
+
+- Play bus-encrypted discs directly through MakeMKV's `libmmbd.so`, which is a drop-in libaacs/libbdplus replacement and decrypts live. No rip is needed.
+- `configure_command` builds a private `libaacs.so.0` / `libbdplus.so.0` symlink directory and exposes it through `LD_LIBRARY_PATH` only when the local stack cannot handle the disc.
+- The protection probe always uses the local stack, so libmmbd cannot mask the original bus-encryption failure and flip itself back off.
+- PLAY now uses live decrypt when libmmbd is available; RIP + PLAY remains only as a fallback when it is missing.
+- Skip the synchronous title probe when libmmbd is active so the UI does not freeze while MakeMKV initializes.
+- Added a test for the libmmbd symlink directory.
+
 ## v3.2.61
 
 - Pressing PLAY on a disc with AACS bus encryption or unhandled BD+ now starts RIP + PLAY automatically instead of attempting libbluray playback and pausing.

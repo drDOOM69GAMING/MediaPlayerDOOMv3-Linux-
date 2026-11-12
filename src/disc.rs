@@ -583,6 +583,9 @@ pub fn dump_main_title_mkv(
             text: "RIP + PLAY: finding the main title with MakeMKV...".to_string(),
         });
         let title = makemkv_main_title(source_spec).unwrap_or(0);
+        // The title lookup can leave a drive-holding guiserver behind; clear
+        // it before the rip so MakeMKV does not fight itself for the drive.
+        crate::bluray::release_stale_makemkv();
         makemkv_dump(source_spec, out_dir, total, tx, cancel, &title.to_string())
     }
 }

@@ -1285,6 +1285,10 @@ impl PlayerApp {
         let tx = self.msg_tx.clone();
         let cancel = self.disc_dump_cancel.clone();
         self.disc_dump_thread = Some(std::thread::spawn(move || {
+            // A just-closed ffmpeg may still be releasing the optical drive.
+            if physical {
+                std::thread::sleep(Duration::from_millis(1500));
+            }
             match crate::disc::dump_main_title_mkv(&source_spec, &out, total, &tx, &cancel) {
                 Ok(path) => {
                     let _ = tx.send(Msg::DiscDumpDone(path.to_string_lossy().to_string()));

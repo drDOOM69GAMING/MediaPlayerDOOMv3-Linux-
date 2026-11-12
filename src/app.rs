@@ -3002,7 +3002,11 @@ video_ended: false,
                             .map(|p| p.bluray)
                             .unwrap_or(false);
                         if needs_mk {
-                            self.start_rip_and_play(Some(&source));
+                            if crate::bluray::mmbd_available() {
+                                self.begin_bluray_playback(&source);
+                            } else {
+                                self.start_rip_and_play(Some(&source));
+                            }
                         } else if is_bluray {
                             self.begin_bluray_playback(&source);
                         } else {
