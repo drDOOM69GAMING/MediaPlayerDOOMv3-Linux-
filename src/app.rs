@@ -369,6 +369,7 @@ pub(crate) struct PlayerApp {
     pub(crate) video_dims: (u32, u32),
     pub(crate) video_tex: Option<egui::TextureHandle>,
     pub(crate) video_poster: Option<egui::TextureHandle>,
+    pub(crate) video_poster_key: String,
     pub(crate) video_poster_kind: String,
     pub(crate) video_poster_title: String,
     /// Audio and subtitle tracks reported by ffprobe for the current video.
@@ -957,6 +958,7 @@ impl PlayerApp {
             video_dims: (640, 360),
             video_tex: None,
             video_poster: None,
+            video_poster_key: String::new(),
             video_poster_kind: String::new(),
             video_poster_title: String::new(),
             video_audio_tracks: Vec::new(),
@@ -2503,6 +2505,14 @@ video_ended: false,
                     "{} v{} is the latest release",
                     APP_NAME, APP_VERSION
                 ));
+            }
+            Msg::DiscPoster { key, bytes } => {
+                if key == self.video_poster_key {
+                    if let Some(b) = bytes {
+                        self.set_video_poster_bytes(b.clone());
+                        let _ = write_art_cache(&key, &b);
+                    }
+                }
             }
             Msg::YtStatus(s) => {
                 self.status = s;

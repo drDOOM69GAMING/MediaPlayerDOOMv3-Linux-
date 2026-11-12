@@ -137,6 +137,8 @@ pub enum Msg {
     UpdateAvailable { version: String, url: String },
     /// A manual update check found no newer release.
     UpdateNone,
+    /// Movie/disc poster fetched for a DVD or Blu-ray title.
+    DiscPoster { key: String, bytes: Option<Vec<u8>> },
     YtStatus(String),
     YtLog(String),
     /// Progress of the whole job: which stage is running, and a label for it.
@@ -215,6 +217,8 @@ pub enum NetCmd {
     /// Fallback for a track with no usable album: search by song title.
     WebArtSong { gen: u64, paths: Vec<String>, artist: String, title: String },
     Lyrics(String, String),
+    /// Fetch a movie poster for a disc title.
+    DiscPoster { key: String, title: String },
     /// Compare the running version with the latest GitHub release.
     CheckUpdate { current: String, manual: bool },
 }

@@ -121,23 +121,101 @@ fn find_disc_image(source: &str) -> Option<Vec<u8>> {
     None
 }
 
+/// Best human title for a disc: label for a device, folder name for a folder,
+/// file stem for an ISO. Used for the poster search and the sidebar.
+fn disc_title(source: &str, kind: &str) -> String {
+    let p = Path::new(source);
+    let mut raw = String::new();
+    if p.is_dir() {
+        raw = p
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+    } else if p.is_file() {
+        raw = p
+            .file_stem()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+    } else if source.starts_with("/dev/") {
+        if let Ok(out) = Command::new("lsblk")
+            .args(["-no", "LABEL", source])
+            .output()
+        {
+            raw = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        }
+        if raw.is_empty() {
+            if let Ok(mounts) = std::fs::read_to_string("/proc/mounts") {
+                for line in mounts.lines() {
+                    let mut it = line.split_whitespace();
+                    if let (Some(dev), Some(mnt)) = (it.next(), it.next()) {
+                        if dev == source {
+                            raw = Path::new(&mnt.replace("\\040", " "))
+                                .file_name()
+                                .map(|n| n.to_string_lossy().to_string())
+                                .unwrap_or_default();
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let cleaned = raw
+        .replace('_', " ")
+        .replace('.', " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if cleaned.is_empty()
+        || cleaned.eq_ignore_ascii_case("video_ts")
+        || cleaned.eq_ignore_ascii_case("bdmv")
+        || cleaned.eq_ignore_ascii_case("dvd video")
+    {
+        format!("{} disc", kind)
+    } else {
+        cleaned
+    }
+}
+
 impl PlayerApp {
-    /// Load a local disc poster, or leave the generic disc badge in place.
+    /// Load a local disc poster, a cached movie poster, or ask iTunes for one.
+    pub(crate) fn set_video_poster_bytes(&mut self, bytes: Vec<u8>) {
+        if let Ok(img) = image::load_from_memory(&bytes) {
+            let rgba = img.to_rgba8();
+            let thumb = image::imageops::thumbnail(&rgba, 360, 540);
+            let size = [thumb.width() as usize, thumb.height() as usize];
+            let ci = ColorImage::from_rgba_unmultiplied(size, thumb.as_raw());
+            self.video_poster = Some(
+                self.ctx
+                    .load_texture("disc_poster", ci, TextureOptions::LINEAR),
+            );
+        }
+    }
+
     pub(crate) fn load_disc_poster(&mut self, source: &str, kind: &str, title: &str) {
         self.video_poster = None;
         self.video_poster_kind = kind.to_string();
         self.video_poster_title = title.to_string();
+        let key = format!("discv2:{}", title.to_lowercase());
+        self.video_poster_key = key.clone();
+
+        // 1. A poster fetched previously for this title.
+        if let Some(bytes) = read_art_cache(&key) {
+            self.set_video_poster_bytes(bytes);
+            return;
+        }
+        // 2. A local cover/folder/poster image or Blu-ray metadata thumbnail.
         if let Some(bytes) = find_disc_image(source) {
-            if let Ok(img) = image::load_from_memory(&bytes) {
-                let rgba = img.to_rgba8();
-                let thumb = image::imageops::thumbnail(&rgba, 360, 540);
-                let size = [thumb.width() as usize, thumb.height() as usize];
-                let ci = ColorImage::from_rgba_unmultiplied(size, thumb.as_raw());
-                self.video_poster = Some(
-                    self.ctx
-                        .load_texture("disc_poster", ci, TextureOptions::LINEAR),
-                );
-            }
+            self.set_video_poster_bytes(bytes.clone());
+            let _ = write_art_cache(&key, &bytes);
+            return;
+        }
+        // 3. Ask iTunes Movies in the background.
+        if title.chars().filter(|c| c.is_alphanumeric()).count() >= 3 {
+            let _ = self.net_tx.send(NetCmd::DiscPoster {
+                key,
+                title: title.to_string(),
+            });
         }
     }
 
@@ -231,11 +309,7 @@ impl PlayerApp {
         crate::ffmpeg::clear_audio_map_cache();
         self.video_queue = vec![wrapped.clone()];
         self.video_queue_idx = 0;
-        self.load_disc_poster(
-            source,
-            "DVD",
-            &crate::dvd::display_name(&crate::dvd::wrap(source)),
-        );
+        self.load_disc_poster(source, "DVD", &disc_title(source, "DVD"));
         self.play_video_item(wrapped);
         self.set_status(format!("DVD: {}", crate::dvd::display_name(&crate::dvd::wrap(source))));
     }
@@ -257,11 +331,7 @@ impl PlayerApp {
         self.video_positions.remove(&wrapped);
         self.video_queue = vec![wrapped.clone()];
         self.video_queue_idx = 0;
-        self.load_disc_poster(
-            source,
-            "BLU-RAY",
-            &crate::bluray::display_name(&crate::bluray::wrap_playlist(source, playlist)),
-        );
+        self.load_disc_poster(source, "BLU-RAY", &disc_title(source, "BLU-RAY"));
         self.play_video_item(wrapped);
         if let Some(i) = &info {
             self.video_dur_secs = i.secs;
@@ -817,6 +887,7 @@ impl PlayerApp {
         av_log(&format!("play_video_item path={} saved_pos={:.3}", path, saved_pos));
         if !crate::dvd::is_dvd(&path) && !crate::bluray::is_bluray(&path) {
             self.video_poster = None;
+            self.video_poster_key.clear();
             self.video_poster_kind.clear();
             self.video_poster_title.clear();
         }
@@ -1054,6 +1125,7 @@ impl PlayerApp {
         self.video_queue_idx = 0;
         self.video_tex = None;
         self.video_poster = None;
+        self.video_poster_key.clear();
         self.video_poster_kind.clear();
         self.video_poster_title.clear();
         self.video_loading_since = None;

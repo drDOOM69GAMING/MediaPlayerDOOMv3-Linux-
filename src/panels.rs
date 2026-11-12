@@ -313,12 +313,23 @@ impl PlayerApp {
                 .auto_shrink([false, false])
                 .max_height(upper_h)
                 .show(ui, |ui| {
+            let disc_mode = self.video_on
+                && self
+                    .video_current
+                    .as_deref()
+                    .map(|p| crate::dvd::is_dvd(p) || crate::bluray::is_bluray(p))
+                    .unwrap_or(false);
             let (w, h) = (210.0, 200.0);
             let (rect, _) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::hover());
             let p = ui.painter().with_clip_rect(rect);
             engrave(&p, rect, th.btn_bg);
             p.rect_filled(rect.shrink(2.0), 2.0, th.art_bg);
-            if let Some(tex) = &self.art_tex {
+            let cover_tex = if disc_mode {
+                self.video_poster.as_ref()
+            } else {
+                self.art_tex.as_ref()
+            };
+            if let Some(tex) = cover_tex {
                 let ts = tex.size();
                 let (tw, th) = (ts[0].max(1) as f32, ts[1].max(1) as f32);
                 let avail = rect.shrink(4.0);
@@ -333,6 +344,23 @@ impl PlayerApp {
                     egui::Rect::from_min_max(egui::Pos2::ZERO, egui::Pos2::new(1.0, 1.0)),
                     Color32::WHITE,
                 );
+            } else if disc_mode {
+                let c = rect.center();
+                p.circle_filled(c, 72.0, Color32::from_gray(28));
+                p.circle_stroke(c, 72.0, egui::Stroke::new(2.0, Color32::from_gray(120)));
+                p.circle_stroke(c, 47.0, egui::Stroke::new(1.0, Color32::from_gray(80)));
+                p.circle_filled(c, 9.0, Color32::from_gray(15));
+                p.text(
+                    c,
+                    egui::Align2::CENTER_CENTER,
+                    if self.video_poster_kind.is_empty() {
+                        "DISC"
+                    } else {
+                        &self.video_poster_kind
+                    },
+                    egui::FontId::monospace(18.0),
+                    Color32::from_gray(210),
+                );
             } else {
                 p.text(
                     rect.center(),
@@ -343,11 +371,29 @@ impl PlayerApp {
                 );
             }
             ui.add_space(6.0);
+            let (m0, m1, m2) = if disc_mode {
+                (
+                    self.video_poster_title.as_str(),
+                    self.video_poster_kind.as_str(),
+                    "DISC",
+                )
+            } else {
+                (self.meta.0.as_str(), self.meta.1.as_str(), self.meta.2.as_str())
+            };
             // Wrap long titles inside the sidebar instead of letting them
             // widen the panel and shift the deck buttons.
-            ui.add(egui::Label::new(RichText::new(&self.meta.0).color(th.fg).monospace().strong().size(13.0)).wrap());
-            ui.add(egui::Label::new(RichText::new(&self.meta.1).color(th.accent).monospace().size(11.0)).wrap());
-            ui.add(egui::Label::new(RichText::new(&self.meta.2).color(Color32::from_gray(140)).monospace().size(10.0)).wrap());
+            ui.add(egui::Label::new(RichText::new(m0).color(th.fg).monospace().strong().size(13.0)).wrap());
+            ui.add(egui::Label::new(RichText::new(m1).color(th.accent).monospace().size(11.0)).wrap());
+            ui.add(egui::Label::new(RichText::new(m2).color(Color32::from_gray(140)).monospace().size(10.0)).wrap());
+            if disc_mode {
+                ui.separator();
+                ui.label(
+                    RichText::new("DVD / BLU-RAY")
+                        .color(darken(th.accent, 0.25))
+                        .monospace()
+                        .size(9.0),
+                );
+            } else {
             ui.separator();
             ui.horizontal(|ui| {
                 ui.label(RichText::new("RATE").color(darken(th.accent, 0.4)).monospace().size(9.0));
@@ -408,6 +454,7 @@ impl PlayerApp {
                     }
                 }
             });
+            }
 
             let dt = ui.input(|i| i.stable_dt);
             self.update_viz(dt);
@@ -2597,7 +2644,7 @@ impl PlayerApp {
                 ui.label(RichText::new("Auto English ........ Enable it in SUBTITLE STYLE to turn on the first English subtitle").color(dim).monospace());
                 ui.label(RichText::new("Disc audio .......... AUDIO cycles the audio tracks of a DVD or Blu-ray title").color(dim).monospace());
                 ui.label(RichText::new("DVD upscale ......... DVD SCALE upscales to 1620x1080 with Lanczos and CAS sharpening").color(dim).monospace());
-                ui.label(RichText::new("Disc cover .......... A local cover/poster shows while loading or paused; otherwise a disc badge").color(dim).monospace());
+                ui.label(RichText::new("Disc cover .......... The movie poster shows in the sidebar and while loading or paused; local art, IMDb or Wikipedia").color(dim).monospace());
                 ui.label(RichText::new("Disc subtitles ...... Embedded VobSub/PGS subtitles are not rendered; use OPEN SUBS for a text file").color(dim).monospace());
                 ui.add_space(6.0);
 

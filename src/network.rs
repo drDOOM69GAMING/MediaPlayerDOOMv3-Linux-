@@ -40,6 +40,10 @@ pub fn net_loop(rx: Receiver<NetCmd>, tx: Sender<Msg>) {
                     let text = fetch_lyrics(&artist, &title);
                     let _ = tx.send(Msg::Lyrics { artist, title, text });
                 }
+                NetCmd::DiscPoster { key, title } => {
+                    let bytes = fetch_movie_poster(&title);
+                    let _ = tx.send(Msg::DiscPoster { key, bytes });
+                }
                 NetCmd::CheckUpdate { current, manual } => {
                     match check_latest_release(&current) {
                         Some((version, url)) => {
@@ -1138,6 +1142,214 @@ pub fn match_score(artist: &str, album: &str, cand_artist: &str, cand_album: &st
     score
 }
 
+/// Candidate movie names from a folder/ISO label. Strips release years and
+/// common encoder tags so "The.Matrix.1999.1080p.BluRay" still finds the film.
+fn movie_title_candidates(title: &str) -> Vec<String> {
+    let clean = title.replace(['_', '.'], " ");
+    let tokens: Vec<&str> = clean.split_whitespace().collect();
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |s: String| {
+        let s = s.trim().to_string();
+        if !s.is_empty() && !out.iter().any(|x| x.eq_ignore_ascii_case(&s)) {
+            out.push(s);
+        }
+    };
+    push(tokens.join(" "));
+    if let Some(yi) = tokens.iter().position(|t| {
+        t.len() == 4
+            && t.chars().all(|c| c.is_ascii_digit())
+            && *t >= "1900"
+            && *t <= "2099"
+    }) {
+        if yi > 0 && yi + 1 < tokens.len() {
+            push(tokens[..yi].join(" "));
+        }
+    }
+    let tags = [
+        "1080p", "720p", "2160p", "480p", "bluray", "blu-ray", "webrip", "web-dl",
+        "webdl", "x264", "x265", "hevc", "h264", "aac", "dts", "remux", "proper",
+        "repack", "extended", "unrated", "hdr", "dv",
+    ];
+    let filtered: Vec<&str> = tokens
+        .iter()
+        .copied()
+        .filter(|t| !tags.contains(&t.to_ascii_lowercase().as_str()))
+        .collect();
+    if filtered.len() < tokens.len() {
+        push(filtered.join(" "));
+    }
+    out
+}
+
+fn wikipedia_poster_url(client: &reqwest::blocking::Client, title: &str) -> Option<String> {
+    let summary_url = format!(
+        "https://en.wikipedia.org/api/rest_v1/page/summary/{}",
+        percent_encode(&title.replace(' ', "_"))
+    );
+    if let Ok(res) = client.get(summary_url).send() {
+        if res.status().is_success() {
+            if let Ok(json) = res.json::<serde_json::Value>() {
+                if json.get("type").and_then(|v| v.as_str()) != Some("disambiguation") {
+                    if let Some(src) = json
+                        .get("thumbnail")
+                        .and_then(|v| v.get("source"))
+                        .and_then(|v| v.as_str())
+                        .or_else(|| {
+                            json.get("originalimage")
+                                .and_then(|v| v.get("source"))
+                                .and_then(|v| v.as_str())
+                        })
+                    {
+                        return Some(src.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    let search = format!("{} film", title);
+    let url = format!(
+        "https://en.wikipedia.org/w/api.php?action=query&generator=search&gsrsearch={}&gsrlimit=5&prop=pageimages&piprop=thumbnail&pithumbsize=600&format=json",
+        percent_encode(&search)
+    );
+    let json: serde_json::Value = client.get(&url).send().ok()?.json().ok()?;
+    let pages = json.get("query")?.get("pages")?.as_object()?;
+    for (_, page) in pages {
+        let page_title = page
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if ["franchise", "soundtrack", "video game", "list of"]
+            .iter()
+            .any(|skip| page_title.contains(skip))
+        {
+            continue;
+        }
+        if let Some(src) = page
+            .get("thumbnail")
+            .and_then(|v| v.get("source"))
+            .and_then(|v| v.as_str())
+        {
+            return Some(src.to_string());
+        }
+    }
+    None
+}
+
+fn title_year(title: &str) -> Option<u32> {
+    title
+        .split(|c: char| !c.is_ascii_digit())
+        .find(|t| t.len() == 4)
+        .and_then(|t| t.parse::<u32>().ok())
+        .filter(|y| (1900..=2099).contains(y))
+}
+
+/// IMDb's public suggestion endpoint returns the film and its poster without
+/// an API key. It is the primary poster source; Wikipedia is the fallback.
+fn imdb_poster(client: &reqwest::blocking::Client, title: &str) -> Option<Vec<u8>> {
+    let url = format!(
+        "https://v3.sg.media-imdb.com/suggestion/x/{}.json?includeVideos=0",
+        percent_encode(title)
+    );
+    let json: serde_json::Value = client.get(&url).send().ok()?.json().ok()?;
+    let results = json.get("d")?.as_array()?;
+    let fold = |s: &str| -> String {
+        s.to_lowercase()
+            .chars()
+            .filter(|c| c.is_alphanumeric())
+            .collect()
+    };
+    let want = fold(title);
+    let year = title_year(title);
+    let mut best: Option<(i32, String)> = None;
+    for r in results {
+        let name = r.get("l").and_then(|v| v.as_str()).unwrap_or("");
+        let kind = r.get("q").and_then(|v| v.as_str()).unwrap_or("");
+        let image = r
+            .get("i")
+            .and_then(|v| v.get("imageUrl"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if image.is_empty() {
+            continue;
+        }
+        let n = fold(name);
+        let mut score = if n == want {
+            8
+        } else if n.contains(&want) || want.contains(&n) {
+            4
+        } else {
+            0
+        };
+        if score == 0 {
+            continue;
+        }
+        score += match kind.to_ascii_lowercase().as_str() {
+            "feature" | "movie" => 3,
+            "tv movie" | "tvmovie" => 2,
+            "video" => 1,
+            _ => 0,
+        };
+        if let (Some(want_year), Some(got_year)) =
+            (year, r.get("y").and_then(|v| v.as_u64()).map(|v| v as u32))
+        {
+            if want_year == got_year {
+                score += 4;
+            } else {
+                score -= 1;
+            }
+        }
+        if best.as_ref().map_or(true, |(s, _)| score > *s) {
+            best = Some((score, image.to_string()));
+        }
+    }
+    let image = best?
+        .1
+        .replace("._V1_.jpg", "._V1_SX600.jpg");
+    let bytes = client.get(&image).send().ok()?.bytes().ok()?.to_vec();
+    if bytes.len() < 1024 {
+        return None;
+    }
+    Some(bytes)
+}
+
+/// Find a movie poster. IMDb is preferred; Wikipedia's page image is the
+/// fallback for titles IMDb does not resolve.
+pub fn fetch_movie_poster(title: &str) -> Option<Vec<u8>> {
+    let title = title.trim();
+    if title.chars().filter(|c| c.is_alphanumeric()).count() < 3 {
+        return None;
+    }
+    let lower = title.to_ascii_lowercase();
+    if matches!(lower.as_str(), "dvd disc" | "blu-ray disc" | "bluray disc") {
+        return None;
+    }
+    let client = http_client()?;
+    let candidates = movie_title_candidates(title);
+    for candidate in &candidates {
+        if candidate.chars().filter(|c| c.is_alphanumeric()).count() < 3 {
+            continue;
+        }
+        if let Some(bytes) = imdb_poster(&client, candidate) {
+            return Some(bytes);
+        }
+    }
+    for candidate in &candidates {
+        if candidate.chars().filter(|c| c.is_alphanumeric()).count() < 3 {
+            continue;
+        }
+        if let Some(url) = wikipedia_poster_url(&client, candidate) {
+            if let Ok(bytes) = client.get(&url).send().and_then(|r| r.bytes()) {
+                if !bytes.is_empty() && bytes.len() >= 1024 {
+                    return Some(bytes.to_vec());
+                }
+            }
+        }
+    }
+    None
+}
+
 pub fn fetch_lyrics(artist: &str, title: &str) -> Option<String> {
     let client = reqwest::blocking::Client::builder().timeout(Duration::from_secs(10)).build().ok()?;
     let url = format!("https://api.lyrics.ovh/v1/{}/{}", percent_encode(artist), percent_encode(title));
@@ -1493,5 +1705,20 @@ mod update_tests {
         assert!(version_newer("3.2.41-rc1", "3.2.40"));
         assert!(!version_newer("3.2.41", "3.2.41-rc1"));
         assert!(!version_newer("", "3.2.41"));
+    }
+}
+
+#[cfg(test)]
+mod poster_tests {
+    use super::*;
+
+    #[test]
+    #[ignore]
+    fn live_wikipedia_movie_poster() {
+        for title in ["The Matrix", "The.Matrix.1999.1080p.BluRay"] {
+            let b = fetch_movie_poster(title).unwrap_or_else(|| panic!("no poster for {title}"));
+            assert!(b.len() > 1000, "poster bytes {} for {title}", b.len());
+            eprintln!("{title}: {} bytes", b.len());
+        }
     }
 }

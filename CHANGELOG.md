@@ -1,5 +1,17 @@
 # Changelog
 
+## v3.2.53
+
+- DVD and Blu-ray cover art now appears in the same sidebar cover area as music art.
+- Local covers are used first: cover/folder/poster/front images, ISO sidecars, mounted drive folders and Blu-ray META/DL thumbnails.
+- If no local image exists, the disc title is looked up on IMDb first and the 600px movie poster is cached.
+- Wikipedia remains a fallback for titles IMDb does not resolve.
+- Disc poster cache keys were versioned so old bad images are re-fetched once.
+- The disc title comes from the volume label for a tray disc, the folder name or the ISO file name.
+- Closing the movie restores the normal music cover and metadata.
+- A generic DVD or Blu-ray badge is shown when no poster can be found.
+- The poster also appears over the movie while loading or paused.
+
 ## v3.2.52
 
 - DVD SCALE now really upscales 480/576 video to 1620x1080; the previous target stayed at source size.
