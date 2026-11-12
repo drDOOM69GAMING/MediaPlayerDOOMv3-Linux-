@@ -319,8 +319,11 @@ fn parse_hms(v: &str) -> Option<u64> {
 /// Ask MakeMKV for its title list and return the longest title (usually the
 /// main feature). Robot mode prints `TINFO:<id>,9,0,"H:MM:SS"` for duration.
 pub fn makemkv_main_title(source_spec: &str) -> Option<u32> {
+    // Must match the dump's --minlength=0 flag: without it MakeMKV hides
+    // short clips and renumbers the titles, so the main feature's index would
+    // point at an 8-second clip during the rip.
     let mut child = Command::new("makemkvcon")
-        .args(["-r", "info", source_spec])
+        .args(["-r", "info", "--minlength=0", source_spec])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
@@ -612,6 +615,19 @@ fn makemkv_dump(
     let _guiserver_guard = MkGuiserverGuard;
     std::fs::create_dir_all(out_dir)
         .map_err(|e| format!("cannot create {}: {}", out_dir.display(), e))?;
+    if total > 0 {
+        if let Some(free) = free_space(out_dir) {
+            let need = total.saturating_add(total / 20);
+            if free < need {
+                return Err(format!(
+                    "not enough free space in {}: the MKV needs about {:.1} GB, only {:.1} GB available. Use DUMP TO MKV to choose another folder",
+                    out_dir.display(),
+                    need as f64 / 1e9,
+                    free as f64 / 1e9
+                ));
+            }
+        }
+    }
     let _ = tx.send(Msg::DiscDumpProgress {
         done: 0,
         total,

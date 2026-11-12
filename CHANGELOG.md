@@ -1,5 +1,15 @@
 # Changelog
 
+## v3.2.60
+
+- MKV rips now check free space before starting and refuse with a clear message instead of filling the destination drive.
+- RIP + PLAY uses the disc size as a safe upper bound; the Deadpool 2 main title is about 36.5 GB.
+
+## v3.2.59
+
+- Fixed RIP + PLAY selecting the wrong title: MakeMKV renumbers titles when short clips are filtered out, so the title lookup now uses the same `--minlength=0` flag as the rip.
+- On Deadpool 2 the main feature is title 3 (2:13:59) with `--minlength=0`; RIP + PLAY now rips that instead of an 8-second clip.
+
 ## v3.2.58
 
 - Fixed the Blu-ray deck showing "NO BLU-RAY DISC DETECTED" on bus-encrypted discs: `bd_info` can take 15-30 seconds on those drives, so the probe timeout is now 60 seconds instead of 15.
