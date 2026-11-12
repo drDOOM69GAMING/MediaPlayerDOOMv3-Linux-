@@ -235,12 +235,32 @@ pub fn eject(drive: &str) -> bool {
 /// drive. It carries the device, track number and TOC length so the playback
 /// worker can start cdparanoia without touching the library or a temp file.
 pub fn cdda_path(drive: &str, track: u8, duration_ms: u64) -> String {
-    format!("cdda://{}|{}|{}", drive, track, duration_ms)
+    cdda_path_at(drive, track, duration_ms, 0)
+}
+
+/// CDDA path with a millisecond start offset inside the track.
+pub fn cdda_path_at(drive: &str, track: u8, duration_ms: u64, start_ms: u64) -> String {
+    if start_ms == 0 {
+        format!("cdda://{}|{}|{}", drive, track, duration_ms)
+    } else {
+        format!("cdda://{}|{}|{}|{}", drive, track, duration_ms, start_ms)
+    }
+}
+
+/// cdparanoia span for a track and an optional in-track start offset.
+fn cdda_span(track: u8, start_ms: u64) -> String {
+    if start_ms == 0 {
+        return track.to_string();
+    }
+    let mm = start_ms / 60_000;
+    let ss = (start_ms / 1000) % 60;
+    let ff = (((start_ms % 1000) * 75) / 1000).min(74);
+    format!("{}:[{:02}:{:02}.{:02}]", track, mm, ss, ff)
 }
 
 pub fn cdda_parts(path: &str) -> Option<(&str, u8, u64)> {
     let rest = path.strip_prefix("cdda://")?;
-    let mut it = rest.splitn(3, '|');
+    let mut it = rest.split('|');
     let drive = it.next()?;
     let track = it.next()?.parse().ok()?;
     let duration_ms = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
@@ -418,10 +438,17 @@ pub fn available() -> bool {
 /// disabled for playback: it is only needed for archival ripping and made the
 /// drive stall and retry long enough to cause audible gaps.
 pub fn cdda_source(drive: &str, track: u8, duration_ms: u64) -> Option<CddaSource> {
+    cdda_source_at(drive, track, duration_ms, 0)
+}
+
+/// Start streaming one track at an in-track offset. Seeking restarts
+/// cdparanoia at the requested sector; the drive is the only source, so there
+/// is no sample-accurate seek inside the existing stream.
+pub fn cdda_source_at(drive: &str, track: u8, duration_ms: u64, start_ms: u64) -> Option<CddaSource> {
     let exe = cdparanoia_exe()?;
     let mut child = Command::new(exe)
         .args(["-q", "-Z", "-r", "-d", drive])
-        .arg(track.to_string())
+        .arg(cdda_span(track, start_ms))
         // cdparanoia needs an explicit output name. Without it the process
         // waits forever and produces no stdout. A single dash means stdout.
         .arg("-")
@@ -875,10 +902,13 @@ mod tests {
         assert_eq!(m.release_id.as_deref(), Some("rid-1"));
     }
 
+    static CDDA_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn cdda_source_streams_raw_pcm() {
         use rodio::Source as _;
         use std::os::unix::fs::PermissionsExt;
+        let _guard = CDDA_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
         let dir = std::env::temp_dir().join(format!("mpdoom-cdda-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -915,6 +945,58 @@ mod tests {
         assert_eq!(cdda_parts(&p), Some(("/dev/sr0", 7, 123_456)));
         assert!(!is_cdda("/music/song.flac"));
         assert_eq!(cdda_parts("/music/song.flac"), None);
+    }
+
+    #[test]
+    fn cdda_seek_spans_use_track_offsets() {
+        assert_eq!(cdda_span(1, 0), "1");
+        assert_eq!(cdda_span(1, 90_000), "1:[01:30.00]");
+        assert_eq!(cdda_span(2, 61_500), "2:[01:01.37]");
+        let p = cdda_path_at("/dev/sr0", 3, 200_000, 90_000);
+        assert!(is_cdda(&p));
+        assert_eq!(cdda_parts(&p), Some(("/dev/sr0", 3, 200_000)));
+    }
+
+    #[test]
+    fn cdda_source_at_passes_start_offset() {
+        use std::os::unix::fs::PermissionsExt;
+        let _guard = CDDA_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let dir = std::env::temp_dir().join(format!("mpdoom-cdda-args-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let args_file = dir.join("args");
+        let script = dir.join("fake-cdparanoia");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nprintf '\\001\\000\\377\\377'\n",
+                args_file.display()
+            ),
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).unwrap();
+
+        std::env::set_var("MPDOOM_CDPARANOIA", &script);
+        let src = cdda_source_at("/dev/sr0", 3, 200_000, 90_000);
+        assert!(src.is_some());
+        for _ in 0..200 {
+            if args_file.is_file() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let text = std::fs::read_to_string(&args_file).unwrap_or_default();
+        assert!(
+            text.lines().any(|l| l == "3:[01:30.00]"),
+            "cdparanoia args were: {:?}",
+            text
+        );
+        drop(src);
+        std::env::remove_var("MPDOOM_CDPARANOIA");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -416,10 +416,10 @@ pub(crate) fn spawn_auto_advance(
         let next_cdda = false;
         if next_cdda {
             // A CD can only read one place at a time. Do not pre-open the next
-            // track while the current one is still playing; wait for the sink
-            // to drain, then start the next track.
+            // track while the current one is still playing; poll tightly so
+            // the next track starts as soon as the sink drains.
             if len > 0 {
-                std::thread::sleep(Duration::from_millis(80));
+                std::thread::sleep(Duration::from_millis(20));
                 continue;
             }
         } else if len > 1 {
@@ -1209,7 +1209,7 @@ impl PlayerApp {
             .map(crate::cd::is_cdda)
             .unwrap_or(false)
         {
-            self.set_status("CD track: use Next or Previous to change track");
+            self.seek_cdda(secs);
             return;
         }
         let secs = secs.max(0.0);
@@ -1220,6 +1220,56 @@ impl PlayerApp {
         }
         self.seek_base = secs;
         self.reopen_at(secs);
+    }
+
+    /// In-track CD seek. cdparanoia cannot seek inside a running stream, so
+    /// restart it at the requested track offset and keep the same display path.
+    fn seek_cdda(&mut self, secs: f32) {
+        let Some(path) = self.state.current_song.clone() else {
+            return;
+        };
+        let Some((drive, track, duration_ms)) = crate::cd::cdda_parts(&path) else {
+            return;
+        };
+        let secs = secs.max(0.0);
+        let secs = if self.len_secs > 0.0 {
+            secs.min(self.len_secs)
+        } else {
+            secs
+        };
+        let start_ms = (secs * 1000.0).round() as u64;
+        let Some(src) = crate::cd::cdda_source_at(drive, track, duration_ms, start_ms) else {
+            self.set_error("CD seek failed: cannot start cdparanoia");
+            return;
+        };
+        let was_paused = self.state.is_paused;
+        self.reset_auto_advance();
+        self.kill_audio_pipe();
+        self.sink.stop();
+        self.sink.set_volume(self.state.volume as f32 / 100.0);
+        self.sink.append(self.tap_viz(EqSource::new(
+            PlaySource::Cdda(src),
+            self.eq_shared.clone(),
+        )));
+        if was_paused {
+            self.sink.pause();
+        } else {
+            self.sink.play();
+        }
+        self.seek_base = secs;
+        self.pos = secs;
+        self.state.is_paused = was_paused;
+        self.play_started = Some(Instant::now());
+        self.song_starting = false;
+        self.dragging = false;
+        self.auto_active
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        self.refill_auto_advance();
+        self.set_status(format!(
+            "CD seek {:02}:{:02}",
+            (secs as u32) / 60,
+            (secs as u32) % 60
+        ));
     }
 
     pub(crate) fn kill_audio_pipe(&mut self) {

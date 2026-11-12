@@ -2557,6 +2557,7 @@ impl PlayerApp {
 
                 ui.label(RichText::new("CD MODE").color(acc).monospace().strong());
                 ui.label(RichText::new("Insert audio CD ..... Detect tracks/TOC; rip whole disc losslessly to FLAC with MusicBrainz tags and cover art").color(dim).monospace());
+                ui.label(RichText::new("Seek ................ FWD and REW seek 10 seconds within the current CD track").color(dim).monospace());
                 ui.label(RichText::new("Play CD ............. Stream the tray disc and play it in order; nothing is ripped or written to disk").color(dim).monospace());
                 ui.label(RichText::new("Disc order .......... CD playback always follows track order; shuffle, folder and star filters are ignored").color(dim).monospace());
                 ui.label(RichText::new("Rip progress ........ Live bar with percentage, read speed multiplier and ETA while the disc is extracted").color(dim).monospace());

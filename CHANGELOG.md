@@ -1,5 +1,12 @@
 # Changelog
 
+## v3.2.46
+
+- CD mode now supports in-track seeking with FWD and REW.
+- A CD seek restarts cdparanoia at the requested track offset while keeping the same track identity.
+- The CD auto-advance polls tightly so the next track starts as soon as the current buffer drains.
+- Added tests for CDDA seek path formatting and the cdparanoia start-offset argument.
+
 ## v3.2.45
 
 - Added a SUBTITLE STYLE window with size, bottom margin and outline sliders.

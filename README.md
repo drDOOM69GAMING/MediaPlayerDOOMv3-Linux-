@@ -1,6 +1,6 @@
 # MediaPlayerDOOM v3 for Linux
 
-![Version](https://img.shields.io/badge/version-3.2.45-blue)
+![Version](https://img.shields.io/badge/version-3.2.46-blue)
 ![Platform](https://img.shields.io/badge/platform-Linux%20x86__64-informational)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -47,6 +47,7 @@ This repository is the Linux port. It is tested on CachyOS and Arch with KDE Pla
 - Physical audio CDs are detected automatically and ripped to lossless FLAC with MusicBrainz tags and cover art
 - CD ripping shows a live progress bar with percentage, read speed and ETA
 - PLAY CD streams the tray disc directly through cdparanoia; nothing is ripped or written to disk
+- FWD/REW seek within the current CD track by restarting cdparanoia at the offset
 - CD audio is buffered ahead for smooth playback, with album art and titles loading in the background
 - CD playback always follows track order, with shuffle and star filters ignored
 - CD mode shows only the loaded disc and hides the library band browser
