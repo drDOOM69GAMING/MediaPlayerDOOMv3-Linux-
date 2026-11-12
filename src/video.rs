@@ -121,6 +121,24 @@ fn find_disc_image(source: &str) -> Option<Vec<u8>> {
     None
 }
 
+fn audio_track_label(t: &crate::types::AudioStreamInfo) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if !t.lang.is_empty() {
+        parts.push(t.lang.to_ascii_uppercase());
+    }
+    if t.channels > 0 {
+        parts.push(format!("{}ch", t.channels));
+    }
+    if !t.title.is_empty() {
+        parts.push(t.title.clone());
+    }
+    if parts.is_empty() {
+        format!("Track {}", t.ordinal + 1)
+    } else {
+        parts.join(" · ")
+    }
+}
+
 /// Best human title for a disc: label for a device, folder name for a folder,
 /// file stem for an ISO. Used for the poster search and the sidebar.
 fn disc_title(source: &str, kind: &str) -> String {
@@ -284,10 +302,25 @@ impl PlayerApp {
             egui::FontId::monospace(if self.video_fs { 15.0 } else { 11.0 }),
             Color32::WHITE,
         );
+        let info = if self
+            .video_current
+            .as_deref()
+            .map(crate::dvd::is_dvd)
+            .unwrap_or(false)
+        {
+            format!(
+                "DVD {}x{}  {}",
+                self.video_dims.0,
+                self.video_dims.1,
+                if self.dvd_upscale { "Lanczos" } else { "standard" }
+            )
+        } else {
+            "PAUSED / LOADING".to_string()
+        };
         p.text(
             egui::pos2(panel.center().x, panel.max.y - 24.0),
             egui::Align2::CENTER_TOP,
-            "PAUSED / LOADING",
+            info,
             egui::FontId::monospace(9.0),
             Color32::from_gray(140),
         );
@@ -729,6 +762,203 @@ impl PlayerApp {
         let pos = self.video_position_now();
         self.seek_video(pos);
         self.set_status("External subtitles enabled");
+    }
+
+    /// Explicit audio and subtitle picker for the current movie.
+    pub(crate) fn show_video_tracks_window(&mut self, ctx: &egui::Context) {
+        if !self.video_tracks_open {
+            return;
+        }
+        let th = self.theme_colors();
+        let path = self.video_current.clone();
+        let disc = path
+            .as_deref()
+            .map(|p| crate::dvd::is_dvd(p) || crate::bluray::is_bluray(p))
+            .unwrap_or(false);
+        let is_dvd = path.as_deref().map(crate::dvd::is_dvd).unwrap_or(false);
+        let mut open = self.video_tracks_open;
+        let mut close_clicked = false;
+        let mut pick_audio: Option<usize> = None;
+        let mut pick_sub: Option<Option<usize>> = None;
+        let mut open_subs = false;
+        let mut rescan = false;
+        let mut scale_toggle = false;
+        egui::Window::new("MOVIE TRACKS")
+            .resizable(false)
+            .collapsible(false)
+            .default_width(390.0)
+            .order(egui::Order::Foreground)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.label(RichText::new("AUDIO").color(th.accent).monospace().strong().size(10.0));
+                if self.video_audio_tracks.is_empty() {
+                    ui.label(
+                        RichText::new("No audio tracks detected")
+                            .color(Color32::from_gray(150))
+                            .monospace()
+                            .size(10.0),
+                    );
+                } else {
+                    for (i, t) in self.video_audio_tracks.iter().enumerate() {
+                        let label = format!("{}. {}", i + 1, audio_track_label(t));
+                        if ui
+                            .selectable_label(self.video_audio_sel == i, label)
+                            .clicked()
+                        {
+                            pick_audio = Some(i);
+                        }
+                    }
+                }
+                ui.horizontal(|ui| {
+                    if retro_btn(ui, "RESCAN", th.btn_fg, th.btn_bg).clicked() {
+                        rescan = true;
+                    }
+                    ui.label(
+                        RichText::new("Discs report language tracks; local files include the title")
+                            .color(Color32::from_gray(120))
+                            .monospace()
+                            .size(8.0),
+                    );
+                });
+                ui.separator();
+                ui.label(
+                    RichText::new("SUBTITLES")
+                        .color(th.accent)
+                        .monospace()
+                        .strong()
+                        .size(10.0),
+                );
+                if ui
+                    .selectable_label(self.video_sub_sel.is_none(), "Off")
+                    .clicked()
+                {
+                    pick_sub = Some(None);
+                }
+                for (i, sub) in self.video_subs.iter().enumerate() {
+                    let label = if sub.external {
+                        format!("External: {}", sub.title)
+                    } else {
+                        let mut s = format!("Embedded: {}", sub.lang.to_ascii_uppercase());
+                        if !sub.title.is_empty() {
+                            s.push_str(" · ");
+                            s.push_str(&sub.title);
+                        }
+                        s
+                    };
+                    if ui
+                        .selectable_label(self.video_sub_sel == Some(i), label)
+                        .clicked()
+                    {
+                        pick_sub = Some(Some(i));
+                    }
+                }
+                if retro_btn(ui, "OPEN SUBS...", th.btn_fg, th.btn_bg).clicked() {
+                    open_subs = true;
+                }
+                if disc {
+                    ui.label(
+                        RichText::new(
+                            "Disc bitmap subtitles (VobSub/PGS) are not listed; use OPEN SUBS for a text file",
+                        )
+                        .color(Color32::from_gray(120))
+                        .monospace()
+                        .size(8.0),
+                    );
+                }
+                if is_dvd {
+                    ui.separator();
+                    if ui.checkbox(&mut self.dvd_upscale, "DVD Lanczos upscale").changed() {
+                        scale_toggle = true;
+                    }
+                }
+                ui.separator();
+                if retro_btn(ui, "CLOSE", th.btn_fg, th.btn_bg).clicked() {
+                    close_clicked = true;
+                }
+            });
+        if close_clicked {
+            open = false;
+        }
+
+        if let Some(i) = pick_audio {
+            if i < self.video_audio_tracks.len() {
+                self.video_audio_sel = i;
+                if let Some(p) = path.clone() {
+                    if let Some(t) = self.video_audio_tracks.get(i) {
+                        self.video_audio_choice.insert(p, t.ordinal);
+                        self.save_settings();
+                    }
+                }
+                let pos = self.video_position_now();
+                self.seek_video(pos);
+            }
+        }
+        if let Some(sel) = pick_sub {
+            self.video_sub_sel = sel;
+            self.video_subtitle = sel.map(|i| {
+                let s = &self.video_subs[i];
+                if s.external {
+                    crate::types::VideoSubtitle::External { path: s.path.clone() }
+                } else {
+                    crate::types::VideoSubtitle::Embedded {
+                        path: path.clone().unwrap_or_default(),
+                        ordinal: s.ordinal,
+                    }
+                }
+            });
+            if let Some(p) = path.clone() {
+                let key = match sel {
+                    None => "off".to_string(),
+                    Some(i) => {
+                        let s = &self.video_subs[i];
+                        if s.external {
+                            format!("external:{}", s.path)
+                        } else {
+                            format!("embedded:{}", s.ordinal)
+                        }
+                    }
+                };
+                self.video_sub_choice.insert(p, key);
+                self.save_settings();
+            }
+            let pos = self.video_position_now();
+            self.seek_video(pos);
+        }
+        if open_subs {
+            self.open_external_subs();
+        }
+        if scale_toggle {
+            self.save_settings();
+            let pos = self.video_position_now();
+            self.seek_video(pos);
+        }
+        if rescan {
+            if disc {
+                if let Some(p) = path.clone() {
+                    self.video_audio_tracks = crate::ffmpeg::disc_audio_tracks(&p);
+                    self.video_audio_sel = self
+                        .video_audio_tracks
+                        .iter()
+                        .position(|t| crate::ffmpeg::is_english(&t.lang))
+                        .unwrap_or(0);
+                }
+            } else if let Some(p) = path.clone() {
+                self.video_audio_tracks.clear();
+                let gen = self.video_gen;
+                let seek = self.video_position_now();
+                let _ = self.lib_tx.send(LibCmd::VideoOpen {
+                    path: p,
+                    gen,
+                    seek,
+                    subtitle: self.video_subtitle.clone(),
+                    sub_style: self.video_sub_style(),
+                    dvd_upscale: self.dvd_upscale,
+                    probe: true,
+                });
+            }
+            self.set_status("Rescanning movie tracks...");
+        }
+        self.video_tracks_open = open;
     }
 
     /// Small window for subtitle size, bottom margin and outline.
@@ -1225,6 +1455,7 @@ impl PlayerApp {
             let mut subs_cycle = false;
             let mut open_subs = false;
             let mut open_sub_style = false;
+            let mut open_tracks = false;
             let mut dvd_scale_toggle = false;
             // Shift-clicking INTRO / CREDS clears that marker instead of
             // setting it (egui 0.36 has no secondary-click sense).
@@ -1346,7 +1577,7 @@ impl PlayerApp {
                         }
                         let bar2 = egui::Rect::from_min_size(
                             scr.min + egui::vec2(0.0, 30.0),
-                            egui::vec2(sw.min(800.0), 26.0),
+                            egui::vec2(sw.min(930.0), 26.0),
                         );
                         ui.painter().rect_filled(
                             bar2,
@@ -1404,6 +1635,19 @@ impl PlayerApp {
                             .clicked()
                         {
                             open_sub_style = true;
+                        }
+                        if ui
+                            .put(
+                                egui::Rect::from_min_size(
+                                    scr.min + egui::vec2(796.0, 33.0),
+                                    egui::vec2(110.0, 20.0),
+                                ),
+                                egui::Button::new("TRACKS"),
+                            )
+                            .on_hover_text("Choose audio and subtitle tracks")
+                            .clicked()
+                        {
+                            open_tracks = true;
                         }
                         if self
                             .video_current
@@ -1573,6 +1817,7 @@ impl PlayerApp {
             if subs_cycle { self.cycle_video_subs(); }
             if open_subs { self.open_external_subs(); }
             if open_sub_style { self.video_sub_style_open = true; }
+            if open_tracks { self.video_tracks_open = true; }
             if dvd_scale_toggle {
                 self.dvd_upscale = !self.dvd_upscale;
                 self.save_settings();
@@ -1607,6 +1852,7 @@ impl PlayerApp {
         let mut subs_cycle = false;
         let mut open_subs = false;
         let mut open_sub_style = false;
+        let mut open_tracks = false;
         let mut dvd_scale_toggle = false;
         egui::Area::new(egui::Id::new("movie_win"))
             .fixed_pos(self.video_pos)
@@ -1657,7 +1903,7 @@ impl PlayerApp {
                             if ui.button(format!("Aspect {}", self.video_aspect.label())).clicked() { aspect_cycle = true; }
                             if ui.button("Fullscreen [Alt+Enter]").clicked() { self.set_video_fs(true); }
                         });
-                        ui.horizontal(|ui| {
+                        ui.horizontal_wrapped(|ui| {
                             if ui.button(self.video_audio_label()).on_hover_text("Cycle the audio track").clicked() {
                                 audio_cycle = true;
                             }
@@ -1669,6 +1915,9 @@ impl PlayerApp {
                             }
                             if ui.button("Sub style").on_hover_text("Subtitle size, position and outline").clicked() {
                                 open_sub_style = true;
+                            }
+                            if ui.button("Tracks").on_hover_text("Choose audio and subtitle tracks").clicked() {
+                                open_tracks = true;
                             }
                             if self.video_current.as_deref().map(crate::dvd::is_dvd).unwrap_or(false)
                                 && ui.button(if self.dvd_upscale { "DVD scale: on" } else { "DVD scale: off" })

@@ -1,6 +1,6 @@
 # MediaPlayerDOOM v3 for Linux
 
-![Version](https://img.shields.io/badge/version-3.2.53-blue)
+![Version](https://img.shields.io/badge/version-3.2.55-blue)
 ![Platform](https://img.shields.io/badge/platform-Linux%20x86__64-informational)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -79,14 +79,17 @@ This repository is the Linux port. It is tested on CachyOS and Arch with KDE Pla
 - Real time seeking for both formats
 - Smooth frame pacing with a 60 Hz movie present loop, a reused video texture, wall-clock presentation and slow audio drift correction
 - Embedded and sidecar subtitles with SUBS cycling and an OPEN SUBS picker
-- Audio track selection on local video files with the AUDIO button
+- Audio track selection on local video and disc titles with the AUDIO button
+- A MOVIE TRACKS window lists every audio and subtitle track explicitly
 - Audio and subtitle choices are remembered per video file
 - Optional auto-select of the first English subtitle
 - Subtitle styling with size, bottom margin and outline controls that are saved
 - DUMP TO MKV decrypts and remuxes every title with MakeMKV
 - DVD DUMP TO ISO uses the bundled CachyOS dvdbackup plus genisoimage, with MakeMKV as fallback
 - Blu-ray DUMP TO ISO uses MakeMKV backup with decryption and builds a full disc UDF 2.50 image with menus and extras, using the native writer built into the app
-- AACS and BD plus status with Disc ID, KEYDB match and MKB version
+- AACS and BD+ status with Disc ID, KEYDB match, MKB version and BD+ table count
+- BD+ tables in `~/.config/bdplus` are used automatically when libbdplus is available; otherwise the app falls back to MakeMKV
+- A user-supplied `libbdplus.so` can be placed in the app tools folder or `~/.local/lib` and is loaded through LIBBDPLUS_PATH
 - CHECK AACS re-reads the disc and updates the status
 - AACS keys are read from the user KEYDB and are never bundled with the app
 

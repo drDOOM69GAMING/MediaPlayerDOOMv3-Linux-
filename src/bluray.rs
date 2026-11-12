@@ -248,38 +248,121 @@ pub fn keydb_path() -> Option<std::path::PathBuf> {
     keydb_candidates().into_iter().find(|p| p.is_file())
 }
 
-/// libaacs only looks at the effective XDG config directory. If the user's
-/// KEYDB lives elsewhere, point ffmpeg's child environment at a small config
-/// directory containing a symlink to it.
-pub fn aacs_env() -> Option<std::path::PathBuf> {
+/// Usual locations for a user-supplied BD+ table set. libbdplus reads
+/// `$XDG_CONFIG_HOME/bdplus` with `convtab/` and `vm0/` inside it.
+pub fn bdplus_candidates() -> Vec<std::path::PathBuf> {
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let xdg = std::env::var_os("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.is_absolute());
+    let mut out = Vec::new();
+    if let Some(x) = &xdg {
+        out.push(x.join("bdplus"));
+    }
+    if let Some(h) = &home {
+        out.push(h.join(".config/bdplus"));
+        out.push(h.join(".bdplus"));
+    }
+    out.push(std::path::PathBuf::from("/etc/xdg/bdplus"));
+    out.push(std::path::PathBuf::from("/usr/share/bdplus"));
+    out
+}
+
+pub fn bdplus_path() -> Option<std::path::PathBuf> {
+    bdplus_candidates()
+        .into_iter()
+        .find(|p| p.is_dir() && (p.join("convtab").is_dir() || p.join("vm0").is_dir()))
+}
+
+pub fn bdplus_convtab_count() -> usize {
+    bdplus_path()
+        .and_then(|p| std::fs::read_dir(p.join("convtab")).ok())
+        .map(|rd| rd.flatten().count())
+        .unwrap_or(0)
+}
+
+/// A user-installed libbdplus.so can be dropped in the app tools folder or a
+/// local lib directory. LIBBDPLUS_PATH lets libbluray load it without a system
+/// package.
+pub fn bdplus_lib_path() -> Option<std::path::PathBuf> {
+    let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+    dirs.push(crate::util::data_dir().join("tools"));
+    dirs.push(crate::util::data_dir());
+    if let Some(h) = std::env::var_os("HOME") {
+        let h = std::path::PathBuf::from(h);
+        dirs.push(h.join(".local/lib"));
+    }
+    dirs.push(std::path::PathBuf::from("/usr/local/lib"));
+    for d in dirs {
+        if let Ok(rd) = std::fs::read_dir(d) {
+            for e in rd.flatten() {
+                let name = e.file_name().to_string_lossy().to_string();
+                if name.starts_with("libbdplus.so") {
+                    return Some(e.path());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// One config directory that carries both the user's AACS KEYDB and BD+
+/// tables, so libaacs and libbdplus see them even when they live outside the
+/// effective XDG config path.
+pub fn config_env() -> Option<std::path::PathBuf> {
     use std::sync::OnceLock;
     static ENV: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
     ENV.get_or_init(|| {
-        let key = keydb_path()?;
+        let key = keydb_path();
+        let bdplus = bdplus_path();
         let effective = std::env::var_os("XDG_CONFIG_HOME")
             .map(std::path::PathBuf::from)
             .filter(|p| p.is_absolute())
             .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config")))?;
-        if key == effective.join("aacs/KEYDB.cfg") {
+        let key_ok = key
+            .as_ref()
+            .map(|k| k == &effective.join("aacs/KEYDB.cfg"))
+            .unwrap_or(true);
+        let bdplus_ok = bdplus
+            .as_ref()
+            .map(|b| b == &effective.join("bdplus"))
+            .unwrap_or(true);
+        if key_ok && bdplus_ok {
             return None;
         }
-        let dir = crate::util::data_dir().join("aacs-env");
-        let aacs = dir.join("aacs");
-        std::fs::create_dir_all(&aacs).ok()?;
-        let link = aacs.join("KEYDB.cfg");
-        let _ = std::fs::remove_file(&link);
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&key, &link).ok()?;
-        #[cfg(not(unix))]
-        std::fs::copy(&key, &link).ok()?;
+        let dir = crate::util::data_dir().join("bd-env");
+        std::fs::create_dir_all(&dir).ok()?;
+        if let Some(k) = key {
+            let aacs = dir.join("aacs");
+            std::fs::create_dir_all(&aacs).ok()?;
+            let link = aacs.join("KEYDB.cfg");
+            let _ = std::fs::remove_file(&link);
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&k, &link).ok()?;
+            #[cfg(not(unix))]
+            std::fs::copy(&k, &link).ok()?;
+        }
+        if let Some(b) = bdplus {
+            let link = dir.join("bdplus");
+            let _ = std::fs::remove_file(&link);
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&b, &link).ok()?;
+            #[cfg(not(unix))]
+            {
+                let _ = (&b, &link);
+            }
+        }
         Some(dir)
     })
     .clone()
 }
 
 pub fn configure_command(cmd: &mut std::process::Command) {
-    if let Some(dir) = aacs_env() {
+    if let Some(dir) = config_env() {
         cmd.env("XDG_CONFIG_HOME", dir);
+    }
+    if let Some(lib) = bdplus_lib_path() {
+        cmd.env("LIBBDPLUS_PATH", lib);
     }
 }
 
@@ -293,6 +376,9 @@ pub struct DiscProtection {
     pub aacs: bool,
     pub aacs_handled: bool,
     pub bd_plus: bool,
+    pub bd_plus_handled: bool,
+    pub libbdplus: bool,
+    pub bdplus_tables: usize,
     pub aacs_mkb: Option<u32>,
     pub disc_id: Option<String>,
     pub keydb_present: bool,
@@ -314,7 +400,17 @@ impl DiscProtection {
         } else {
             "NO AACS"
         };
-        let bd = if self.bd_plus { "BD+ YES" } else { "BD+ NO" };
+        let bd = if !self.bd_plus {
+            "BD+ NO"
+        } else if self.bd_plus_handled {
+            "BD+ HANDLED"
+        } else if self.bdplus_tables > 0 && !self.libbdplus {
+            "BD+ TABLES / NO libbdplus"
+        } else if self.bdplus_tables > 0 {
+            "BD+ TABLES / NO KEY"
+        } else {
+            "BD+ NO TABLES"
+        };
         let key = if self.keydb_match {
             "KEYDB MATCH"
         } else if self.aacs {
@@ -326,7 +422,7 @@ impl DiscProtection {
     }
 
     pub fn needs_makemkv(&self) -> bool {
-        self.bd_plus || (self.aacs && !self.aacs_handled)
+        (self.bd_plus && !self.bd_plus_handled) || (self.aacs && !self.aacs_handled)
     }
 }
 
@@ -358,6 +454,8 @@ pub fn parse_bd_info(text: &str) -> DiscProtection {
                 }
             }
             "BD+ detected" => d.bd_plus = parse_yes(val),
+            "BD+ handled" => d.bd_plus_handled = parse_yes(val),
+            "libbdplus detected" => d.libbdplus = parse_yes(val),
             _ => {}
         }
     }
@@ -404,12 +502,12 @@ fn run_bd_info(source: &str) -> Option<String> {
     use std::io::Read;
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
-    let mut child = Command::new("bd_info")
-        .arg(source)
+    let mut cmd = Command::new("bd_info");
+    cmd.arg(source)
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
+        .stderr(Stdio::null());
+    configure_command(&mut cmd);
+    let mut child = cmd.spawn().ok()?;
     let mut stdout = child.stdout.take()?;
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -445,6 +543,7 @@ pub fn protection_info(source: &str) -> Option<DiscProtection> {
         return None;
     }
     info.keydb_present = keydb_path().is_some();
+    info.bdplus_tables = bdplus_convtab_count();
     if let (Some(id), Some(path)) = (info.disc_id.clone(), keydb_path()) {
         let (found, entries) = keydb_lookup_in(&path, &id);
         info.keydb_match = found;

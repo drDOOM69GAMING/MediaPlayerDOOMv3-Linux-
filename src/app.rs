@@ -382,6 +382,7 @@ pub(crate) struct PlayerApp {
     pub(crate) video_sub_margin: u32,
     pub(crate) video_sub_outline: u32,
     pub(crate) video_sub_style_open: bool,
+    pub(crate) video_tracks_open: bool,
     pub(crate) video_auto_subs: bool,
     pub(crate) dvd_upscale: bool,
     pub(crate) video_audio_choice: HashMap<String, usize>,
@@ -970,6 +971,7 @@ impl PlayerApp {
             video_sub_margin: subtitle_margin,
             video_sub_outline: subtitle_outline,
             video_sub_style_open: false,
+            video_tracks_open: false,
             video_auto_subs,
             dvd_upscale,
             video_audio_choice,
@@ -3455,6 +3457,9 @@ impl eframe::App for PlayerApp {
         }
         if self.video_sub_style_open {
             self.show_subtitle_style_window(&ctx);
+        }
+        if self.video_tracks_open {
+            self.show_video_tracks_window(&ctx);
         }
         if self.lyrics.is_some() {
             self.ui_lyrics();

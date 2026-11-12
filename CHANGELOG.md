@@ -1,5 +1,23 @@
 # Changelog
 
+## v3.2.55
+
+- The Blu-ray deck now detects BD+ tables in `~/.config/bdplus` and counts the convtab files.
+- `bd_info` now parses `libbdplus detected` and `BD+ handled` instead of treating every BD+ disc as unhandled.
+- The app uses a combined XDG config directory with symlinks to AACS and BD+ data, so both libraries see the user's files.
+- A user-supplied `libbdplus.so` in the app tools folder or `~/.local/lib` is exposed through `LIBBDPLUS_PATH`.
+- MakeMKV is only marked as required when AACS is missing or BD+ is not handled; the deck explains whether libbdplus or the tables are missing.
+- BD+ tables alone are not enough without libbdplus; the UI now says so.
+
+## v3.2.54
+
+- Added a MOVIE TRACKS window that lists every detected audio track and lets you pick one directly.
+- The same window lists subtitle tracks with Off, embedded and external options.
+- Added a RESCAN button for audio tracks; a local file re-probes, a disc re-reads its title languages.
+- The DVD scale toggle is also available inside the tracks window.
+- The pause/loading poster shows the DVD output resolution and whether Lanczos is active.
+- IMDb is the primary poster source; Wikipedia remains the fallback.
+
 ## v3.2.53
 
 - DVD and Blu-ray cover art now appears in the same sidebar cover area as music art.

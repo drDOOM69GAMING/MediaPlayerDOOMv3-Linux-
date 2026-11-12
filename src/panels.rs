@@ -1184,10 +1184,45 @@ impl PlayerApp {
                                             .size(8.0),
                                     );
                                 }
+                                if p.bd_plus {
+                                    let (msg, color) = if p.bd_plus_handled {
+                                        (
+                                            "BD+ handled by libbdplus; the local tables are in use",
+                                            Color32::from_rgb(120, 255, 150),
+                                        )
+                                    } else if p.bdplus_tables > 0 && !p.libbdplus {
+                                        (
+                                            "BD+ tables found; install libbdplus to use them before MakeMKV",
+                                            Color32::from_rgb(255, 190, 120),
+                                        )
+                                    } else if p.bdplus_tables == 0 && p.libbdplus {
+                                        (
+                                            "libbdplus found but no BD+ tables in ~/.config/bdplus",
+                                            Color32::from_rgb(255, 190, 120),
+                                        )
+                                    } else {
+                                        (
+                                            "BD+ fallback: full-disc ISO dump uses MakeMKV backup --decrypt",
+                                            Color32::from_rgb(255, 190, 120),
+                                        )
+                                    };
+                                    ui.label(RichText::new(msg).color(color).monospace().size(8.0));
+                                }
+                                if p.bdplus_tables > 0 {
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "BD+ TABLES  {} convtab file(s)",
+                                            p.bdplus_tables
+                                        ))
+                                        .color(Color32::from_rgb(150, 220, 150))
+                                        .monospace()
+                                        .size(8.0),
+                                    );
+                                }
                                 if p.needs_makemkv() {
                                     ui.label(
                                         RichText::new(
-                                            "BD+ / missing key: full-disc ISO dump uses MakeMKV backup --decrypt",
+                                            "Missing key or unhandled BD+: full-disc ISO dump uses MakeMKV backup --decrypt",
                                         )
                                         .color(Color32::from_rgb(255, 190, 120))
                                         .monospace()
@@ -2642,7 +2677,7 @@ impl PlayerApp {
                 ui.label(RichText::new("Sub style ........... SUB STYLE sets size, bottom margin and outline; the values are saved").color(dim).monospace());
                 ui.label(RichText::new("Remember ............ The audio and subtitle choice is remembered for each video file").color(dim).monospace());
                 ui.label(RichText::new("Auto English ........ Enable it in SUBTITLE STYLE to turn on the first English subtitle").color(dim).monospace());
-                ui.label(RichText::new("Disc audio .......... AUDIO cycles the audio tracks of a DVD or Blu-ray title").color(dim).monospace());
+                ui.label(RichText::new("Disc audio .......... AUDIO cycles tracks; TRACKS lists every one and can rescan").color(dim).monospace());
                 ui.label(RichText::new("DVD upscale ......... DVD SCALE upscales to 1620x1080 with Lanczos and CAS sharpening").color(dim).monospace());
                 ui.label(RichText::new("Disc cover .......... The movie poster shows in the sidebar and while loading or paused; local art, IMDb or Wikipedia").color(dim).monospace());
                 ui.label(RichText::new("Disc subtitles ...... Embedded VobSub/PGS subtitles are not rendered; use OPEN SUBS for a text file").color(dim).monospace());
@@ -2652,7 +2687,7 @@ impl PlayerApp {
                 ui.label(RichText::new("Play ................ Drive or ISO; English audio preferred; subtitles off; fullscreen player with seek bar and STOP").color(dim).monospace());
                 ui.label(RichText::new("DVD seeking ......... Software MPEG-2 decode + CPU filters; metadata probed once so seeks do not thrash the drive").color(dim).monospace());
                 ui.label(RichText::new("Blu-ray ............. VAAPI hardware decode + GPU scale/pad/RGBA; libbluray streamer gives real time seeking").color(dim).monospace());
-                ui.label(RichText::new("AACS / BD+ .......... Deck shows Disc ID, AACS key/KEYDB match and BD+ status; CHECK AACS re-reads the disc").color(dim).monospace());
+                ui.label(RichText::new("AACS / BD+ .......... Disc ID, KEYDB match and BD+ status; tables in ~/.config/bdplus need libbdplus").color(dim).monospace());
                 ui.label(RichText::new("DVD tools ........... libdvdread + libdvdnav + libdvdcss; CachyOS/Arch: sudo pacman -S libdvdread libdvdnav libdvdcss").color(dim).monospace());
                 ui.label(RichText::new("DVD tools (Debian) .. libdvdread4 + libdvdnav4 + libdvdcss2; sudo apt install libdvdread4 libdvdnav4 libdvdcss2").color(dim).monospace());
                 ui.label(RichText::new("Dump tools .......... dvdbackup (bundled CachyOS build) + genisoimage; MakeMKV is used for MKV and as ISO fallback").color(dim).monospace());
